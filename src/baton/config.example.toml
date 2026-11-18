@@ -102,3 +102,4 @@ L = ["claude-opus", "codex-astra", "agy"]
 # max_hours = 12
 
 # Optional per-agent setting: daily_run_budget = 100 (positive integer, UTC day).
+# Optional per-agent setting: weight = 2 (positive integer; omitted members use 1).

@@ -2,6 +2,7 @@
 
 import fcntl
 import json
+import math
 import os
 import uuid
 from contextlib import contextmanager
@@ -48,9 +49,7 @@ class RunStore:
                     for key in ("tokens", "duration_s"):
                         value = row[key]
                         if value is not None and (
-                            type(value) not in (int, float)
-                            or value < 0
-                            or not __import__("math").isfinite(value)
+                            type(value) not in (int, float) or value < 0 or not math.isfinite(value)
                         ):
                             raise ValueError(f"invalid {key}")
                     if row["tokens"] is not None and type(row["tokens"]) is not int:
@@ -91,7 +90,7 @@ class RunStore:
             )
             return ident
 
-    def select(self, agents, *, claim=False, now=None):
+    def select(self, agents, *, claim=False, now=None, weighted=None):
         """Select and optionally reserve capacity using one serialized snapshot."""
         from contextlib import nullcontext
 
@@ -105,7 +104,11 @@ class RunStore:
             ]
             if not eligible:
                 return None, None
-            agent = eligible[0]
+            from baton.router import select_by_weight
+
+            if weighted is None:
+                weighted = any(a.weight is not None for a in agents)
+            agent = select_by_weight(eligible, counts, weighted=weighted)
             ident = None
             if claim:
                 ident = uuid.uuid4().hex

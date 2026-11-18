@@ -231,11 +231,23 @@ def test_invalid_auto(tmp_path: Path, auto: str, error: str) -> None:
 
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "2"])
 def test_invalid_daily_budget(value, tmp_path):
-    from baton.config import _parse_agent, ConfigError
+    from baton.config import ConfigError, _parse_agent
 
     with pytest.raises(ConfigError, match="positive integer"):
         _parse_agent(
             tmp_path / "config.toml",
             "a",
             {"adapter": "claude", "command": "claude", "daily_run_budget": value},
+        )
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "2"])
+def test_invalid_weight(value, tmp_path):
+    from baton.config import ConfigError, _parse_agent
+
+    with pytest.raises(ConfigError, match="positive integer"):
+        _parse_agent(
+            tmp_path / "config.toml",
+            "a",
+            {"adapter": "claude", "command": "claude", "weight": value},
         )

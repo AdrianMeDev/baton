@@ -55,7 +55,9 @@ class RoutedAdapter:
         say(self.out, f"Tier {self.route.tier}, agent {agent.name} ({agent.adapter})")
 
     def argv(self, prompt: str) -> list[str]:
-        agent, _ = self.runs.select(list(self._eligible()))
+        agent, _ = self.runs.select(
+            list(self._eligible()), weighted=any(a.weight is not None for a in self.route.agents)
+        )
         if agent is not None:
             self._announce(agent)
             return make_adapter(agent).argv(prompt)
@@ -89,7 +91,9 @@ class RoutedAdapter:
         self.exhausted = False
         remaining = list(self._eligible())
         while remaining:
-            agent, attempt = self.runs.select(remaining, claim=True)
+            agent, attempt = self.runs.select(
+                remaining, claim=True, weighted=any(a.weight is not None for a in self.route.agents)
+            )
             if agent is None:
                 break
             remaining = [a for a in remaining if a.name != agent.name]

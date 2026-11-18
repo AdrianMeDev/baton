@@ -40,6 +40,7 @@ class AgentConfig:
     provider: str | None = None
     limit_patterns: tuple[str, ...] | None = None
     daily_run_budget: int | None = None
+    weight: int | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,9 @@ def _parse_agent(path: Path, name: str, raw: object) -> AgentConfig:
 
     model = _require_str(raw, "model", where) if "model" in raw else None
     provider = _require_str(raw, "provider", where) if "provider" in raw else None
+    weight = raw.get("weight")
+    if "weight" in raw and (type(weight) is not int or weight < 1):
+        raise ConfigError(f"{where}: weight must be a positive integer")
     daily_run_budget = raw.get("daily_run_budget")
     if "daily_run_budget" in raw and (type(daily_run_budget) is not int or daily_run_budget < 1):
         raise ConfigError(f"{where}: daily_run_budget must be a positive integer")
@@ -180,6 +184,7 @@ def _parse_agent(path: Path, name: str, raw: object) -> AgentConfig:
         model=model,
         provider=provider,
         daily_run_budget=daily_run_budget,
+        weight=weight,
         limit_patterns=tuple(patterns) if patterns is not None else None,
     )
 

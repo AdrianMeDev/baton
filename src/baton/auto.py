@@ -96,7 +96,7 @@ class MilestoneHooks:
     next: Callable[[bool], int]  # argument: resume from a partial diff
     pr: Callable[[bool], tuple[int, str]]  # argument: merge; returns (exit code, output)
     # Blocks while every agent of the role's route is in cooldown; arguments: role, size S/M/L.
-    wait: Callable[[str, str | None], Literal["ready", "stopped"]]
+    wait: Callable[[str, str | None], str]  # ready, stopped, or budget reset diagnostic
     now: Callable[[], datetime]
     after_merge: Callable[[Path, Plan], str | None] | None = None
 

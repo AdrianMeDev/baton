@@ -132,7 +132,7 @@ Updated: 2026-11-18
 - **Depends on:** M8, M9
 - **Size:** L, ~7 commits
 
-### M11 [~] Auswertung und Verteilung
+### M11 [x] Auswertung und Verteilung
 - **Goal:** Sehen, wer wie viel arbeitet, und Kontingente vorausschauend verteilen.
 - **Includes:** `runs.jsonl`, `baton stats` (Läufe, Dauer, Tokens je Agent), Tages-Budgets und Gewichte im Router
 - **Done when:** `stats` zeigt die Verteilung; überschrittenes Budget lenkt um
@@ -174,3 +174,5 @@ Updated: 2026-11-18
 - 2026-11-18: M6 accepted: [GitHub Actions run 44385734356](https://github.com/AdrianMeDev/baton/actions/runs/44385734356) passed for `0f8ac1a` on Python 3.12 and 3.14 (lint, formatting, tests and doctor). Local package build and 483 tests on each Python version were already verified. The quality-loop milestone is complete; commits remain manual.
 - 2026-11-18: M7 done (baton next --commit/--push/--worktree: milestone branch `baton/m<n>-<name>`, one commit per step with the plan message, roadmap status in the first and last commit; acceptance test builds a 3-step milestone branch where every commit passes its Verify)
 - 2026-11-18: M8 done (baton plan: next open or named milestone, plan_commits route by milestone size, validation of structure, 3–8 steps, Verify and Size per step, one retry with the errors, otherwise no plan; acceptance test plans the example roadmap and feeds the result to baton next)
+
+- 2026-11-18: M11 abgeschlossen: Nutzungsjournal, Statistik, UTC-Tagesbudgets und gewichtete Verteilung.

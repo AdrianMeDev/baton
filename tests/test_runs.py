@@ -35,8 +35,9 @@ def test_invalid_journal_has_line_diagnostic(tmp_path):
 
 
 def test_atomic_budget_and_utc_rollover(tmp_path):
-    from baton.config import AgentConfig
     from datetime import timedelta
+
+    from baton.config import AgentConfig
 
     store = RunStore(tmp_path / "runs.jsonl")
     agent = AgentConfig("limited", "claude", "claude", daily_run_budget=1)

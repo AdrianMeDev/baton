@@ -491,9 +491,10 @@ def test_replay_every_real_m1_recording(path):
     "name,total", [("claude", 22583), ("codex", 21454), ("agy", 10288), ("pi", 3202)]
 )
 def test_recorded_token_totals(name, total):
-    from baton.adapter import _reported_tokens
     import json
     from pathlib import Path
+
+    from baton.adapter import _reported_tokens
 
     raw = json.loads((Path(__file__).parent / "fixtures" / name / "ok.json").read_text())["stdout"]
     assert _reported_tokens(name.title() + "Adapter", raw) == total
@@ -508,8 +509,9 @@ def test_recorded_token_totals(name, total):
     ],
 )
 def test_optional_usage(usage, expected):
-    from baton.adapter import _reported_tokens
     import json
+
+    from baton.adapter import _reported_tokens
 
     event = json.dumps({"type": "turn.completed", "usage": usage})
     assert _reported_tokens("CodexAdapter", event) == expected
