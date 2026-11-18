@@ -7,10 +7,13 @@ baton never commits; the user reviews and commits.
 from __future__ import annotations
 
 import datetime
+import shlex
+import sys
 from pathlib import Path
 from typing import TextIO
 
-from baton.adapter import Adapter
+from baton.adapter import Adapter, ClaudeAdapter
+from baton.config import AgentConfig, Config, ConfigError, find_config_path, load_config
 from baton.gate import GateResult, apply_gate, check_gate
 from baton.git import PLAN_FILENAME, GitError, dirty_paths, head
 from baton.plan import (
@@ -191,3 +194,55 @@ def run_next(
 
     _report_success(out, plan, step, repo, verify, result.cost)
     return EXIT_OK
+
+
+def pick_claude_agent(config: Config) -> AgentConfig:
+    """M3 uses one fixed agent: the first configured agent with ``adapter = "claude"``."""
+    for agent in config.agents.values():
+        if agent.adapter == "claude":
+            return agent
+    raise ConfigError(f'{config.location.path}: no agent with adapter = "claude" configured')
+
+
+def _dry_run(repo: Path, adapter: ClaudeAdapter, out: TextIO) -> int:
+    """Print the prompt and argv for the first open step; change nothing."""
+    plan_path = repo / PLAN_FILENAME
+    if not plan_path.is_file():
+        _say(out, f"No {PLAN_FILENAME} in {repo}. Create one with `/plan-commits <task>`.")
+        return EXIT_STOPPED
+    text = plan_path.read_text(encoding="utf-8")
+    plan = parse_plan(text)
+    step = first_open_step(plan)
+    if step is None:
+        _say(out, "No open steps left in the plan.")
+        return EXIT_STOPPED
+    prompt = implement_prompt(plan, step, step_text(text, step))
+    _say(out, f"Step {step.number}/{len(plan.steps)}: {step.message}")
+    _say(out, "Command (cwd = repo root):")
+    _say(out, "  " + " ".join(shlex.quote(a) for a in adapter.argv("<prompt>")))
+    _say(out, "Prompt:")
+    _say(out, prompt)
+    return EXIT_OK
+
+
+def run_next_command(
+    repo: Path,
+    *,
+    config_path: str | None = None,
+    agent_timeout: float = DEFAULT_AGENT_TIMEOUT,
+    verify_timeout: float = DEFAULT_VERIFY_TIMEOUT,
+    dry_run: bool = False,
+    out: TextIO | None = None,
+) -> int:
+    """CLI entry: resolve the agent from the config, then run (or dry-run) one step."""
+    out = out or sys.stdout
+    try:
+        config = load_config(find_config_path(config_path))
+        agent = pick_claude_agent(config)
+        adapter = ClaudeAdapter(agent.command, agent.model)
+        if dry_run:
+            return _dry_run(repo, adapter, out)
+    except (ConfigError, PlanError, OSError) as exc:
+        _say(out, f"Error: {exc}")
+        return EXIT_FAILED
+    return run_next(repo, adapter, out, agent_timeout=agent_timeout, verify_timeout=verify_timeout)
