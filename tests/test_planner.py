@@ -10,7 +10,7 @@ from baton.git import head
 from baton.limits import LimitStore, UsageLimit
 from baton.next import EXIT_FAILED, EXIT_OK, EXIT_STOPPED
 from baton.plan import parse_plan
-from baton.planner import RoutedPlanner, run_plan
+from baton.planner import RoutedPlanner, run_plan, run_plan_command
 from baton.roadmap import parse_roadmap
 from baton.router import Route
 
@@ -263,3 +263,73 @@ def test_exhausted_route_writes_nothing(repo: Path, monkeypatch):
     assert code == EXIT_FAILED
     assert "No plan was written" in out.getvalue()
     assert not (repo / ".agent-plan.md").exists()
+
+
+PLAN_CONFIG = """[agents.small]
+adapter = "claude"
+command = "small-claude"
+[agents.big]
+adapter = "codex"
+command = "big-codex"
+[routes.plan_commits]
+M = ["small"]
+L = ["big"]
+"""
+
+
+def plan_command(repo: Path, config: Path, **kw) -> tuple[int, str]:
+    out = io.StringIO()
+    code = run_plan_command(repo, config_path=str(config), out=out, **kw)
+    return code, out.getvalue()
+
+
+@pytest.fixture
+def config(tmp_path_factory) -> Path:
+    path = tmp_path_factory.mktemp("config") / "config.toml"
+    path.write_text(PLAN_CONFIG, encoding="utf-8")
+    return path
+
+
+def test_dry_run_prints_milestone_command_and_prompt(repo: Path, config: Path):
+    code, out = plan_command(repo, config, dry_run=True)
+    assert code == EXIT_OK, out
+    assert "Milestone: M1 – Widgets (docs/ROADMAP.md, tracked)" in out
+    assert "Tier M, agent small (claude)" in out  # tier from the milestone's Size
+    assert "small-claude" in out
+    assert "### M1 [ ] Widgets" in out
+    assert not (repo / ".agent-plan.md").exists()
+    assert "agent-plan" not in (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+
+
+def test_dry_run_tier_and_milestone_override(tmp_path: Path, config: Path):
+    repo = make_repo(tmp_path, roadmap=ROADMAP.replace("### M1 [ ]", "### M1 [x]"))
+    code, out = plan_command(repo, config, dry_run=True, milestone_id="M2")
+    assert code == EXIT_OK, out
+    assert "Tier L, agent big (codex)" in out  # M2 has Size L
+    code, out = plan_command(repo, config, dry_run=True, milestone_id="M2", tier="M")
+    assert "Tier M, agent small (claude)" in out
+
+
+def test_missing_route_exits_with_clear_message(repo: Path, tmp_path_factory):
+    config = tmp_path_factory.mktemp("legacy") / "config.toml"
+    config.write_text('[agents.fake]\nadapter = "claude"\ncommand = "claude"\n')
+    for dry_run in (True, False):
+        code, out = plan_command(repo, config, dry_run=dry_run)
+        assert code == EXIT_FAILED
+        assert "configure [routes.plan_commits] M" in out
+    assert not (repo / ".agent-plan.md").exists()
+
+
+def test_unknown_agent_exits_with_clear_message(repo: Path, config: Path):
+    code, out = plan_command(repo, config, agent_name="nope", dry_run=True)
+    assert code == EXIT_FAILED
+    assert "unknown agent 'nope'" in out
+
+
+def test_command_routes_and_writes_the_plan(repo: Path, config: Path, monkeypatch):
+    planner = FakePlanner(VALID)
+    monkeypatch.setattr("baton.routed.make_adapter", lambda agent: planner)
+    code, out = plan_command(repo, config)
+    assert code == EXIT_OK, out
+    assert "Tier M, agent small (claude)" in out
+    assert parse_plan((repo / ".agent-plan.md").read_text("utf-8")).milestone.id == "M1"

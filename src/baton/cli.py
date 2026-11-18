@@ -8,6 +8,7 @@ from baton.config import ROUTE_TIERS, ConfigError, find_config_path, load_config
 from baton.doctor import run_doctor
 from baton.limits import LimitStateError, LimitStore, parse_duration
 from baton.next import DEFAULT_AGENT_TIMEOUT, DEFAULT_VERIFY_TIMEOUT, run_next_command
+from baton.planner import run_plan_command
 from baton.probe import DEFAULT_PROMPT, DEFAULT_TIMEOUT, run_probe_command, run_recheck_command
 from baton.status import run_status
 
@@ -103,6 +104,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="implies --commit; work in a dedicated git worktree of the milestone branch",
     )
+    plan = subparsers.add_parser(
+        "plan", help="plan the next open roadmap milestone headless into .agent-plan.md"
+    )
+    plan.add_argument(
+        "--path", default=".", metavar="DIR", help="repository root (default: current directory)"
+    )
+    plan.add_argument(
+        "--milestone", metavar="ID", help="plan this milestone (e.g. M3) instead of the next one"
+    )
+    plan.add_argument("--agent", metavar="NAME", help="use a named agent from the config")
+    plan.add_argument(
+        "--tier", choices=ROUTE_TIERS, help="override the milestone size used for routing"
+    )
+    plan.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_AGENT_TIMEOUT,
+        metavar="S",
+        help="seconds before the agent is killed (default: %(default)s)",
+    )
+    plan.add_argument(
+        "--dry-run", action="store_true", help="print the command and prompt, change nothing"
+    )
     return parser
 
 
@@ -143,6 +167,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             commit=args.commit,
             push=args.push,
             worktree=args.worktree,
+        )
+    if args.command == "plan":
+        return run_plan_command(
+            Path(args.path),
+            config_path=args.config,
+            milestone_id=args.milestone,
+            agent_name=args.agent,
+            tier=args.tier,
+            timeout=args.timeout,
+            dry_run=args.dry_run,
         )
     if args.command == "recheck":
         return run_recheck_command(args.agent, config_path=args.config, timeout=args.timeout)

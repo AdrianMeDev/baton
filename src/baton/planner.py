@@ -7,10 +7,15 @@ one retry with the validation errors -> write the plan, or stop without touching
 from __future__ import annotations
 
 import datetime
+import shlex
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
 from baton.adapter import Adapter, AgentResult
+from baton.config import ConfigError, find_config_path, load_config
 from baton.git import (
     PLAN_FILENAME,
     GitError,
@@ -20,9 +25,9 @@ from baton.git import (
     head,
     is_tracked,
 )
-from baton.limits import LimitStateError
+from baton.limits import LimitStateError, LimitStore
 from baton.next import DEFAULT_AGENT_TIMEOUT, EXIT_FAILED, EXIT_OK, EXIT_STOPPED
-from baton.plan import MilestoneRef, PlanError, parse_plan
+from baton.plan import MilestoneRef, PlanError, Tracking, parse_plan
 from baton.plan_check import PlanHeader, assemble_plan, validate_plan
 from baton.prompt import plan_prompt, plan_retry_prompt
 from baton.roadmap import (
@@ -36,6 +41,7 @@ from baton.roadmap import (
     set_milestone_status,
 )
 from baton.routed import RoutedAdapter, say
+from baton.router import resolve_route
 
 ATTEMPTS = 2  # the first plan plus one retry with the validation errors
 
@@ -131,6 +137,32 @@ def _run_planner(
     return result
 
 
+@dataclass(frozen=True)
+class _Target:
+    roadmap_path: Path
+    roadmap_text: str
+    rel: str  # the roadmap path relative to the repository root
+    tracking: Tracking
+    milestone: Milestone
+
+    def prompt(self) -> str:
+        return plan_prompt(self.roadmap_text, self.milestone, self.rel, self.tracking)
+
+
+def _target(repo: Path, milestone_id: str | None) -> _Target:
+    roadmap_path = find_roadmap(repo)
+    if roadmap_path is None:
+        raise _Stop(EXIT_STOPPED, f"No docs/ROADMAP.md or ROADMAP.md in {repo}.")
+    text = roadmap_path.read_text(encoding="utf-8")
+    milestone = _select(parse_roadmap(text), milestone_id)
+    rel = roadmap_path.relative_to(repo).as_posix()
+    tracking: Tracking = "tracked" if is_tracked(repo, rel) else "local"
+    return _Target(roadmap_path, text, rel, tracking, milestone)
+
+
+_ERRORS = (ConfigError, GitError, LimitStateError, PlanError, RoadmapError, OSError)
+
+
 def run_plan(
     repo: Path,
     adapter: Adapter,
@@ -141,31 +173,46 @@ def run_plan(
     timeout: float = DEFAULT_AGENT_TIMEOUT,
 ) -> int:
     """Plan the next open (or the given) milestone of ``repo``; returns the process exit code."""
+    return _run_plan(
+        repo,
+        lambda milestone: adapter,
+        out,
+        milestone_id=milestone_id,
+        today=today,
+        timeout=timeout,
+    )
+
+
+def _run_plan(
+    repo: Path,
+    select_adapter: Callable[[Milestone], Adapter],
+    out: TextIO,
+    *,
+    milestone_id: str | None,
+    today: str | None,
+    timeout: float,
+) -> int:
     date = today or datetime.date.today().isoformat()
     plan_path = repo / PLAN_FILENAME
     try:
-        roadmap_path = find_roadmap(repo)
-        if roadmap_path is None:
-            raise _Stop(EXIT_STOPPED, f"No docs/ROADMAP.md or ROADMAP.md in {repo}.")
-        roadmap_text = roadmap_path.read_text(encoding="utf-8")
-        milestone = _select(parse_roadmap(roadmap_text), milestone_id)
+        target = _target(repo, milestone_id)
+        milestone = target.milestone
         _check_existing_plan(plan_path)
         dirty = dirty_paths(repo)
         if dirty:
             listing = "".join(f"\n  {p}" for p in dirty)
             raise _Stop(EXIT_STOPPED, f"The working tree has uncommitted changes:{listing}")
 
-        rel = roadmap_path.relative_to(repo).as_posix()
-        tracking = "tracked" if is_tracked(repo, rel) else "local"
-        say(out, f"Planning {milestone.id} – {milestone.name} ({rel}, {tracking})")
+        say(out, f"Planning {milestone.id} – {milestone.name} ({target.rel}, {target.tracking})")
         header = PlanHeader(
             created=date,
             branch=current_branch(repo) or "(detached)",
             base=head(repo),
-            milestone=MilestoneRef(milestone.id, milestone.name, rel, tracking),
+            milestone=MilestoneRef(milestone.id, milestone.name, target.rel, target.tracking),
         )
+        adapter = select_adapter(milestone)
 
-        prompt = plan_prompt(roadmap_text, milestone, rel, tracking)
+        prompt = target.prompt()
         current = prompt
         errors: list[str] = []
         for attempt in range(1, ATTEMPTS + 1):
@@ -184,8 +231,9 @@ def run_plan(
         with plan_path.open("w", encoding="utf-8", newline="\n") as f:
             f.write(text)
         ensure_excluded(repo)
-        if tracking == "local" and milestone.status == "open":
-            save_roadmap(roadmap_path, set_milestone_status(roadmap_text, milestone.id, "pending"))
+        if target.tracking == "local" and milestone.status == "open":
+            updated = set_milestone_status(target.roadmap_text, milestone.id, "pending")
+            save_roadmap(target.roadmap_path, updated)
         plan = parse_plan(text)
         say(out, f"Wrote {PLAN_FILENAME}: {plan.title} ({len(plan.steps)} steps)")
         for step in plan.steps:
@@ -195,6 +243,49 @@ def run_plan(
     except _Stop as stop:
         say(out, str(stop))
         return stop.code
-    except (GitError, LimitStateError, PlanError, RoadmapError, OSError) as exc:
+    except _ERRORS as exc:
+        say(out, f"Error: {exc}")
+        return EXIT_FAILED
+
+
+def run_plan_command(
+    repo: Path,
+    *,
+    config_path: str | None = None,
+    milestone_id: str | None = None,
+    agent_name: str | None = None,
+    tier: str | None = None,
+    timeout: float = DEFAULT_AGENT_TIMEOUT,
+    dry_run: bool = False,
+    out: TextIO | None = None,
+) -> int:
+    """CLI entry: route ``plan_commits`` by the milestone's size and plan it (or preview it)."""
+    out = out or sys.stdout
+
+    def select_adapter(milestone: Milestone) -> RoutedPlanner:
+        config = load_config(find_config_path(config_path))
+        route = resolve_route(
+            config, "plan_commits", tier=tier, step_size=milestone.size, agent_name=agent_name
+        )
+        return RoutedPlanner(route, LimitStore(), out)
+
+    if not dry_run:
+        return _run_plan(
+            repo, select_adapter, out, milestone_id=milestone_id, today=None, timeout=timeout
+        )
+    try:
+        target = _target(repo, milestone_id)
+        milestone = target.milestone
+        say(out, f"Milestone: {milestone.id} – {milestone.name} ({target.rel}, {target.tracking})")
+        adapter = select_adapter(milestone)
+        say(out, "Command (cwd = repo root):")
+        say(out, "  " + " ".join(shlex.quote(a) for a in adapter.argv("<prompt>")))
+        say(out, "Prompt:")
+        say(out, target.prompt())
+        return EXIT_OK
+    except _Stop as stop:
+        say(out, str(stop))
+        return stop.code
+    except _ERRORS as exc:
         say(out, f"Error: {exc}")
         return EXIT_FAILED
