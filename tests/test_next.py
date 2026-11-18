@@ -958,3 +958,113 @@ def test_dry_run_does_not_start_review_or_require_its_route(repo, chain):
     agents["first"] = ClaudeAdapter()
     assert invoke_chain(repo, chain, dry_run=True)[0] == EXIT_OK
     assert not agents["reviewer"].prompts
+
+
+def test_cli_quality_loop_with_partial_handoff_and_independent_review(
+    repo, tmp_path_factory, capsys
+):
+    import json
+    import sys
+
+    from baton.cli import main
+    from baton.limits import LimitStore
+
+    support = tmp_path_factory.mktemp("quality-loop")
+    executables = support / "executables"
+    executables.mkdir()
+    events = support / "events"
+
+    def executable(name, action, response):
+        path = executables / name
+        path.write_text(
+            f"#!{sys.executable}\nimport json, sys\nfrom pathlib import Path\n"
+            f'with Path({str(events)!r}).open("a") as log: log.write({name!r} + "\\n")\n'
+            "prompt = sys.argv[sys.argv.index('-p') + 1]\n"
+            + action
+            + "\n"
+            + f"print(json.dumps({response!r}))\n"
+        )
+        path.chmod(0o755)
+        return str(path)
+
+    commands = {}
+    commands["limited"] = executable(
+        "limited",
+        "Path('a.txt').write_text('partial implementation\\n')\n"
+        "Path('notes.txt').write_text('preserved partial notes\\n')",
+        {"is_error": True, "result": "Usage limit reached"},
+    )
+    commands["implementer"] = executable(
+        "implementer",
+        "assert 'partial implementation' in prompt and 'notes.txt' in prompt\n"
+        "assert Path('notes.txt').read_text() == 'preserved partial notes\\n'\n"
+        "Path('a.txt').write_text('implemented but broken\\n')",
+        {"is_error": False, "result": "implemented"},
+    )
+    commands["fixer"] = executable(
+        "fixer",
+        "assert 'Outcome: exit 1' in prompt and 'quality-failure' in prompt\n"
+        "Path('a.txt').write_text('first repair still broken\\n')",
+        {"is_error": False, "result": "first fix"},
+    )
+    commands["strong"] = executable(
+        "strong",
+        "assert 'Outcome: exit 1' in prompt and 'quality-failure' in prompt\n"
+        "assert Path('a.txt').read_text() == 'first repair still broken\\n'\n"
+        "Path('a.txt').write_text('correct\\n')\n"
+        "Path('new.txt').write_text('new implementation content\\n')",
+        {"is_error": False, "result": "L fix"},
+    )
+    commands["reviewer"] = executable(
+        "reviewer",
+        f"assert Path.cwd() != Path({str(repo)!r})\n"
+        "assert not Path('a.txt').exists()\n"
+        "assert 'new implementation content' in prompt and 'preserved partial notes' in prompt\n"
+        "assert 'correct' in prompt\nPath('scratch').write_text('temporary reviewer edit')",
+        {"is_error": False, "result": '{"findings": []}'},
+    )
+    providers = {
+        "limited": "anthropic",
+        "implementer": "openai",
+        "fixer": "anthropic",
+        "strong": "openai",
+        "reviewer": "google",
+    }
+    config = support / "quality.toml"
+    config.write_text(
+        "\n".join(
+            f'[agents.{name}]\nadapter="claude"\ncommand={json.dumps(command)}\n'
+            f"provider={json.dumps(providers[name])}\n"
+            for name, command in commands.items()
+        )
+        + """
+[routes.implement]
+M=["limited", "implementer"]
+[routes.fix]
+M=["fixer"]
+L=["strong"]
+[routes.review]
+M=["limited", "fixer", "implementer", "strong", "reviewer"]
+"""
+    )
+    write_plan(repo, verify="echo checked >> checks; echo quality-failure; grep -qx correct a.txt")
+    before = head(repo)
+    assert main(["--config", str(config), "next", "--path", str(repo)]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert events.read_text().splitlines() == [
+        "limited",
+        "implementer",
+        "fixer",
+        "strong",
+        "reviewer",
+    ]
+    assert (repo / "checks").read_text().splitlines() == ["checked"] * 3
+    assert (repo / "notes.txt").read_text() == "preserved partial notes\n"
+    assert (repo / "new.txt").read_text() == "new implementation content\n"
+    assert not (repo / "scratch").exists()
+    assert "limited" in LimitStore().active()
+    assert out.index("same-tier repair") < out.index("Escalating repair to tier L")
+    assert "Independent reviewer: reviewer" in out and "No findings." in out
+    assert plan_of(repo).steps[0].status == "pending"
+    assert "after 2 repair attempts; review reviewer: critical=0" in plan_of(repo).log[-1]
+    assert head(repo) == before

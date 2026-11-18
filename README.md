@@ -49,9 +49,10 @@ L = ["claude-sonnet", "agy", "codex"]
 
 `baton next` tries the implementation chain in order, skipping active cooldowns and continuing
 with the next available agent after a usage-limit failure. Each configured name runs at most once
-per invocation. `--agent NAME` pins a single-agent route, so it never falls back to another name.
-Planning, fixing and review commands belong to later milestones. Agents-only configs use the
-first configured Claude agent by default.
+per implementation or fix attempt. `--agent NAME` pins implementation only; fixes and review
+still use their configured role routes. Agents-only configs use the first configured Claude
+agent by default and retain verification without automatic repair or review. Planning commands
+belong to later milestones.
 
 ## Usage
 
@@ -116,18 +117,80 @@ implementation route.
    untracked paths. Ordinary errors and timeouts stop the run without switching.
 4. **Verify.** baton runs the step's **Verify** command itself (`bash -c` in the repo root); its
    result, not the agent's, decides.
-5. **Mark and report.** The step becomes `[~] (on <HEAD>)`, a Log line is added, and the report
-   lists the changed files, the checks and the commit commands. baton never commits or pushes.
+5. **Repair.** In routed configs, a failed Verify invokes the effective tier's `fix` route in
+   the existing working tree with the failing command, exit/timeout and bounded output. baton
+   reruns the original Verify command. A second failure invokes `routes.fix.L` once, including
+   when the starting tier is already L. A third failure stops with the latest diagnostic and
+   preserved edits. Agent errors, changed HEAD or exhausted routes stop immediately.
+6. **Review.** After successful Verify, or explicit omission of Verify, routed steps require a
+   valid independent review. baton excludes every provider that participated in implementation
+   or fixes, including partial work before quota handoff. Each reviewer receives the final diff
+   and complete new-file contents in its prompt and runs in a fresh temporary directory. Quota
+   failures can try the next eligible reviewer; ordinary errors or invalid findings stop the run.
+7. **Mark and report.** The step becomes `[~] (on <HEAD>)`, a Log line is added, and the report
+   lists changed files, verification, reviewer and findings grouped as **CRITICAL**, **WARNING**
+   and **INFORMATIONAL**, followed by commit commands. A valid review with critical findings
+   still reaches `[~]`: you decide whether to commit. The Log records reviewer and severity
+   counts. baton never commits or pushes.
 
 Exit code 0 means the step is ready to commit. Steps without Verify are reported as unverified.
-Exit code 1 indicates an agent, Verify, plan or config error. Agent or Verify failures leave the
-step open and record the failure in the Log. Exit code 2 means the run stopped before starting
-an agent because of the gate, a dirty tree, a missing plan or no open steps.
-`--timeout` (default 1800 s) limits the agent, `--verify-timeout` (default 900 s) the Verify
-command. `--dry-run` prints the step, the command and the prompt and changes nothing.
+Exit code 1 indicates an agent, Verify, review, plan or config error. Failed verification or
+review leaves the step open and records the failure in the Log. Exit code 2 means the run stopped
+before starting an agent because of the gate, a dirty tree, a missing plan or no open steps.
+`--timeout` (default 1800 s) limits each implementation, fix or review agent call;
+`--verify-timeout` (default 900 s) limits the Verify command. `--dry-run` prints the step, the command and the prompt and changes nothing.
 
 The agent can edit your working tree and may use your account quota. Review the diff before
 committing.
+
+### Fix and independent review routes
+
+Configure each tier you use. Fixes use the selected implementation tier first and L on escalation;
+review uses the selected implementation tier. For example, with the bundled agent definitions:
+
+```toml
+[routes.fix]
+S = ["claude-haiku", "codex"]
+M = ["claude-sonnet", "agy", "codex"]
+L = ["claude-opus", "codex-astra", "agy"]
+
+[routes.review]
+S = ["claude-opus", "codex-astra", "agy"]
+M = ["claude-opus", "codex-astra", "agy"]
+L = ["claude-opus", "codex-astra", "agy"]
+```
+
+Opus and Astra are example L fix agents. Routes resolve only when needed: a passing Verify
+requires no fix route, while review is required even when Verify is absent. Missing required
+routes produce a diagnostic. Cooldowns and quota handoffs apply within each attempt; a handoff
+does not consume another repair attempt. The maximum is one implementation attempt and two
+repair attempts, with up to three Verify runs; each attempt may try multiple configured agents.
+
+Provider identity is compared after trimming whitespace and ignoring case. Names sharing a
+provider, such as Claude aliases and pi configured with `provider = "anthropic"`, cannot review
+one another. Claude defaults to `anthropic`, Codex to `openai`; set the actual model provider for
+agy and pi, including models accessed through OpenRouter. An unknown author's provider or no
+eligible reviewer stops the run. Include a third independent provider if fixes may use both
+Anthropic and OpenAI. `--agent` does not override either fix or review selection.
+
+Reviewers must return JSON such as:
+
+```json
+{"findings": [{"severity": "warning", "message": "Missing boundary test", "path": "tests/test_widget.py", "line": 12}]}
+```
+
+`{"findings": []}` is a valid clean review. Empty text, prose, malformed JSON or invalid severity
+values are review failures. Review inputs contain complete untracked files and a final patch;
+symlinks are represented by their targets and binary new files by base64. The temporary working
+directory prevents accidental edits to the candidate through relative paths; it is not a security
+sandbox. A changed candidate or HEAD during review invalidates the result. `--dry-run` starts no
+implementation, fix or review subprocess and does not resolve review routes.
+
+To replay the full offline quality loop, including partial quota work and provider exclusion:
+
+```bash
+uv run pytest -q tests/test_next.py -k cli_quality_loop
+```
 
 ### Cooldowns and recovery
 

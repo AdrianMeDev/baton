@@ -12,7 +12,17 @@
 # a usable reset time uses 1h. Manual: baton cooldown claude-sonnet 2h
 # Inspect: baton status; after manual login or reset: baton recheck claude-sonnet
 # Implementation routes try each name once, skip cooldowns, and hand off only on limits.
-# --agent pins one name. Login/account selection stay manual.
+# --agent pins implementation only; fix/review still use their role routes.
+# On Verify failure: same-tier fix, reverify, then one L fix and final reverify.
+# Starting at L still allows two L repair attempts. Quota handoffs stay within an attempt.
+# Review runs after passing or absent Verify in an empty temporary directory, using the
+# final diff and new-file contents. Critical/warning/informational findings inform manual commit.
+# Review excludes ALL implementation/fix providers, including partial work before handoff.
+# Provider names are stripped and case-insensitive; aliases must name the actual provider.
+# Include an independent third provider when implementation/fixes may use Anthropic and OpenAI.
+# Missing required routes, unknown author identity, unavailable review or invalid JSON leave
+# the step open. Legacy agents-only configs do not automatically fix or review.
+# --dry-run starts no agents. Login/account selection and commits stay manual.
 # Model IDs and aliases below are examples. Adjust them to match your CLI and account.
 
 [agents.claude-opus]
