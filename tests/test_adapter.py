@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from baton.adapter import AgyAdapter, ClaudeAdapter, CodexAdapter
+from baton.adapter import AgyAdapter, ClaudeAdapter, CodexAdapter, PiAdapter
 from baton.recording import load
 from baton.runner import RunResult
 
@@ -249,5 +249,132 @@ def test_agy_nonzero_exit_with_success_payload_fails():
 def test_agy_timeout_takes_precedence_over_output():
     run = replace(_run_result("ok.json", "agy"), timed_out=True, duration_s=30)
     res = AgyAdapter().parse(run)
+    assert not res.ok
+    assert res.error == "timed out after 30s"
+
+
+@pytest.mark.parametrize("model", ["ollama/qwen2.5-coder", "openrouter/deepseek/deepseek-chat"])
+def test_pi_argv_keeps_provider_qualified_model(model):
+    assert PiAdapter("my-pi", model).argv("do it") == [
+        "my-pi",
+        "-p",
+        "do it",
+        "--mode",
+        "json",
+        "--model",
+        model,
+    ]
+
+
+def test_pi_run_uses_default_model_and_shared_runner(monkeypatch, tmp_path):
+    runner = Mock(return_value=_run_result("ok.json", "pi"))
+    monkeypatch.setattr("baton.adapter.run_command", runner)
+    assert PiAdapter().run("do it", tmp_path, 17).ok
+    runner.assert_called_once_with(["pi", "-p", "do it", "--mode", "json"], tmp_path, 17)
+
+
+def test_pi_parse_success_fixture():
+    run = _run_result("ok.json", "pi")
+    res = PiAdapter().parse(run)
+    assert res.ok
+    assert res.text == "OK"
+    assert res.cost == pytest.approx(0.00048135)
+    assert res.raw == run.stdout
+
+
+def test_pi_parse_exit_zero_error_fixture():
+    run = _run_result("error.json", "pi")
+    assert run.exit_code == 0
+    res = PiAdapter().parse(run)
+    assert not res.ok
+    assert "stopped (error)" in res.error
+    assert "Unknown Model" in res.error
+
+
+def test_pi_extracts_final_text_and_counts_each_assistant_message_once():
+    earlier = {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content": [{"type": "text", "text": "Working"}],
+        "usage": {"cost": {"total": 0.01}},
+    }
+    final = {
+        "role": "assistant",
+        "stopReason": "stop",
+        "content": [
+            {"type": "thinking", "thinking": "private"},
+            {"type": "text", "text": "Done"},
+            {"type": "text", "text": "Verified"},
+        ],
+        "usage": {"cost": {"total": 0.02}},
+    }
+    events = [
+        {"type": "message_end", "message": earlier},
+        {"type": "message_end", "message": {"role": "toolResult", "content": []}},
+        {"type": "message_end", "message": final},
+        {"type": "agent_end", "messages": [earlier, final]},
+        {"type": "agent_settled", "aborted": False},
+    ]
+    res = PiAdapter().parse(RunResult("\n".join(map(json.dumps, events)), "", 0, False, 1))
+    assert res.ok
+    assert res.text == "Done\nVerified"
+    assert res.cost == pytest.approx(0.03)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "diagnostic"),
+    [
+        ("", "missing agent_settled"),
+        ("[]", "invalid pi event"),
+        ('{"type":"message_end"}', "invalid pi message"),
+        ('{"type":"agent_settled","aborted":true}', "pi run aborted"),
+        ('{"type":"agent_settled"}', "no final assistant message"),
+    ],
+)
+def test_pi_invalid_or_incomplete_result(stdout, diagnostic):
+    res = PiAdapter().parse(RunResult(stdout, "", 0, False, 1))
+    assert not res.ok
+    assert diagnostic in res.error
+
+
+def test_pi_truncated_run_with_assistant_text_fails():
+    run = _run_result("ok.json", "pi")
+    incomplete = "\n".join(run.stdout.splitlines()[:-1])
+    res = PiAdapter().parse(replace(run, stdout=incomplete))
+    assert not res.ok
+    assert "missing agent_settled" in res.error
+    res = PiAdapter().parse(replace(run, stdout=incomplete + '\n{"type":'))
+    assert not res.ok
+    assert "invalid JSON" in res.error
+
+
+@pytest.mark.parametrize(
+    ("reason", "error", "diagnostic"),
+    [("length", "", "stopped (length)"), ("stop", "provider error", "provider error")],
+)
+def test_pi_partial_assistant_response_fails(reason, error, diagnostic):
+    message = {
+        "role": "assistant",
+        "stopReason": reason,
+        "errorMessage": error,
+        "content": [{"type": "text", "text": "Partial answer"}],
+    }
+    stdout = json.dumps({"type": "message_end", "message": message})
+    stdout += '\n{"type":"agent_settled","aborted":false}\n'
+    res = PiAdapter().parse(RunResult(stdout, "", 0, False, 1))
+    assert not res.ok
+    assert diagnostic in res.error
+
+
+def test_pi_nonzero_exit_with_completed_run_fails():
+    run = replace(_run_result("ok.json", "pi"), exit_code=2, stderr="exit detail")
+    res = PiAdapter().parse(run)
+    assert not res.ok
+    assert res.error == "exit code 2: exit detail"
+
+
+def test_pi_timeout_takes_precedence_over_output():
+    run = replace(_run_result("ok.json", "pi"), timed_out=True, duration_s=30)
+    res = PiAdapter().parse(run)
     assert not res.ok
     assert res.error == "timed out after 30s"

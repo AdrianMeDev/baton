@@ -194,3 +194,93 @@ class AgyAdapter:
 
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
         return self.parse(run_command(self.argv(prompt), repo, timeout))
+
+
+class PiAdapter:
+    """Run pi with JSONL events and pass its provider-qualified model through."""
+
+    def __init__(self, command: str = "pi", model: str | None = None) -> None:
+        self.command = command
+        self.model = model
+
+    def argv(self, prompt: str) -> list[str]:
+        argv = [self.command, "-p", prompt, "--mode", "json"]
+        if self.model:
+            argv += ["--model", self.model]
+        return argv
+
+    def parse(self, result: RunResult) -> AgentResult:
+        raw = result.stdout
+        if result.timed_out:
+            return _failure(f"timed out after {result.duration_s:.0f}s", raw)
+
+        assistant: dict[str, Any] | None = None
+        cost: float | None = None
+        settled = False
+        for line_number, line in enumerate(raw.split("\n"), 1):
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                return _failure(f"invalid JSON on output line {line_number}", raw)
+            if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+                return _failure(f"invalid pi event on output line {line_number}", raw)
+
+            match event["type"]:
+                case "agent_start":
+                    settled = False
+                    assistant = None
+                case "message_end":
+                    message = event.get("message")
+                    if not isinstance(message, dict):
+                        return _failure(f"invalid pi message on output line {line_number}", raw)
+                    if message.get("role") == "assistant":
+                        assistant = message
+                        message_cost = _pi_message_cost(message)
+                        if message_cost is not None:
+                            cost = (cost or 0.0) + message_cost
+                case "agent_settled":
+                    if event.get("aborted") is True:
+                        return _failure("pi run aborted", raw)
+                    settled = True
+
+        if assistant is not None:
+            reason = assistant.get("stopReason")
+            error = assistant.get("errorMessage")
+            if reason != "stop" or (isinstance(error, str) and error):
+                detail = error if isinstance(error, str) else ""
+                return _failure(f"pi assistant stopped ({reason}): {detail}".rstrip(": "), raw)
+        if result.exit_code != 0:
+            detail = result.stderr.strip()[-ERROR_TAIL_CHARS:]
+            return _failure(f"exit code {result.exit_code}: {detail}".rstrip(": "), raw)
+        if not settled:
+            return _failure("missing agent_settled event", raw)
+        if assistant is None:
+            return _failure("pi run has no final assistant message", raw)
+
+        content = assistant.get("content")
+        if not isinstance(content, list):
+            return _failure("invalid pi assistant content", raw)
+        parts = [
+            part["text"]
+            for part in content
+            if isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        ]
+        if not parts:
+            return _failure("pi assistant message has no text", raw)
+        return AgentResult(ok=True, text="\n".join(parts), cost=cost, raw=raw)
+
+    def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
+        return self.parse(run_command(self.argv(prompt), repo, timeout))
+
+
+def _pi_message_cost(message: dict[str, Any]) -> float | None:
+    usage = message.get("usage")
+    cost = usage.get("cost") if isinstance(usage, dict) else None
+    total = cost.get("total") if isinstance(cost, dict) else None
+    if isinstance(total, int | float) and not isinstance(total, bool):
+        return float(total)
+    return None
