@@ -573,3 +573,34 @@ def test_stop_in_final_step_prevents_publication_and_can_resume(world, merge):
     result = world.run(merge=merge)
     assert result.outcome == ("merged" if merge else "published")
     assert len(world.next_calls) == 1
+
+
+def test_exhausted_budget_prevents_new_planning(world):
+    result = world.run(budget=Budget(NOW, max_steps=1, steps=1))
+    assert result.outcome == "stopped"
+    assert "budget reached" in result.reason
+    assert world.plan_calls == 0
+
+
+def test_planner_retry_checks_elapsed_budget(world):
+    world.plan_codes = [EXIT_EXHAUSTED]
+
+    def wait(role, size):
+        world.now += timedelta(hours=1)
+        return "ready"
+
+    world.wait = wait
+    result = world.run(budget=Budget(NOW, max_hours=1))
+    assert "budget reached" in result.reason
+    assert world.plan_calls == 1
+
+
+def test_last_allowed_step_finalizes_before_next_planning(world):
+    world.write_plan(s1="[x] – abc1234")
+    budget = Budget(NOW, max_steps=1)
+    assert world.run(budget=budget).outcome == "merged"
+    assert world.pr_calls == [True]
+    world.plan_path.unlink()
+    result = world.run(budget=budget)
+    assert "budget reached" in result.reason
+    assert world.plan_calls == 0

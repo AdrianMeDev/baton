@@ -162,7 +162,7 @@ def run_milestone(
     try:
         plan = _read_plan(repo)
         if not _adoptable(repo, plan):
-            plan = _plan_next(repo, hooks, out, stop_requested)
+            plan = _plan_next(repo, hooks, out, stop_requested, budget)
             if isinstance(plan, MilestoneResult):
                 return plan
         assert plan is not None
@@ -270,6 +270,7 @@ def _plan_next(
     hooks: MilestoneHooks,
     out: TextIO,
     stop_requested: Callable[[], bool],
+    budget: Budget,
 ) -> Plan | MilestoneResult:
     """Plan the next roadmap milestone; a result ends the milestone."""
     roadmap_path = find_roadmap(repo)
@@ -286,6 +287,8 @@ def _plan_next(
     while True:
         if stop_requested():
             return MilestoneResult("stopped", milestone.id, "stop requested")
+        if (reason := budget.exceeded(hooks.now())) is not None:
+            return MilestoneResult("stopped", milestone.id, reason)
         say(out, f"Planning {milestone.id} – {milestone.name}")
         code = hooks.plan()
         if code == EXIT_OK:
@@ -328,6 +331,7 @@ def default_hooks(
     sleep: Callable[[float], None],
     store: AutoStore,
     out: TextIO,
+    budget: Budget | None = None,
 ) -> MilestoneHooks:
     """The real `baton plan`, `baton next --worktree --push` and `baton pr` as hooks."""
 
@@ -361,6 +365,11 @@ def default_hooks(
             now=now,
             sleep=sleep,
             stop_requested=lambda: store.read(repo).stop_requested,
+            deadline=(
+                budget.started + timedelta(hours=budget.max_hours)
+                if budget is not None and budget.max_hours is not None
+                else None
+            ),
             out=out,
         )
 
@@ -438,6 +447,7 @@ def run_auto_command(
         sleep=sleep,
         store=store,
         out=out,
+        budget=budget,
     )
     while True:
         result = run_milestone(repo, hooks, store, budget, merge=merge, out=out)

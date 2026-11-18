@@ -78,3 +78,21 @@ def test_stop_request_ends_wait(tmp_path):
 def test_other_agents_cooldowns_are_ignored(tmp_path):
     LimitStore(tmp_path / "limits.json").set("other", START + timedelta(hours=1))
     assert wait(tmp_path, Clock(), agents=("a",))[0] == "ready"
+
+
+def test_run_deadline_caps_cooldown_sleep(tmp_path):
+    store = LimitStore(tmp_path / "limits.json")
+    store.set("a", START + timedelta(hours=2))
+    clock = Clock()
+    result = wait_for_reset(
+        ["a"],
+        store,
+        now=clock.now,
+        sleep=clock.sleep,
+        stop_requested=lambda: False,
+        out=io.StringIO(),
+        deadline=START + timedelta(seconds=17),
+    )
+    assert "budget reached" in result
+    assert clock.sleeps == [17]
+    assert clock.now() == START + timedelta(seconds=17)
