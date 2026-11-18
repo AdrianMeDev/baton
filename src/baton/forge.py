@@ -99,3 +99,66 @@ def publish(repo: Path, target: str, base: str, branch: str, title: str, body: s
             str(path),
         )
     return {"url": url, "state": "OPEN"}
+
+
+def merge_when_ready(
+    repo: Path, target: str, url: str, revision: str, *, timeout: float = 300, interval: float = 5
+) -> None:
+    """Wait for checks and merge only the expected revision, then confirm the result."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while True:
+        data = json.loads(
+            gh(
+                repo,
+                "pr",
+                "view",
+                url,
+                "--repo",
+                target,
+                "--json",
+                "state,headRefOid,statusCheckRollup",
+            )
+        )
+        if data["headRefOid"] != revision:
+            raise ForgeError("PR head changed; publish and review the new revision")
+        if data["state"] == "MERGED":
+            return
+        if data["state"] != "OPEN":
+            raise ForgeError("PR is no longer open")
+        checks = data.get("statusCheckRollup") or []
+        good = True
+        for check in checks:
+            if check.get("__typename") == "StatusContext":
+                status = check.get("state")
+                if status in ("ERROR", "FAILURE"):
+                    raise ForgeError("CI failed")
+                good = good and status == "SUCCESS"
+            else:
+                conclusion = check.get("conclusion")
+                if conclusion in (
+                    "FAILURE",
+                    "TIMED_OUT",
+                    "CANCELLED",
+                    "ACTION_REQUIRED",
+                    "STARTUP_FAILURE",
+                    "STALE",
+                ):
+                    raise ForgeError("CI failed")
+                good = (
+                    good
+                    and check.get("status") == "COMPLETED"
+                    and conclusion in ("SUCCESS", "NEUTRAL", "SKIPPED")
+                )
+        if checks and good:
+            break
+        if time.monotonic() >= deadline:
+            raise ForgeError("CI wait timed out (pending or absent checks); PR remains open")
+        time.sleep(min(interval, max(0, deadline - time.monotonic())))
+    gh(repo, "pr", "merge", url, "--repo", target, "--squash", "--match-head-commit", revision)
+    confirmed = json.loads(
+        gh(repo, "pr", "view", url, "--repo", target, "--json", "state,headRefOid")
+    )
+    if confirmed.get("state") != "MERGED" or confirmed.get("headRefOid") != revision:
+        raise ForgeError("Merge was not confirmed for the expected revision")

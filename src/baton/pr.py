@@ -160,6 +160,13 @@ def run_pr(repo: Path, *, merge: bool = False, out=None) -> int:
             if result.get("headRefOid") != revision:
                 raise PlanError("Merged PR does not cover the current revision")
             return 0
+        if merge:
+            if report.blockers:
+                raise PlanError("; ".join(report.blockers))
+            from baton.forge import merge_when_ready
+
+            merge_when_ready(repo, target, url, revision)
+            print(f"Merged: {url}", file=out)
         return 0
     except (PlanError, GitError, ForgeError, OSError, ValueError, KeyError) as exc:
         print(f"{url + ': ' if url else ''}Stopped: {exc}", file=out)
