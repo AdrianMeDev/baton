@@ -66,7 +66,7 @@ from baton.review import (
 from baton.roadmap import RoadmapError
 from baton.routed import RoutedAdapter, say
 from baton.router import resolve_route
-from baton.verify import VerifyResult, run_verify
+from baton.verify import VerifyResult, _clean, run_verify
 from baton.worktree import ensure_worktree, mirror_plan
 
 EXIT_OK = 0
@@ -339,6 +339,9 @@ def _run_next(
         say(out, f"Step {step.number}/{len(plan.steps)}: {step.message}")
         if commit and not _enter_branch(repo, plan, out):
             return EXIT_STOPPED
+        if commit and not _clean(step.verify):
+            say(out, "Automatic commits require a Verify command; the step stays open.")
+            return EXIT_FAILED
         adapter = select_adapter(step)
         raw_step = step_text(plan_path.read_text("utf-8"), step)
         prompt = implement_prompt(plan, step, raw_step)

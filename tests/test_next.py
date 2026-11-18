@@ -1143,8 +1143,8 @@ def test_commit_flag_commits_with_step_message(repo, git_identity) -> None:
 def test_commit_flag_without_verify_command(repo, git_identity) -> None:
     write_plan(repo, verify="")
     code, out = run(repo, FakeAdapter(action=edit), commit=True)
-    assert code == EXIT_OK and "not verified" in out
-    assert plan_of(repo).steps[0].status == "done"
+    assert code == EXIT_FAILED and "require a Verify command" in out
+    assert plan_of(repo).steps[0].status == "open"
 
 
 def test_without_commit_flag_behaviour_is_unchanged(repo, git_identity) -> None:
@@ -1536,3 +1536,16 @@ def test_active_plan_tampering_restored(repo, mode, worktree, git_identity):
     active = worktree_path_for(repo, "baton/demo") if worktree else repo
     assert (active / "new.txt").read_text() == "hello\n"
     assert not (active / "compromised").exists()
+
+
+@pytest.mark.parametrize("mode", ["commit", "push", "worktree"])
+def test_automatic_commit_requires_verify(repo, mode, git_identity):
+    write_plan(repo, verify="")
+    before = head(repo)
+    adapter = FakeAdapter(action=edit)
+    code, output = run(repo, adapter, **{mode: True})
+    assert code == EXIT_FAILED
+    assert "require a Verify command" in output
+    assert not adapter.prompts
+    assert head(repo) == before
+    assert plan_of(repo).steps[0].status == "open"
