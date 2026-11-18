@@ -1,0 +1,39 @@
+# Example baton configuration. Copy to ~/.config/baton/config.toml and adjust.
+#
+# Each [agents.<name>] table describes one agent CLI.
+#   adapter  one of: claude, codex, agy, pi
+#   command  executable looked up in PATH
+#   model    optional model name passed to the agent
+
+[agents.claude-opus]
+adapter = "claude"
+command = "claude"
+model = "opus"
+
+[agents.claude-sonnet]
+adapter = "claude"
+command = "claude"
+model = "sonnet"
+
+[agents.claude-haiku]
+adapter = "claude"
+command = "claude"
+model = "haiku"
+
+[agents.codex]
+adapter = "codex"
+command = "codex"
+
+[agents.agy]
+adapter = "agy"
+command = "agy"
+
+[agents.pi-ollama]
+adapter = "pi"
+command = "pi"
+model = "ollama/qwen2.5-coder"
+
+[agents.pi-openrouter]
+adapter = "pi"
+command = "pi"
+model = "openrouter/deepseek/deepseek-chat"
