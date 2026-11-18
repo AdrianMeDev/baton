@@ -54,7 +54,7 @@ Updated: 2026-11-18
 
 ## Milestones
 
-### M0 [ ] Walking skeleton
+### M0 [~] Walking skeleton
 - **Goal:** Lauffähiges, getestetes Grundgerüst mit Konfiguration.
 - **Includes:** uv-Projekt, `baton --version`, `config.toml` laden + Beispiel, `baton doctor` (Agenten, CLIs im PATH), ruff, pytest, CI, `.zed/tasks.json`
 - **Done when:** `uv run baton doctor` zeigt die Beispiel-Agenten; CI grün
