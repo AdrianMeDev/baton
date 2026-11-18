@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from baton.config import AgentConfig
 from baton.runner import RunResult, run_command
 
 ERROR_TAIL_CHARS = 500
@@ -23,6 +24,10 @@ class AgentResult:
 
 class Adapter(Protocol):
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult: ...
+
+
+class CommandAdapter(Adapter, Protocol):
+    def argv(self, prompt: str) -> list[str]: ...
 
 
 def _failure(message: str, raw: str = "") -> AgentResult:
@@ -284,3 +289,8 @@ def _pi_message_cost(message: dict[str, Any]) -> float | None:
     if isinstance(total, int | float) and not isinstance(total, bool):
         return float(total)
     return None
+
+
+def make_adapter(agent: AgentConfig) -> CommandAdapter:
+    adapters = {"claude": ClaudeAdapter, "codex": CodexAdapter, "agy": AgyAdapter, "pi": PiAdapter}
+    return adapters[agent.adapter](agent.command, agent.model)
