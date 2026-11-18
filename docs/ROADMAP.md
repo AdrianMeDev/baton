@@ -69,7 +69,7 @@ Updated: 2026-11-18
 - **Depends on:** M0
 - **Size:** M, ~5 commits
 
-### M2 [ ] Plan-Engine und Commit-Sperre
+### M2 [~] Plan-Engine und Commit-Sperre
 - **Goal:** `.agent-plan.md` und `ROADMAP.md` exakt im Skill-Format lesen und schreiben.
 - **Includes:** Parser/Writer (Status, Stufe, Verify, Milestone), Commit-Sperre wie `next`, `baton status`
 - **Done when:** Tests mit Beispielplänen und temporären Git-Repos decken alle Zustände ab
