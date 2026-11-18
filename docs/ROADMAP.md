@@ -45,7 +45,8 @@ Updated: 2026-11-18
 | Risk | Impact | Mitigation |
 |---|---|---|
 | Headless-Flags/Ausgaben der CLIs ändern sich | Adapter brechen | isolierte Adapter, aufgezeichnete Ausgaben als Testdaten, `baton doctor`/`probe` |
-| `agy -p` ohne Terminal teils ohne Ausgabe (bekannter Bug) | Antigravity unbrauchbar | Spike M1; Fallback Pseudo-Terminal (`pty`) |
+| `agy -p` ohne Terminal teils ohne Ausgabe (bekannter Bug) | Antigravity unbrauchbar | M1: mit agy 1.5.11 nicht reproduzierbar, Pipes genügen; Fallback Pseudo-Terminal (`--tty`) bleibt, siehe `docs/adapters.md` |
+| pi liefert bei Fehlern (z. B. unbekanntes Modell) Exit 0 und hat kein Read-only-Flag | Fehler unbemerkt, Schreibzugriff | Fehler im JSON-Strom prüfen (`stopReason`/`errorMessage`), Schutz über Worktree und HEAD-Prüfung |
 | Limit-Meldungen variieren | Wechsel greift nicht | Muster je Agent, Reset-Zeit parsen, `baton cooldown <agent> 2h` |
 | Agenten laufen ohne Rückfragen | ungewollte Änderungen | eigener Worktree, Schreibrechte nur im Projekt, HEAD-Prüfung, kein git im Agenten-Prompt |
 | Auto-Modus produziert schlechten Code am Stück | Fehler landen in `main` | Verify + CI + Review durch anderen Anbieter, Merge nur bei grün, Stopp-Regeln |
@@ -61,7 +62,7 @@ Updated: 2026-11-18
 - **Depends on:** –
 - **Size:** S, ~4 commits
 
-### M1 [~] Spike: Headless-Verhalten der CLIs
+### M1 [x] Spike: Headless-Verhalten der CLIs
 - **Goal:** Gesichertes Wissen über Aufruf, Rechte, Ausgabe und Limit-Meldungen von claude, codex, agy, pi.
 - **Includes:** `docs/adapters.md`, `baton probe <agent>`, echte Ausgaben unter `tests/fixtures/`, Entscheidung zum agy-Terminal-Problem
 - **Done when:** je CLI ein Probe-Lauf und ein Fehler-/Limit-Beispiel als Testdatei
@@ -154,3 +155,4 @@ Updated: 2026-11-18
 - 2026-11-18: roadmap created
 - 2026-11-18: Auto-Modus ergänzt (M7–M10), Statistik/Doku nach hinten verschoben (M11–M12)
 - 2026-11-18: M0 done (walking skeleton: --version, config, doctor, CI, Zed tasks, README)
+- 2026-11-18: M1 done (baton probe, runner with PTY mode, recorded fixtures for claude/codex/agy/pi, docs/adapters.md, agy needs no PTY)
