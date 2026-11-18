@@ -13,6 +13,7 @@ from pathlib import Path
 ADAPTERS = ("claude", "codex", "agy", "pi")
 ROUTE_ROLES = ("plan_roadmap", "plan_commits", "implement", "fix", "review")
 ROUTE_TIERS = ("S", "M", "L")
+NOTIFIERS = ("none", "notify-send", "ntfy")
 ENV_VAR = "BATON_CONFIG"
 
 
@@ -41,10 +42,22 @@ class AgentConfig:
 
 
 @dataclass(frozen=True)
+class AutoConfig:
+    """``[auto]`` defaults for `baton auto`; every key is optional."""
+
+    notify: str = "none"
+    ntfy_url: str | None = None
+    merge: bool = True
+    max_steps: int | None = None
+    max_hours: float | None = None
+
+
+@dataclass(frozen=True)
 class Config:
     location: ConfigLocation
     agents: dict[str, AgentConfig] = field(default_factory=dict)
     routes: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    auto: AutoConfig = field(default_factory=AutoConfig)
 
 
 def bundled_config_path() -> Path:
@@ -92,7 +105,39 @@ def load_config(location: ConfigLocation) -> Config:
 
     agents = {name: _parse_agent(path, name, raw) for name, raw in raw_agents.items()}
     routes = _parse_routes(path, data.get("routes", {}), agents)
-    return Config(location=location, agents=agents, routes=routes)
+    auto = _parse_auto(path, data.get("auto", {}))
+    return Config(location=location, agents=agents, routes=routes, auto=auto)
+
+
+def _parse_auto(path: Path, raw: object) -> AutoConfig:
+    where = f"{path}: [auto]"
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a table")
+    unknown = set(raw) - {"notify", "ntfy_url", "merge", "max_steps", "max_hours"}
+    if unknown:
+        raise ConfigError(f"{where}: unknown keys: {', '.join(sorted(unknown))}")
+    notify = _require_str(raw, "notify", where) if "notify" in raw else "none"
+    if notify not in NOTIFIERS:
+        raise ConfigError(f"{where}: 'notify' must be one of: {', '.join(NOTIFIERS)}")
+    ntfy_url = _require_str(raw, "ntfy_url", where) if "ntfy_url" in raw else None
+    if ntfy_url is not None and not re.match(r"https?://\S+$", ntfy_url):
+        raise ConfigError(f"{where}: 'ntfy_url' must be an http(s) URL")
+    if notify == "ntfy" and ntfy_url is None:
+        raise ConfigError(f"{where}: notify = \"ntfy\" requires 'ntfy_url'")
+    merge = raw.get("merge", True)
+    if not isinstance(merge, bool):
+        raise ConfigError(f"{where}: 'merge' must be true or false")
+    max_steps = raw.get("max_steps")
+    if "max_steps" in raw and (
+        isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps < 1
+    ):
+        raise ConfigError(f"{where}: 'max_steps' must be a positive integer")
+    max_hours = raw.get("max_hours")
+    if "max_hours" in raw:
+        if isinstance(max_hours, bool) or not isinstance(max_hours, int | float) or max_hours <= 0:
+            raise ConfigError(f"{where}: 'max_hours' must be a positive number")
+        max_hours = float(max_hours)
+    return AutoConfig(notify, ntfy_url, merge, max_steps, max_hours)
 
 
 def _parse_agent(path: Path, name: str, raw: object) -> AgentConfig:
