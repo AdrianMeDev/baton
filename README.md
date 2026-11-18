@@ -3,17 +3,188 @@
 Command-line tool that distributes the steps of a commit plan (`.agent-plan.md`) across several
 coding agent CLIs (Claude Code, Codex, Antigravity, pi). See `docs/ROADMAP.md` for the plan.
 
-Available commands include `baton doctor`, `baton probe`, `baton status`, `baton next`,
-`baton cooldown` and `baton recheck`.
-`baton next` can run Claude Code, Codex, Antigravity or pi.
+## First run on Linux or WSL
 
-## Installation
+### 1. Install baton and sign in
 
-Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
+Install Git, Bash, [uv](https://docs.astral.sh/uv/), and the GitHub CLI (`gh`). The example
+uses Claude Code for planning, implementation and repairs, and Codex for independent review.
+Install both CLIs in the same Linux or WSL environment and put them on your `PATH`. Use a
+disposable GitHub repository for this walkthrough, with permission to push branches, run
+Actions, open PRs and squash-merge them.
 
+```bash
+git clone https://github.com/AdrianMeDev/baton.git
+cd baton
+baton_source=$PWD
+uv python install 3.12
+uv tool install --python 3.12 .
+uv tool update-shell
 ```
-uv tool install .
+
+Open a new shell or source the profile reported by `uv tool update-shell`. From the baton
+source checkout, set `baton_source=$PWD` again if you opened a new shell. Then run:
+
+```bash
+baton --version
+claude auth login
+codex login
+gh auth login --git-protocol https
+gh auth setup-git
+gh auth status
 ```
+
+Each agent uses the login set up in its own CLI, so runs may consume your account quota.
+Keep credentials in the CLI's own configuration or supported environment variables. Keep
+them out of the repository, roadmap and baton config.
+
+### 2. Configure agent routes
+
+Create the config directory with `mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/baton"`.
+Save this as `${XDG_CONFIG_HOME:-$HOME/.config}/baton/config.toml` if you want it as your default.
+To keep an existing default, save the example elsewhere and export `BATON_CONFIG` with its
+absolute path. These routes cover all three step sizes and reserve OpenAI for review, including
+after repairs. The CLIs select their own default models.
+
+```toml
+[agents.writer]
+adapter = "claude"
+command = "claude"
+
+[agents.reviewer]
+adapter = "codex"
+command = "codex"
+
+[routes.plan_commits]
+S = ["writer"]
+M = ["writer"]
+L = ["writer"]
+
+[routes.implement]
+S = ["writer"]
+M = ["writer"]
+L = ["writer"]
+
+[routes.fix]
+S = ["writer"]
+M = ["writer"]
+L = ["writer"]
+
+[routes.review]
+S = ["reviewer"]
+M = ["reviewer"]
+L = ["reviewer"]
+```
+
+Run `baton doctor` and check that both executables are found. To confirm the logins work in
+headless mode, run `baton probe writer` and `baton probe reviewer`. Both probes use quota.
+
+### 3. Prepare a small GitHub repository
+
+On GitHub, create a disposable repository with a README on `main`. Enable GitHub Actions and
+squash merging. Clone it with `gh repo clone OWNER/REPO` (replace `OWNER/REPO`), enter the clone,
+and set your Git identity if needed:
+
+```bash
+git config user.name "Your Name"
+git config user.email "you@example.com"
+```
+
+Copy the [agent instructions template](integrations/AGENTS.md) to the root as `AGENTS.md`.
+Adapt it to the repository. For this example, use `bash tests/smoke.sh` as the full test
+command once the smoke test exists, and remove the placeholders for unused commands.
+If your Claude Code setup reads `CLAUDE.md`, add an `@AGENTS.md` import there.
+
+Create `docs/ROADMAP.md` with the following content.
+
+```markdown
+# Roadmap: Greeting demo
+
+## Milestones
+
+### M1 [ ] Add a greeting command
+- **Goal:** Running `bash greet.sh` prints `Hello from baton!` on its own line.
+- **Includes:** Add `greet.sh`, add `tests/smoke.sh` to check its output, and document both commands in the README. Plan one commit per item in that order.
+- **Done when:** `bash tests/smoke.sh` passes and the README shows how to run the command and its test.
+- **Depends on:** –
+- **Size:** S
+
+## Definition of done
+
+- The smoke test passes locally and in the pull request CI job.
+
+## Changelog
+```
+
+Add `.github/workflows/ci.yml` so the milestone PR reports a check. The smoke test is created
+by the milestone. This workflow runs when the PR is opened or updated.
+
+```yaml
+name: CI
+on: pull_request
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash tests/smoke.sh
+```
+
+Commit the setup files and push the baseline to the disposable repository.
+
+```bash
+git add -A
+git commit -m "chore(demo): prepare the greeting milestone"
+git push origin main
+git status --short --branch
+```
+
+### 4. Run and confirm the merge
+
+Start from the clean `main` checkout. Use a repository whose files, instructions and intended
+changes you trust. Baton starts the configured agent commands with your user permissions and
+runs each plan's **Verify** command via `bash -c` in the checkout that contains the changes.
+A worktree keeps milestone changes separate from the base checkout. Agent access depends on
+the CLI's sandbox or permission mode. Keep unrelated credentials out of the environment.
+Independent review sends the final patch and new file contents to the configured reviewer.
+
+```bash
+baton doctor
+baton auto
+```
+
+By default, auto plans the milestone, implements and verifies each step in a dedicated Git
+worktree, commits verified and reviewed changes, and pushes the milestone branch to `origin`.
+It opens a PR and squash-merges only after its checks pass and review has no critical findings.
+Set `[auto] merge = false` in your config or pass `baton auto --no-merge` to stop after the PR is
+published for manual inspection. Both modes push commits and open a PR.
+
+For the merge-enabled run, look for the PR URL in the `Merged M1.` message, followed by
+`Roadmap complete.` Confirm that the PR is merged and the base checkout includes the result.
+Replace `<PR URL>` with the printed URL.
+
+```bash
+gh pr view '<PR URL>' --json state,mergeCommit
+git status --short --branch
+git rev-parse HEAD
+grep -F '### M1 [x]' docs/ROADMAP.md
+bash tests/smoke.sh
+```
+
+The PR state should be `MERGED`, and its merge commit should match the local HEAD.
+
+### Editor and interactive planning
+
+- Install the repository's [size-aware plan-commits skill](integrations/plan-commits/SKILL.md)
+  by copying its directory into your agent CLI's skill directory. For example, use
+  `cp -R "$baton_source/integrations/plan-commits" ~/.claude/skills/` after creating
+  `~/.claude/skills`. Use the skill when you want to inspect and adjust the plan interactively.
+  Each step's `Size` selects the corresponding baton route. Run `baton next` to execute one
+  step and review the changes before committing.
+- In Zed, open the baton source checkout and run **baton next** or **baton auto** from the task
+  picker. The [project tasks](.zed/tasks.json) run `uv run baton` from that worktree's root.
+  To use them in another repository, copy the two task entries and change the commands to
+  `baton next` and `baton auto` to use the installed CLI there.
 
 ## Configuration
 
@@ -51,8 +222,8 @@ L = ["claude-sonnet", "agy", "codex"]
 with the next available agent after a usage-limit failure. Each configured name runs at most once
 per implementation or fix attempt. `--agent NAME` pins implementation only; fixes and review
 still use their configured role routes. Agents-only configs use the first configured Claude
-agent by default and retain verification without automatic repair or review. Planning commands
-belong to later milestones.
+agent by default and retain verification without automatic repair or review. Milestone planning commands
+use the `plan_commits` route.
 
 ## Usage
 
@@ -167,7 +338,7 @@ implementation route.
    lists changed files, verification, reviewer and findings grouped as **CRITICAL**, **WARNING**
    and **INFORMATIONAL**, followed by commit commands. A valid review with critical findings
    still reaches `[~]`: you decide whether to commit. The Log records reviewer and severity
-   counts. baton never commits or pushes.
+   counts. Plain `baton next` leaves committing and pushing to you.
 
 Exit code 0 means the step is ready to commit. Steps without Verify are reported as unverified.
 Exit code 1 indicates an agent, Verify, review, plan or config error. Failed verification or
@@ -366,8 +537,8 @@ uv run ruff check
 uv run ruff format --check
 ```
 
-The same commands are available as Zed tasks in `.zed/tasks.json`. CI (`.github/workflows/ci.yml`)
-runs them on Python 3.12 and 3.14.
+Zed has tasks for tests, lint, formatting, doctor, next and auto. CI
+(`.github/workflows/ci.yml`) runs lint, the format check, tests and doctor on Python 3.12 and 3.14.
 
 ### Publish a milestone pull request
 
