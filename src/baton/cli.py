@@ -108,6 +108,31 @@ def build_parser() -> argparse.ArgumentParser:
     pr = subparsers.add_parser("pr", help="publish a completed milestone pull request")
     pr.add_argument("--path", default=".", metavar="DIR")
     pr.add_argument("--merge", action="store_true", help="wait for CI and merge reviewed revision")
+    auto = subparsers.add_parser(
+        "auto", help="work through the whole roadmap: plan, steps, PR, merge, next milestone"
+    )
+    auto.add_argument(
+        "--path", default=".", metavar="DIR", help="repository root (default: current directory)"
+    )
+    auto.add_argument("--max-steps", type=int, metavar="N", help="stop after N implemented steps")
+    auto.add_argument("--max-hours", type=float, metavar="H", help="stop after H hours")
+    auto.add_argument(
+        "--no-merge", action="store_true", help="stop after publishing the milestone PR"
+    )
+    auto.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_AGENT_TIMEOUT,
+        metavar="S",
+        help="seconds before an agent is killed (default: %(default)s)",
+    )
+    auto.add_argument(
+        "--verify-timeout",
+        type=float,
+        default=DEFAULT_VERIFY_TIMEOUT,
+        metavar="S",
+        help="seconds before a Verify command is killed (default: %(default)s)",
+    )
     stop = subparsers.add_parser("stop", help="ask baton auto to stop at the next safe point")
     stop.add_argument(
         "--path", default=".", metavar="DIR", help="repository root (default: current directory)"
@@ -180,6 +205,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         from baton.pr import run_pr
 
         return run_pr(Path(args.path), merge=args.merge)
+    if args.command == "auto":
+        from baton.auto import run_auto_command
+
+        return run_auto_command(
+            Path(args.path),
+            config_path=args.config,
+            max_steps=args.max_steps,
+            max_hours=args.max_hours,
+            merge=False if args.no_merge else None,
+            agent_timeout=args.timeout,
+            verify_timeout=args.verify_timeout,
+        )
     if args.command == "stop":
         return run_stop_command(Path(args.path))
     if args.command == "plan":

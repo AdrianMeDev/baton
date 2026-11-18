@@ -396,3 +396,20 @@ def test_plan_parser_options() -> None:
         ["plan", "--milestone", "M3", "--agent", "a", "--tier", "S", "--dry-run"]
     )
     assert (args.milestone, args.agent, args.tier, args.dry_run) == ("M3", "a", "S", True)
+
+
+def test_auto_parser_options() -> None:
+    from baton.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["auto", "--max-steps", "5", "--max-hours", "1.5", "--no-merge", "--timeout", "60"]
+    )
+    assert (args.max_steps, args.max_hours, args.no_merge, args.timeout) == (5, 1.5, True, 60.0)
+    defaults = build_parser().parse_args(["auto"])
+    assert defaults.max_steps is None and defaults.no_merge is False
+
+
+def test_auto_outside_a_repository_exits_2(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    assert main(["auto", "--path", str(tmp_path / "missing")]) == 2
+    assert "Cannot start" in capsys.readouterr().out

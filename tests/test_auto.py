@@ -84,8 +84,8 @@ class World:
         self.pr_calls.append(merge)
         return self.pr_result
 
-    def wait(self):
-        self.waits.append("wait")
+    def wait(self, role, size):
+        self.waits.append(role)
         return self.wait_result
 
     def run(self, *, merge=True, budget=None):
@@ -128,11 +128,26 @@ def test_adopts_an_open_plan_without_planning(world):
     assert world.plan_calls == 0 and len(world.next_calls) == 1
 
 
-def test_finished_plan_of_recorded_milestone_goes_straight_to_pr(world):
+def test_finished_plan_not_done_in_base_roadmap_goes_straight_to_pr(world):
     world.write_plan(s1="[x] – abc1234", s2="[x] – def5678")
-    world.store.update(world.repo, milestone="M1")
+    assert world.run().outcome == "merged"  # lost auto.json: derived from plan + roadmap
+    assert world.plan_calls == 0 and world.next_calls == [] and world.pr_calls == [True]
+
+
+def test_finished_plan_of_a_done_milestone_is_a_leftover(world):
+    world.write_plan(s1="[x] – abc1234", s2="[x] – def5678")
+    done = ROADMAP.replace("### M1 [ ]", "### M1 [x]")
+    (world.repo / "docs" / "ROADMAP.md").write_text(done)
     assert world.run().outcome == "merged"
-    assert world.plan_calls == 0 and world.next_calls == []
+    assert world.plan_calls == 1 and world.pr_calls == [True]
+
+
+def test_local_roadmap_milestone_is_marked_done_after_merge(world):
+    text = PLAN.replace("tracked)", "local)").format(s1="[ ]", s2="[ ]")
+    world.plan_path.write_text(text)
+    assert world.run().outcome == "merged"
+    roadmap = (world.repo / "docs" / "ROADMAP.md").read_text()
+    assert "### M1 [x] Widgets" in roadmap
 
 
 def test_no_merge_stops_after_publication(world):
@@ -225,14 +240,14 @@ def test_exhaustion_waits_then_resumes_the_same_step(world):
     world.next_codes = [EXIT_EXHAUSTED]
     result = world.run()
     assert result.outcome == "merged"
-    assert world.waits == ["wait"]
+    assert world.waits == ["implement"]
     assert world.next_calls == [False, True, False]  # retry of step 1 resumes; step 2 is fresh
 
 
 def test_planner_exhaustion_waits_then_replans(world):
     world.plan_codes = [EXIT_EXHAUSTED, EXIT_OK]
     assert world.run().outcome == "merged"
-    assert world.plan_calls == 2 and world.waits == ["wait"]
+    assert world.plan_calls == 2 and world.waits == ["plan_commits"]
 
 
 def test_recorded_step_in_progress_resumes_after_a_crash(world):
@@ -247,6 +262,23 @@ def test_step_without_progress_is_a_stop(world):
     world.complete_first_open = lambda: None
     result = world.run()
     assert "made no progress" in result.reason
+
+
+def test_step_not_started_is_a_stop(world):
+    world.next_codes = [EXIT_STOPPED]
+    world.complete_first_open = lambda: None
+    result = world.run()
+    assert result.outcome == "stopped" and "was not started (exit 2)" in result.reason
+
+
+def test_committed_pending_step_is_settled_by_the_gate(world):
+    world.write_plan(s1="[x] – abc1234", s2="[~] (on abc1234)")
+    world.next_codes = [EXIT_STOPPED]  # the gate marks it done, then no open step is left
+    world.on_next = lambda call: world.plan_path.write_text(
+        world.plan_path.read_text().replace("[~] (on abc1234)", "[x] – def5678")
+    )
+    assert world.run().outcome == "merged"
+    assert len(world.next_calls) == 1
 
 
 def test_dirty_base_after_merge_is_a_stop(world):
@@ -331,3 +363,149 @@ def test_ff_base_requires_base_branch_checked_out(clone):
     work, _ = clone
     git(work, "switch", "-qc", "other")
     assert "not on the base branch main" in ff_base(work, plan_for())
+
+
+# --- the loop: baton auto -------------------------------------------------------------------
+
+CONFIG = '[agents.a]\nadapter = "claude"\ncommand = "claude"\n'
+
+
+class Loop(World):
+    """World whose planner follows the roadmap and whose merge updates it, like origin would."""
+
+    def __init__(self, tmp_path, monkeypatch):
+        super().__init__(tmp_path, monkeypatch)
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        self.config = tmp_path / "config.toml"
+        self.config.write_text(CONFIG)
+        self.notes: list[tuple[str, str]] = []
+        self.merged: list[str] = []
+
+    def plan(self) -> int:
+        from baton.roadmap import next_milestone, parse_roadmap
+
+        self.plan_calls += 1
+        path = self.repo / "docs" / "ROADMAP.md"
+        milestone = next_milestone(parse_roadmap(path.read_text()))
+        text = PLAN.format(s1="[ ]", s2="[ ]").replace("M1 – Widgets", f"{milestone.id} – Widgets")
+        self.plan_path.write_text(text)
+        return EXIT_OK
+
+    def finish(self, repo, plan):
+        from baton.roadmap import save_roadmap, set_milestone_status
+
+        path = repo / "docs" / "ROADMAP.md"
+        save_roadmap(path, set_milestone_status(path.read_text(), plan.milestone.id, "done"))
+        self.merged.append(plan.milestone.id)
+        return self.after_merge_result
+
+    def auto(self, **kw):
+        from baton.auto import run_auto_command
+
+        hooks = MilestoneHooks(
+            plan=self.plan,
+            next=self.next,
+            pr=self.pr,
+            wait=self.wait,
+            now=lambda: self.now,
+            after_merge=self.finish,
+        )
+        return run_auto_command(
+            self.repo,
+            config_path=str(self.config),
+            out=self.out,
+            hooks=hooks,
+            notifier=lambda title, message: self.notes.append((title, message)),
+            now=lambda: self.now,
+            **kw,
+        )
+
+
+@pytest.fixture
+def loop(tmp_path, monkeypatch):
+    return Loop(tmp_path, monkeypatch)
+
+
+def test_auto_runs_the_whole_roadmap_and_notifies(loop):
+    assert loop.auto() == 0
+    assert loop.merged == ["M1", "M2"]
+    assert [title for title, _ in loop.notes] == [
+        "baton: M1 merged",
+        "baton: M2 merged",
+        "baton: roadmap complete",
+    ]
+    assert loop.store.read(loop.repo).steps_done == 4
+
+
+def test_auto_notifies_every_stop(loop):
+    loop.next_codes = [EXIT_FAILED]
+    assert loop.auto() == 1
+    assert loop.notes == [
+        ("baton: stopped", "M1: step 1 failed after escalation (exit code 1); see the plan log")
+    ]
+
+
+def test_auto_budget_spans_milestones(loop):
+    assert loop.auto(max_steps=3) == 1
+    assert loop.merged == ["M1"]
+    assert "budget reached: 3 steps" in loop.notes[-1][1]
+
+
+def test_auto_no_merge_stops_with_a_notification(loop):
+    assert loop.auto(merge=False) == 0
+    assert loop.merged == []
+    assert loop.notes == [("baton: M1 PR ready", "PR ready for review. https://example.test/pr/1")]
+
+
+def test_auto_clears_a_stale_stop_request(loop):
+    loop.store.update(loop.repo, stop_requested=True)
+    assert loop.auto() == 0
+
+
+@pytest.mark.parametrize("bad", [{"max_steps": 0}, {"max_hours": 0}])
+def test_auto_rejects_bad_budget(loop, bad):
+    assert loop.auto(**bad) == 2
+    assert "Cannot start" in loop.out.getvalue()
+
+
+def test_auto_requires_a_git_repository(tmp_path, monkeypatch):
+    from baton.auto import run_auto_command
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    out = io.StringIO()
+    assert run_auto_command(tmp_path / "nowhere", out=out) == 2
+    assert "Cannot start" in out.getvalue()
+
+
+def test_resume_mid_step_with_partial_diff(loop):
+    loop.write_plan()
+    loop.store.update(loop.repo, milestone="M1", step=1)
+    assert loop.auto() == 0
+    assert loop.next_calls[0] is True and loop.plan_calls == 1  # M2 is planned afresh
+
+
+def test_resume_with_next_step_pending(loop):
+    loop.write_plan(s1="[x] – abc1234")
+    assert loop.auto() == 0
+    assert loop.next_calls[0] is False and loop.merged[0] == "M1"
+
+
+def test_resume_plan_done_not_published(loop):
+    loop.write_plan(s1="[x] – abc1234", s2="[x] – def5678")
+    assert loop.auto() == 0
+    assert loop.next_calls[:2] == [False, False] and loop.merged[0] == "M1"
+    assert loop.pr_calls[0] is True
+
+
+def test_resume_with_open_pr_merges_it(loop):
+    loop.write_plan(s1="[x] – abc1234", s2="[x] – def5678")
+    loop.store.update(loop.repo, milestone="M1", pr_url="https://example.test/pr/1")
+    assert loop.auto() == 0
+    assert loop.merged[0] == "M1" and loop.pr_calls[0] is True
+
+
+def test_resume_after_merge_before_fast_forward(loop):
+    loop.write_plan(s1="[x] – abc1234", s2="[x] – def5678")
+    loop.pr_result = (EXIT_OK, "Already merged: https://example.test/pr/1\n")
+    assert loop.auto() == 0
+    assert loop.merged[0] == "M1"
