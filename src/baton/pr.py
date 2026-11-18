@@ -88,3 +88,79 @@ def milestone_report(repo: Path, text: str) -> Report:
         blockers.append("Milestone contains commits without distinct step reviews")
     lines += ["", "## Automatic merge", "\n".join(f"- {b}" for b in blockers) or "Eligible"]
     return Report(plan.title, "\n".join(lines) + "\n", tuple(blockers))
+
+
+def run_pr(repo: Path, *, merge: bool = False, out=None) -> int:
+    """Publish the existing milestone checkout without switching the user's branch."""
+    import sys
+
+    from baton.forge import ForgeError, origin_repository, publish
+    from baton.git import (
+        PLAN_FILENAME,
+        GitError,
+        current_branch,
+        dirty_paths,
+        head,
+        milestone_branch,
+        push,
+        worktree_paths,
+    )
+
+    out = out or sys.stdout
+    url = None
+    try:
+        plan = parse_plan((repo / PLAN_FILENAME).read_text(encoding="utf-8"))
+        branch = milestone_branch(plan)
+        if current_branch(repo) != branch:
+            candidates = [p for p in worktree_paths(repo) if current_branch(p) == branch]
+            if len(candidates) != 1:
+                raise PlanError(f"Run from milestone branch {branch} or its registered worktree")
+            repo = candidates[0]
+        text = (repo / PLAN_FILENAME).read_text(encoding="utf-8")
+        plan = parse_plan(text)
+        if current_branch(repo) != milestone_branch(plan):
+            raise PlanError("Worktree plan does not match its milestone branch")
+        if not plan.branch or plan.branch == branch:
+            raise PlanError("Plan Branch must name the starting base branch")
+        if dirty_paths(repo):
+            raise PlanError("Commit or discard milestone changes before publishing")
+        report = milestone_report(repo, text)
+        revision = head(repo, short=False)
+        target = origin_repository(repo)
+        # Inspect an existing merged PR before pushing: reruns must recognize it.
+        from baton.forge import gh
+
+        existing = json.loads(
+            gh(
+                repo,
+                "pr",
+                "list",
+                "--repo",
+                target,
+                "--base",
+                plan.branch,
+                "--head",
+                branch,
+                "--state",
+                "merged",
+                "--json",
+                "url,state,headRefOid",
+            )
+        )
+        if existing:
+            if len(existing) != 1 or existing[0]["headRefOid"] != revision:
+                raise PlanError("Merged PR does not cover the current milestone revision")
+            print(f"Already merged: {existing[0]['url']}", file=out)
+            return 0
+        push(repo, branch)
+        result = publish(repo, target, plan.branch, branch, report.title, report.body)
+        url = result["url"]
+        print(url, file=out)
+        if result["state"] == "MERGED":
+            if result.get("headRefOid") != revision:
+                raise PlanError("Merged PR does not cover the current revision")
+            return 0
+        return 0
+    except (PlanError, GitError, ForgeError, OSError, ValueError, KeyError) as exc:
+        print(f"{url + ': ' if url else ''}Stopped: {exc}", file=out)
+        return 1
