@@ -1181,3 +1181,51 @@ def test_commit_flag_second_run_continues_after_auto_commit(repo, git_identity) 
     assert code == EXIT_OK and "Step 2/2" in out
     assert _log_subjects(repo)[:2] == ["feat: second", "feat: first"]
     assert [s.status for s in plan_of(repo).steps] == ["done", "done"]
+
+
+def _files_of(repo: Path, rev: str) -> list[str]:
+    out = subprocess.run(
+        ["git", "-C", str(repo), "show", "--name-only", "--format=", rev],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.split()
+
+
+def test_roadmap_changes_only_in_first_and_last_commit(repo, git_identity) -> None:
+    (repo / ".git" / "info" / "exclude").write_text(".agent-plan.md\n")
+    (repo / "docs").mkdir()
+    roadmap = repo / "docs" / "ROADMAP.md"
+    roadmap.write_text("# Roadmap: Demo\n\n## Milestones\n\n### M1 [ ] First\n- **Goal:** g\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "roadmap")
+    plan = (repo / ".agent-plan.md").read_text()
+    tracked = "Milestone: M1 – First (docs/ROADMAP.md, tracked)"
+    (repo / ".agent-plan.md").write_text(plan.replace("Milestone: none", tracked))
+
+    code, out = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_OK, out
+    assert "docs/ROADMAP.md" in _files_of(repo, "HEAD")
+    assert "### M1 [~] First" in roadmap.read_text()
+
+    code, _ = run(repo, FakeAdapter(action=lambda r: (r / "b.txt").write_text("b\n")), commit=True)
+    assert code == EXIT_OK
+    assert "docs/ROADMAP.md" in _files_of(repo, "HEAD")
+    assert "### M1 [x] First" in roadmap.read_text()
+    assert "M1 done (Demo)" in roadmap.read_text()
+    dirty = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True
+    ).stdout
+    assert dirty == ""
+
+
+def test_missing_tracked_roadmap_blocks_commit(repo, git_identity) -> None:
+    plan = (repo / ".agent-plan.md").read_text()
+    tracked = "Milestone: M1 – First (docs/ROADMAP.md, tracked)"
+    (repo / ".agent-plan.md").write_text(plan.replace("Milestone: none", tracked))
+    before = head(repo)
+    code, out = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_FAILED and head(repo) == before
+    assert "roadmap docs/ROADMAP.md not found" in out
+    assert plan_of(repo).steps[0].status == "pending"

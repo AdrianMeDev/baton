@@ -20,6 +20,7 @@ from baton.config import AgentConfig, ConfigError, find_config_path, load_config
 from baton.gate import GateResult, apply_gate, check_gate
 from baton.git import PLAN_FILENAME, GitError, commit_all, dirty_paths, handoff_context, head
 from baton.limits import LimitStateError, LimitStore
+from baton.milestone import sync_milestone
 from baton.plan import (
     Plan,
     PlanError,
@@ -39,6 +40,7 @@ from baton.review import (
     review_context,
     run_isolated_review,
 )
+from baton.roadmap import RoadmapError
 from baton.router import Route, resolve_route
 from baton.verify import VerifyResult, run_verify
 
@@ -306,8 +308,9 @@ def _run_next(
                 notice = "Auto-commit blocked by critical review findings; decide manually."
             else:
                 try:
+                    sync_milestone(repo, plan, step, date)
                     committed = commit_all(repo, step.message)
-                except GitError as exc:
+                except (RoadmapError, GitError) as exc:
                     problem = f"commit failed ({exc})"
                     notice = f"Auto-commit failed: {exc}\nChanges stay staged; the step stays [~]."
 

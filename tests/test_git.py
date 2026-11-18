@@ -194,3 +194,15 @@ def test_push_to_bare_remote(repo: Path, tmp_path_factory: pytest.TempPathFactor
 def test_push_without_remote(repo: Path) -> None:
     with pytest.raises(GitError):
         push(repo, "main")
+
+
+def test_commit_all_with_gitignored_plan_file(repo: Path) -> None:
+    tmp_path = repo
+    (tmp_path / ".gitignore").write_text(".agent-plan.md\n")
+    (tmp_path / ".agent-plan.md").write_text("plan\n")
+    (tmp_path / "f.txt").write_text("x\n")
+    commit_all(tmp_path, "feat: x")
+    tracked = subprocess.run(
+        ["git", "-C", str(tmp_path), "ls-files"], check=True, capture_output=True, text=True
+    ).stdout.split()
+    assert "f.txt" in tracked and ".agent-plan.md" not in tracked

@@ -137,8 +137,9 @@ def commit_all(repo: Path, message: str, ignore: tuple[str, ...] = (PLAN_FILENAM
     """
     if not is_repo(repo):
         raise GitError(f"not a git repository: {repo}")
-    _git(repo, "add", "-A", "--", ".", *(f":(exclude){p}" for p in ignore))
-    # A path the user staged earlier must not slip into the commit either.
+    # No ":(exclude)" pathspec: git rejects it for a path that .gitignore lists.
+    _git(repo, "add", "-A", "--", ".")
+    # Unstage the ignored paths again, including ones the user staged earlier.
     for path in ignore:
         if path in _git(repo, "diff", "--cached", "--name-only", "-z", "--", path).split("\0"):
             _git(repo, "reset", "-q", "--", path)
