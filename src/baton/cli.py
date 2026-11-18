@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from baton import __version__
+from baton.autostate import run_stop_command
 from baton.config import ROUTE_TIERS, ConfigError, find_config_path, load_config
 from baton.doctor import run_doctor
 from baton.limits import LimitStateError, LimitStore, parse_duration
@@ -107,6 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
     pr = subparsers.add_parser("pr", help="publish a completed milestone pull request")
     pr.add_argument("--path", default=".", metavar="DIR")
     pr.add_argument("--merge", action="store_true", help="wait for CI and merge reviewed revision")
+    stop = subparsers.add_parser("stop", help="ask baton auto to stop at the next safe point")
+    stop.add_argument(
+        "--path", default=".", metavar="DIR", help="repository root (default: current directory)"
+    )
     plan = subparsers.add_parser(
         "plan", help="plan the next open roadmap milestone headless into .agent-plan.md"
     )
@@ -175,6 +180,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         from baton.pr import run_pr
 
         return run_pr(Path(args.path), merge=args.merge)
+    if args.command == "stop":
+        return run_stop_command(Path(args.path))
     if args.command == "plan":
         return run_plan_command(
             Path(args.path),

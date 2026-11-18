@@ -125,7 +125,7 @@ Updated: 2026-11-18
 - **Depends on:** M7
 - **Size:** M, ~5 commits
 
-### M10 [ ] Auto-Modus
+### M10 [~] Auto-Modus
 - **Goal:** `baton auto` arbeitet die ganze Roadmap ohne Zutun ab.
 - **Includes:** Schleife Meilenstein → Plan → Schritte → PR → Merge → nächster; Warten bis zum frühesten Limit-Reset, wenn alle Agenten pausieren; Fortsetzen nach Absturz aus Dateien + Git; Stopp-Regeln (Eskalation erschöpft, Merge abgelehnt, Roadmap-Problem gemeldet, Budget erreicht); `baton stop`; Benachrichtigung bei Stopp/Meilenstein (`notify-send` oder ntfy)
 - **Done when:** eine Beispiel-Roadmap mit 2 Meilensteinen läuft mit Fake-Adaptern vollständig durch; jede Stopp-Regel hat einen Test
