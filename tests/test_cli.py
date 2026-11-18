@@ -280,3 +280,8 @@ def test_cli_cooldown_malformed_state_is_not_overwritten(tmp_path, monkeypatch, 
     assert main(["--config", str(config), "cooldown", "fake", "2h"]) == 1
     assert "Repair or move" in capsys.readouterr().out
     assert path.read_text() == "broken"
+
+
+@pytest.fixture(autouse=True)
+def isolated_limit_state(monkeypatch, tmp_path_factory):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("limits-state")))
