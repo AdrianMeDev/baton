@@ -162,3 +162,41 @@ def test_bundled_review_is_cross_provider(
 ) -> None:
     route = resolve_route(bundled, "review", implementer=bundled.agents[implementer])
     assert [agent.name for agent in route.agents] == reviewers
+
+
+def test_review_excludes_all_contributing_providers(config):
+    assert resolve_route(config, "review", authors=(CLAUDE, CODEX, PI_CLAUDE)) == Route(
+        "M", (ARGON,)
+    )
+    # The legacy implementer argument combines with authors rather than replacing them.
+    assert resolve_route(config, "review", implementer=CODEX, authors=(PI_CLAUDE,)) == Route(
+        "M", (ARGON,)
+    )
+
+
+def test_all_author_providers_exhaust_review_route(config):
+    with pytest.raises(ConfigError, match="no eligible reviewer"):
+        resolve_route(config, "review", authors=(CLAUDE, CODEX, ARGON))
+
+
+def test_unknown_author_identity_is_not_silently_ignored(config):
+    with pytest.raises(ConfigError, match=r"set 'provider' in \[agents.pi-unknown\]"):
+        resolve_route(config, "review", authors=(CLAUDE, PI_UNKNOWN))
+
+
+@pytest.mark.parametrize("provider", [" OpenAI ", "openai", "OPENAI"])
+def test_author_provider_aliases_and_explicit_reviewer(config, provider):
+    author = AgentConfig("custom", "pi", "pi", provider=provider)
+    with pytest.raises(ConfigError, match="no eligible reviewer"):
+        resolve_route(config, "review", agent_name="codex", authors=(author,))
+    assert resolve_route(config, "review", agent_name="argon", authors=(author,)) == Route(
+        "M", (ARGON,)
+    )
+
+
+@pytest.mark.parametrize("provider", [None, "", "  "])
+def test_unknown_reviewer_cannot_be_selected(config, provider):
+    unknown = AgentConfig("unknown", "pi", "pi", provider=provider)
+    changed = Config(config.location, {**config.agents, "unknown": unknown}, config.routes)
+    with pytest.raises(ConfigError, match="no eligible reviewer"):
+        resolve_route(changed, "review", agent_name="unknown", authors=(CLAUDE,))
