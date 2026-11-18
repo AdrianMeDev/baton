@@ -92,6 +92,41 @@ even without a plan: each has either an active cooldown with a local reset time 
 and UTC offset), or no active cooldown. This is local eligibility information, not a live account
 check. `status` never starts an agent or writes state.
 
+### `baton plan`
+
+```
+baton plan [--path DIR] [--milestone ID] [--agent NAME] [--tier {S,M,L}] [--timeout S] [--dry-run]
+```
+
+Plans a roadmap milestone headless, like `/plan-commits`, and writes `.agent-plan.md` for
+`baton next`.
+
+1. **Select.** baton reads `docs/ROADMAP.md` (or `ROADMAP.md`) and takes the first `[ ]`
+   milestone whose dependencies are all `[x]`, or the one named by `--milestone`. A done,
+   skipped or blocked milestone stops the run.
+2. **Check.** An existing `.agent-plan.md` with open or pending steps is never replaced; a plan
+   with only done/skipped steps is. The working tree must be clean (ignoring `.agent-plan.md`).
+3. **Plan.** The `plan_commits` route runs in the repo root. The tier comes from `--tier`, the
+   milestone's `Size`, or `M` in that order; `--agent` selects a named agent. The prompt carries
+   the plan-commits rules (one step = one commit, 3–8 steps, Verify and Size per step), the
+   milestone section and the roadmap's Architecture, Decisions and Definition of done. A usage
+   limit records a cooldown and restarts planning on the next agent of the route.
+4. **Validate and retry once.** baton takes the reply from `# Plan:` on, replaces the header
+   (`Created`, `Branch`, `Base`, `Milestone`) with real values and validates it: 3–8 steps numbered
+   1..n, all `[ ]`, Conventional Commits messages, Why/Changes/Done when/Verify, Size S/M/L,
+   `## Goal`, matching milestone. If it fails, the planner gets the errors once more. A second
+   failure stops without writing a plan.
+5. **Write.** baton writes `.agent-plan.md`, adds it to `.git/info/exclude`, and sets an
+   untracked roadmap's milestone to `[~]`. For a tracked roadmap the plan's first and last steps
+   change the milestone status in their commits.
+
+The planner must not change anything: a moved HEAD, a changed working tree or a written
+`.agent-plan.md` rejects the run (the plan file is restored; other edits stay for you to review).
+Exit code 0 means a plan was written. Exit code 1 indicates a planner, validation, config or
+roadmap error. Exit code 2 means nothing was started: no roadmap, no plannable milestone, an
+unfinished plan or a dirty tree. `--timeout` (default 1800 s) limits each planner call;
+`--dry-run` prints the milestone, the command and the prompt and changes nothing.
+
 ### `baton next`
 
 ```

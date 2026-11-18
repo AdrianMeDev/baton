@@ -111,7 +111,7 @@ Updated: 2026-11-18
 - **Depends on:** M6
 - **Size:** M, ~5 commits
 
-### M8 [~] Headless planen
+### M8 [x] Headless planen
 - **Goal:** `baton plan` macht aus dem nächsten offenen Meilenstein eine gültige `.agent-plan.md`.
 - **Includes:** Planungs-Prompt nach den Regeln von `plan-commits` (inkl. Stufe je Schritt), Rolle `plan`, Validierung (Struktur, 3–8 Schritte, Verify je Schritt), bei ungültigem Plan ein zweiter Versuch, dann Stopp
 - **Done when:** für die Beispiel-Roadmap entstehen gültige Pläne; ungültige werden abgewiesen
@@ -165,3 +165,4 @@ Updated: 2026-11-18
 - 2026-11-18: M6 implementation and documentation delivered: same-tier repair then one L repair, independent provider review with severity findings before manual commit, and isolated reviewer working directories. The offline CLI quality-loop test covers partial quota handoff, escalation and exclusion of all contributing providers. Local verification: 483 tests pass on Python 3.12 and 3.14; lint, formatting, package build and doctor pass (gh is not installed). M6 remains [~] until CI is green for the final committed changes on both Python versions.
 - 2026-11-18: M6 accepted: [GitHub Actions run 44385734356](https://github.com/AdrianMeDev/baton/actions/runs/44385734356) passed for `0f8ac1a` on Python 3.12 and 3.14 (lint, formatting, tests and doctor). Local package build and 483 tests on each Python version were already verified. The quality-loop milestone is complete; commits remain manual.
 - 2026-11-18: M7 done (baton next --commit/--push/--worktree: milestone branch `baton/m<n>-<name>`, one commit per step with the plan message, roadmap status in the first and last commit; acceptance test builds a 3-step milestone branch where every commit passes its Verify)
+- 2026-11-18: M8 done (baton plan: next open or named milestone, plan_commits route by milestone size, validation of structure, 3–8 steps, Verify and Size per step, one retry with the errors, otherwise no plan; acceptance test plans the example roadmap and feeds the result to baton next)
