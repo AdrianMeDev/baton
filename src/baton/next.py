@@ -27,6 +27,7 @@ from baton.git import (
     commit_all,
     current_branch,
     dirty_paths,
+    handoff_context,
     head,
     milestone_branch,
     switch_branch,
@@ -45,7 +46,13 @@ from baton.plan import (
     save_plan,
     set_step_status,
 )
-from baton.prompt import fix_prompt, implement_prompt, review_prompt, step_text
+from baton.prompt import (
+    fix_prompt,
+    handoff_prompt,
+    implement_prompt,
+    review_prompt,
+    step_text,
+)
 from baton.review import (
     SEVERITIES,
     ReviewError,
@@ -64,6 +71,7 @@ from baton.worktree import ensure_worktree, mirror_plan
 EXIT_OK = 0
 EXIT_FAILED = 1  # agent, verify or plan problem; changes stay in the tree
 EXIT_STOPPED = 2  # nothing was started (gate, no open step, dirty tree)
+EXIT_EXHAUSTED = 3  # every agent of the route is in cooldown; the partial diff stays in the tree
 
 DEFAULT_AGENT_TIMEOUT = 1800.0
 DEFAULT_VERIFY_TIMEOUT = 900.0
@@ -85,7 +93,13 @@ def _log(plan_path: Path, line: str, date: str) -> None:
 
 
 def _handle_gate(
-    plan: Plan, gate: GateResult, plan_path: Path, repo: Path, out: TextIO, date: str
+    plan: Plan,
+    gate: GateResult,
+    plan_path: Path,
+    repo: Path,
+    out: TextIO,
+    date: str,
+    resume: bool = False,
 ) -> int | None:
     """Return an exit code when the gate stops the run, ``None`` to continue."""
     if gate.state == "blocked_dirty":
@@ -109,7 +123,7 @@ def _handle_gate(
         say(out, f"Step {gate.step} marked done (HEAD {gate.head}).")
         return None
     dirty = dirty_paths(repo)
-    if dirty:
+    if dirty and not resume:
         say(out, "The working tree has uncommitted changes but no step is marked [~].")
         say(out, "Commit or stash them first, so the agent's changes can be reviewed alone:")
         for path in dirty:
@@ -218,6 +232,7 @@ def run_next(
     commit: bool = False,
     push: bool = False,
     worktree: bool = False,
+    resume: bool = False,
 ) -> int:
     """Implement the first open step of ``repo``'s plan; returns the process exit code."""
     return _with_worktree(
@@ -234,6 +249,7 @@ def run_next(
             today=today,
             commit=commit or worktree,
             push=push,
+            resume=resume,
         ),
     )
 
@@ -274,7 +290,9 @@ def _run_next(
     review_step: Callable[[Plan, Step, str], ReviewResult | None] | None = None,
     commit: bool = False,
     push: bool = False,
+    resume: bool = False,
 ) -> int:
+    """``resume`` continues the first open step from the partial diff a limited agent left."""
     commit = commit or push
     date = today or datetime.date.today().isoformat()
     plan_path = repo / PLAN_FILENAME
@@ -285,7 +303,7 @@ def _run_next(
         plan = parse_plan(plan_path.read_text(encoding="utf-8"))
 
         gate = check_gate(plan, repo, override)
-        stop = _handle_gate(plan, gate, plan_path, repo, out, date)
+        stop = _handle_gate(plan, gate, plan_path, repo, out, date, resume)
         if stop is not None:
             return stop
         if gate.state in ("committed", "overridden"):
@@ -302,6 +320,9 @@ def _run_next(
         adapter = select_adapter(step)
         raw_step = step_text(plan_path.read_text("utf-8"), step)
         prompt = implement_prompt(plan, step, raw_step)
+        if resume and dirty_paths(repo):
+            say(out, "Resuming from the partial diff in the working tree.")
+            prompt = handoff_prompt(prompt, "previous run", handoff_context(repo))
         before = head(repo)
 
         result = adapter.run(prompt, repo, agent_timeout)
@@ -315,7 +336,7 @@ def _run_next(
             say(out, f"The agent failed: {result.error}")
             say(out, "Changes (if any) stay in the working tree; the step stays open.")
             _log(plan_path, f"step {step.number}: agent failed ({result.error})", date)
-            return EXIT_FAILED
+            return EXIT_EXHAUSTED if getattr(adapter, "exhausted", False) else EXIT_FAILED
 
         if commit:
             with suppress(RoadmapError):
@@ -503,6 +524,7 @@ def run_next_command(
     commit: bool = False,
     push: bool = False,
     worktree: bool = False,
+    resume: bool = False,
     out: TextIO | None = None,
 ) -> int:
     """CLI entry: select an agent for the step being run or previewed."""
@@ -578,6 +600,7 @@ def run_next_command(
             review_step=review_step,
             commit=commit or worktree,
             push=push,
+            resume=resume,
         )
 
     return _with_worktree(repo, worktree, out, run_in)

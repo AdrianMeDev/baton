@@ -33,6 +33,7 @@ class RoutedAdapter:
         self.route = route
         self.review = review
         self.attempted_agents: list[AgentConfig] = []
+        self.exhausted = False  # set by run(): every agent of the route was skipped or limited
         self.store = store
         self.out = out
 
@@ -73,6 +74,7 @@ class RoutedAdapter:
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
         before = None if self.review else head(repo)
         previous = None
+        self.exhausted = False
         for agent in self._eligible():
             self._announce(agent)
             current_prompt = prompt
@@ -103,4 +105,5 @@ class RoutedAdapter:
                 f"cooldown until {deadline.isoformat()}{note}.",
             )
             previous = agent.name
+        self.exhausted = True
         return AgentResult(ok=False, error=self._exhausted())
