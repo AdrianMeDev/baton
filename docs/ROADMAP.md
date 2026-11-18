@@ -83,7 +83,7 @@ Updated: 2026-11-18
 - **Depends on:** M1, M2
 - **Size:** M, ~5 commits
 
-### M4 [~] Alle Adapter und Routing
+### M4 [x] Alle Adapter und Routing
 - **Goal:** Jede Rolle und Stufe geht an ihre Agenten-Kette.
 - **Includes:** Adapter codex, agy, pi (Ollama + OpenRouter), Routen je Rolle × Stufe (Rollen: plan_roadmap, plan_commits, implement, fix, review), `--agent`/`--tier`, Standardstufe M, Timeouts. Beispielkonfiguration: plan_roadmap und plan_commits(L) → Opus/Astra/Argon; plan_commits(M/S) → Sonnet/Argon; implement(L) → Sonnet/Argon/Codex; review → stärkstes Modell eines anderen Anbieters
 - **Done when:** ein Beispielschritt läuft per Override über jeden Adapter; S/M/L laut Konfiguration verteilt
@@ -158,3 +158,4 @@ Updated: 2026-11-18
 - 2026-11-18: M1 done (baton probe, runner with PTY mode, recorded fixtures for claude/codex/agy/pi, docs/adapters.md, agy needs no PTY)
 - 2026-11-18: M2 done (plan and roadmap parser/writer, commit gate, baton status)
 - 2026-11-18: M3 done (baton next: prompt, claude adapter, verify, `[~]` marking, report; HEAD unchanged)
+- 2026-11-18: M4 done (S/M/L routing, agent and tier overrides, verified file edits with all four adapters). GitHub Actions passed on `aa6525c`. See [adapter smoke results](adapters.md#m4-smoke-results) for the outstanding Ollama and OpenRouter checks.
