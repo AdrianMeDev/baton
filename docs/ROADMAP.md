@@ -90,7 +90,7 @@ Updated: 2026-11-18
 - **Depends on:** M3
 - **Size:** L, ~7 commits
 
-### M5 [~] Limit-Erkennung und Wechsel
+### M5 [x] Limit-Erkennung und Wechsel
 - **Goal:** Am Limit übernimmt automatisch der nächste Agent.
 - **Includes:** Limit-Muster, Cooldowns mit Reset-Zeit, Wechsel mit aktuellem Diff, `baton cooldown`, Verfügbarkeit in `status`, Wiedererkennung nach manuellem Kontowechsel bei jedem Adapter: `baton recheck <agent>` startet eine winzige Probeanfrage und hebt den Cooldown bei Erfolg auf, im Auto-Modus optional mit Hinweis "agy im Cooldown, anmelden mit anderem Konto oder warten bis HH:MM" und alle paar Minuten erneuter Probe; kein Anmelden, keine Token-Dateien anfassen
 - **Done when:** simuliertes Limit löst Wechsel aus; echte Meldungen aus M1 werden erkannt; Fake-Adapter: erst Limit-Fehler, nach `recheck` Erfolg → Cooldown aufgehoben
@@ -161,3 +161,4 @@ Updated: 2026-11-18
 - 2026-11-18: M4 done (S/M/L routing, agent and tier overrides, verified file edits with all four adapters). GitHub Actions passed on `aa6525c`. See [adapter smoke results](adapters.md#m4-smoke-results) for the outstanding Ollama and OpenRouter checks.
 
 - 2026-11-18: M5 implementation delivered: quota-only handoff with partial edits, persistent cooldowns, local reset times in status, manual cooldown and parsed one-shot recheck. Offline fake-executable recovery and all real M1 recordings are covered by tests. Local verification: 390 tests pass on Python 3.12 and 3.14; lint, formatting, build and doctor pass (gh is not installed). M5 remains [~]: no real quota recording exists; acceptance requires a redacted capture or explicit waiver, plus green CI for the final changes. Scheduled rechecks remain in M10.
+- 2026-11-18: M5 accepted: the user explicitly waived the real quota recording requirement. No real quota capture exists; acceptance relies on offline recovery coverage (133 adapter, limit and next tests passed) and previously recorded green CI for `6b5adcc` (run `44377237276`). See [acceptance notes](adapters.md#offline-recovery-evidence-and-m5-acceptance).

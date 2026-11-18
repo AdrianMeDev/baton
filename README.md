@@ -172,8 +172,9 @@ limit_patterns = ['usage[_ -]limit', 'insufficient_quota', 'provider credits exh
 
 Only failures are classified; successful answers mentioning limits remain successful. Generic
 HTTP 429 alone does not imply exhausted usage. All four adapters have simulated quota coverage;
-real M1 recordings cover success and ordinary errors only. A real quota capture or explicit
-waiver remains required for M5 acceptance. To reproduce the offline recovery sequence:
+real M1 recordings cover success and ordinary errors only. On 2026-11-18, the user explicitly
+waived the real quota recording requirement for M5 acceptance, based on the passing offline
+tests. No real quota response has been captured. To reproduce the offline recovery sequence:
 
 ```bash
 uv run pytest -q tests/test_next.py -k cli_limit_recovery
