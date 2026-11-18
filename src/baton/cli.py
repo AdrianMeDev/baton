@@ -3,6 +3,7 @@ from collections.abc import Sequence
 
 from baton import __version__
 from baton.doctor import run_doctor
+from baton.probe import DEFAULT_PROMPT, DEFAULT_TIMEOUT, run_probe_command
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,6 +21,22 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "doctor", help="show configured agents and whether their CLIs are in PATH"
     )
+    probe = subparsers.add_parser(
+        "probe", help="run an agent CLI headless with a tiny read-only request"
+    )
+    probe.add_argument("agent", help="agent name from the config")
+    probe.add_argument("--prompt", default=DEFAULT_PROMPT, help="prompt (default: %(default)r)")
+    probe.add_argument("--model", help="override the model from the config")
+    probe.add_argument("--tty", action="store_true", help="run on a pseudo-terminal")
+    probe.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT,
+        metavar="S",
+        help="seconds before the agent is killed (default: %(default)s)",
+    )
+    probe.add_argument("--record", metavar="PATH", help="save a redacted JSON recording")
+    probe.add_argument("--dry-run", action="store_true", help="print the command, run nothing")
     return parser
 
 
@@ -31,4 +48,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "doctor":
         return run_doctor(args.config)
+    if args.command == "probe":
+        return run_probe_command(
+            args.agent,
+            config_path=args.config,
+            prompt=args.prompt,
+            model=args.model,
+            tty=args.tty,
+            timeout=args.timeout,
+            record=args.record,
+            dry_run=args.dry_run,
+        )
     return 0
