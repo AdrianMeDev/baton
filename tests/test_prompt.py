@@ -1,7 +1,14 @@
 from pathlib import Path
 
 from baton.plan import Tracking, parse_plan
-from baton.prompt import implement_prompt, plan_prompt, plan_retry_prompt, step_text
+from baton.prompt import (
+    ROADMAP_PROBLEM_MARKER,
+    implement_prompt,
+    plan_prompt,
+    plan_retry_prompt,
+    roadmap_problem,
+    step_text,
+)
 from baton.roadmap import parse_roadmap
 
 FIXTURES = Path(__file__).parent / "fixtures" / "plans"
@@ -128,3 +135,24 @@ def test_plan_retry_prompt_contains_errors_and_previous_output():
     assert prompt.startswith("BASE")
     assert "- step 2: missing '**Verify:**'" in prompt
     assert "# Plan: old" in prompt
+
+
+def test_roadmap_problem_marker_is_parsed_from_a_line():
+    assert roadmap_problem(f"thinking\n{ROADMAP_PROBLEM_MARKER} M2 needs M5 first\n") == (
+        "M2 needs M5 first"
+    )
+    assert roadmap_problem(f"  {ROADMAP_PROBLEM_MARKER}   spaced out  ") == "spaced out"
+
+
+def test_roadmap_problem_ignores_normal_output_and_inline_mentions():
+    assert roadmap_problem("done, all good") is None
+    assert roadmap_problem(f"see `{ROADMAP_PROBLEM_MARKER} x` in the docs") is None
+    assert roadmap_problem(f"{ROADMAP_PROBLEM_MARKER}") is None
+
+
+def test_prompts_describe_the_marker():
+    prompt, _ = _build()
+    assert ROADMAP_PROBLEM_MARKER in prompt
+    text = "# R\n\n## Milestones\n\n### M1 [ ] One\n- **Goal:** g\n- **Size:** S\n"
+    milestone = parse_roadmap(text).milestones[0]
+    assert ROADMAP_PROBLEM_MARKER in plan_prompt(text, milestone, "R.md", "tracked")

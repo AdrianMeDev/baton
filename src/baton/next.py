@@ -51,6 +51,7 @@ from baton.prompt import (
     handoff_prompt,
     implement_prompt,
     review_prompt,
+    roadmap_problem,
     step_text,
 )
 from baton.review import (
@@ -71,6 +72,7 @@ from baton.worktree import ensure_worktree, mirror_plan
 EXIT_OK = 0
 EXIT_FAILED = 1  # agent, verify or plan problem; changes stay in the tree
 EXIT_STOPPED = 2  # nothing was started (gate, no open step, dirty tree)
+EXIT_ROADMAP_PROBLEM = 4  # the agent reported BATON-ROADMAP-PROBLEM; nothing was marked
 EXIT_EXHAUSTED = 3  # every agent of the route is in cooldown; the partial diff stays in the tree
 
 DEFAULT_AGENT_TIMEOUT = 1800.0
@@ -332,6 +334,12 @@ def _run_next(
             _log(plan_path, f"step {step.number}: agent moved HEAD {before} -> {after}", date)
             return EXIT_FAILED
 
+        problem_reason = roadmap_problem(result.text)
+        if problem_reason is not None:
+            say(out, f"The agent reported a roadmap problem: {problem_reason}")
+            say(out, "Changes (if any) stay in the working tree; the step stays open.")
+            _log(plan_path, f"step {step.number}: roadmap problem ({problem_reason})", date)
+            return EXIT_ROADMAP_PROBLEM
         if not result.ok:
             say(out, f"The agent failed: {result.error}")
             say(out, "Changes (if any) stay in the working tree; the step stays open.")

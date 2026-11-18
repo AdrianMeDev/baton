@@ -10,6 +10,7 @@ from baton.next import (
     EXIT_EXHAUSTED,
     EXIT_FAILED,
     EXIT_OK,
+    EXIT_ROADMAP_PROBLEM,
     EXIT_STOPPED,
     run_next,
     run_next_command,
@@ -1498,3 +1499,18 @@ def test_evidence_preserves_multiline_findings(repo):
     assert "\n" not in entry
     data = json.loads(entry.removeprefix("baton-evidence: "))
     assert data["findings"][0]["message"] == review.findings[0].message
+
+
+def test_implementer_roadmap_problem_stops_without_marking(repo):
+    adapter = FakeAdapter(AgentResult(ok=True, text="BATON-ROADMAP-PROBLEM: contradicts M1"))
+    code, out = run(repo, adapter)
+    assert code == EXIT_ROADMAP_PROBLEM
+    assert "contradicts M1" in out
+    plan = plan_of(repo)
+    assert plan.steps[0].status == "open"
+    assert any("roadmap problem" in line for line in plan.log)
+
+
+def test_normal_output_is_not_a_roadmap_problem(repo):
+    code, _ = run(repo, FakeAdapter(action=edit))
+    assert code == EXIT_OK

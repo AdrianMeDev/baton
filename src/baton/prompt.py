@@ -2,11 +2,29 @@
 
 from __future__ import annotations
 
+import re
+
 from baton.plan import Plan, Step, Tracking
 from baton.roadmap import Milestone, milestone_text, section_text
 from baton.verify import VerifyResult
 
-RULES = """\
+ROADMAP_PROBLEM_MARKER = "BATON-ROADMAP-PROBLEM:"
+ROADMAP_PROBLEM_RULE = (
+    "- If the roadmap itself is wrong (contradictory, impossible, a missing prerequisite), do not "
+    f"work around it: reply with a single line `{ROADMAP_PROBLEM_MARKER} <reason>` and stop."
+)
+
+_PROBLEM_RE = re.compile(rf"^[ \t]*{re.escape(ROADMAP_PROBLEM_MARKER)}[ \t]*(.+?)[ \t]*$", re.M)
+
+
+def roadmap_problem(text: str) -> str | None:
+    """The reason of a ``BATON-ROADMAP-PROBLEM:`` line in an agent reply, if there is one."""
+    match = _PROBLEM_RE.search(text)
+    return match[1] if match else None
+
+
+RULES = (
+    """\
 Rules:
 - Implement ONLY this step. Do not start, prepare or anticipate any other step.
 - Do not run any git command that changes state (no commit, add, stash, reset, checkout, push).
@@ -15,7 +33,10 @@ Rules:
 - Include the tests this step asks for and follow the project's existing conventions.
 - Re-read the files you touch before editing; do not rely on assumptions.
 - If the step cannot be done as written, stop and explain why instead of widening the scope.
-- When finished, reply with a short summary of what you changed."""
+- When finished, reply with a short summary of what you changed.
+"""
+    + ROADMAP_PROBLEM_RULE
+)
 
 
 def step_text(plan_text: str, step: Step) -> str:
@@ -85,7 +106,8 @@ def review_prompt(plan: Plan, step: Step, text: str, changes: str) -> str:
 
 PLAN_SECTIONS = ("Architecture", "Decisions", "Definition of done")
 
-PLAN_RULES = """\
+PLAN_RULES = (
+    """\
 Rules:
 - Only plan. Do not edit, create or delete any file and do not run any git command that changes
   state. baton writes `.agent-plan.md` from your reply.
@@ -102,7 +124,10 @@ Rules:
   concrete command) and Size (S, M or L: how hard the step is for an agent).
 - The milestone's Goal, Includes and Done when are the task and the acceptance criteria. The last
   step's Done when includes the milestone's Done when and the roadmap's Definition of done.
-- State assumptions in the plan instead of asking questions."""
+- State assumptions in the plan instead of asking questions.
+"""
+    + ROADMAP_PROBLEM_RULE
+)
 
 PLAN_FORMAT = """\
 # Plan: <short title>
