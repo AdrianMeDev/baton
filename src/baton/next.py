@@ -157,7 +157,7 @@ def _run_next(
     verify_timeout: float,
     override: bool = False,
     today: str | None = None,
-    select_fix: Callable[[Step], Adapter | None] | None = None,
+    select_fix: Callable[[Step, bool], Adapter | None] | None = None,
 ) -> int:
     date = today or datetime.date.today().isoformat()
     plan_path = repo / PLAN_FILENAME
@@ -198,50 +198,54 @@ def _run_next(
             return EXIT_FAILED
 
         verify = run_verify(step.verify, repo, verify_timeout)
+        repairs = 0
+        for escalated in (False, True):
+            if not verify.verified or verify.passed:
+                break
+            _say(out, f"Verify failed ({_verify_failure(verify)}): {verify.command}")
+            _say(out, verify.output_tail)
+            fixer = select_fix(step, escalated) if select_fix is not None else None
+            if fixer is None:
+                break
+            repairs += 1
+            label = "Escalating repair to tier L." if escalated else "Attempting same-tier repair."
+            _say(out, label)
+            repair = fixer.run(fix_prompt(prompt, verify), repo, agent_timeout)
+            after = head(repo)
+            if after != before:
+                _say(out, f"HEAD moved from {before} to {after}: fixer committed. Step not marked.")
+                _log(plan_path, f"step {step.number}: fixer moved HEAD {before} -> {after}", date)
+                return EXIT_FAILED
+            if not repair.ok:
+                _say(out, f"The fix agent failed: {repair.error}")
+                _say(out, "Changes stay in the working tree; the step stays open.")
+                _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
+                return EXIT_FAILED
+            verify = run_verify(step.verify, repo, verify_timeout)
+            cost = (
+                result.cost + repair.cost
+                if result.cost is not None and repair.cost is not None
+                else None
+            )
+            result = replace(result, cost=cost)
         if verify.verified and not verify.passed:
             _say(out, f"Verify failed ({_verify_failure(verify)}): {verify.command}")
             _say(out, verify.output_tail)
-            fixer = select_fix(step) if select_fix is not None else None
-            if fixer is not None:
-                _say(out, "Attempting same-tier repair.")
-                repair = fixer.run(fix_prompt(prompt, verify), repo, agent_timeout)
-                after = head(repo)
-                if after != before:
-                    _say(
-                        out,
-                        f"HEAD moved from {before} to {after}: fixer committed. Step not marked.",
-                    )
-                    _log(
-                        plan_path, f"step {step.number}: fixer moved HEAD {before} -> {after}", date
-                    )
-                    return EXIT_FAILED
-                if not repair.ok:
-                    _say(out, f"The fix agent failed: {repair.error}")
-                    _say(out, "Changes stay in the working tree; the step stays open.")
-                    _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
-                    return EXIT_FAILED
-                verify = run_verify(step.verify, repo, verify_timeout)
-                cost = (
-                    result.cost + repair.cost
-                    if result.cost is not None and repair.cost is not None
-                    else None
-                )
-                result = replace(result, cost=cost)
-            if not verify.passed:
-                _say(out, f"Verify failed ({_verify_failure(verify)}): {verify.command}")
-                _say(out, verify.output_tail)
-                _say(out, "Changes stay in the working tree; the step stays open.")
-                _log(
-                    plan_path,
-                    f"step {step.number}: verify failed ({_verify_failure(verify)})",
-                    date,
-                )
-                return EXIT_FAILED
+            _say(out, "Changes stay in the working tree; the step stays open.")
+            _log(
+                plan_path,
+                f"step {step.number}: verify failed ({_verify_failure(verify)}) "
+                f"after {repairs} repair attempts",
+                date,
+            )
+            return EXIT_FAILED
 
         # Re-read: the agent may have touched the plan file despite the rules.
         text = plan_path.read_text(encoding="utf-8")
         text = set_step_status(text, step.number, "pending", after)
         note = "implemented" if verify.verified else "implemented (no Verify command)"
+        if repairs:
+            note += f" after {repairs} repair attempts"
         text = append_log(text, f"{date}: step {step.number} {note}, waiting for commit.")
         save_plan(plan_path, text)
     except (ConfigError, GitError, LimitStateError, PlanError, OSError) as exc:
@@ -385,12 +389,12 @@ def run_next_command(
         implementation = _RoutedAdapter(route, LimitStore(), out)
         return implementation
 
-    def select_fix(step: Step) -> Adapter | None:
+    def select_fix(step: Step, escalated: bool) -> Adapter | None:
         # Legacy configs have no role routes; injected callers likewise keep their behavior.
         assert config is not None and implementation is not None
         if not config.routes:
             return None
-        route = resolve_route(config, "fix", tier=implementation.route.tier)
+        route = resolve_route(config, "fix", tier="L" if escalated else implementation.route.tier)
         fixer = _RoutedAdapter(route, implementation.store, out)
         fixer.attempted_agents = implementation.attempted_agents
         return fixer

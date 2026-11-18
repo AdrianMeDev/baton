@@ -621,3 +621,148 @@ def test_timed_out_verify_repairs_and_reruns_original_command(repo, repair_chain
     assert len(calls) == 2 and calls[0] == calls[1]
     assert "Outcome: timed out" in repair_chain[1]["second"].prompts[0]
     assert "test hung" in repair_chain[1]["second"].prompts[0]
+
+
+@pytest.mark.parametrize("tier", ["S", "M", "L"])
+@pytest.mark.parametrize("succeeds", [False, True])
+def test_verification_escalates_once_then_stops(
+    repo, repair_chain, routed_executions, monkeypatch, tier, succeeds
+):
+    config, agents = repair_chain
+    config.write_text(
+        config.read_text()
+        .replace(
+            "[routes.implement]",
+            '[agents.strong]\nadapter="pi"\ncommand="strong"\n[routes.implement]',
+        )
+        .replace('L=["second"]', 'L=["strong"]\nS=["second"]')
+    )
+    events = []
+    agents["first"].action = lambda r: events.append("implement")
+    agents["second"].action = lambda r: events.append("same-tier fix")
+
+    def strong(r):
+        events.append("L fix")
+        if succeeds and (tier != "L" or len(agents["strong"].prompts) == 2):
+            edit(r)
+
+    agents["strong"] = FakeAdapter(action=strong)
+    from baton.verify import run_verify
+
+    def verify(command, cwd, timeout):
+        events.append("verify")
+        return run_verify(command, cwd, timeout)
+
+    monkeypatch.setattr("baton.next.run_verify", verify)
+    # Changing diagnostic output makes it observable which failure the fixer receives.
+    write_plan(
+        repo,
+        verify=(
+            "echo failure-$(test -f checked && echo second || echo first); "
+            "touch checked; test -s new.txt"
+        ),
+    )
+    before = head(repo)
+    code, out = invoke_chain(repo, repair_chain, agent_name="first", tier=tier)
+    assert code == (EXIT_OK if succeeds else EXIT_FAILED)
+    assert events == [
+        "implement",
+        "verify",
+        "L fix" if tier == "L" else "same-tier fix",
+        "verify",
+        "L fix",
+        "verify",
+    ]
+    assert [e.route.tier for e in routed_executions] == [tier, tier, "L"]
+    assert "failure-second" in agents["strong"].prompts[-1]
+    if tier == "L":
+        assert len(agents["strong"].prompts) == 2
+    else:
+        assert "failure-first" in agents["second"].prompts[0]
+    assert out.index("Attempting same-tier repair") < out.index("Escalating repair to tier L")
+    assert head(repo) == before
+    assert (repo / "checked").exists()
+    assert plan_of(repo).steps[0].status == ("pending" if succeeds else "open")
+    assert "after 2 repair attempts" in plan_of(repo).log[-1]
+    if not succeeds:
+        assert "failure-second" in out and "step stays open" in out
+
+
+@pytest.mark.parametrize("mode", ["missing", "cooldown", "quota", "failed", "committed"])
+def test_escalation_route_failure_stops_with_partial_work(repo, repair_chain, mode):
+    from datetime import UTC, datetime, timedelta
+
+    from baton.limits import LimitStore, UsageLimit
+
+    config, agents = repair_chain
+    config.write_text(
+        config.read_text()
+        .replace("[routes.fix]", '[agents.strong]\nadapter="pi"\ncommand="strong"\n[routes.fix]')
+        .replace('L=["second"]', "" if mode == "missing" else 'L=["strong"]')
+    )
+    agents["second"].action = lambda r: (r / "partial-fix").write_text("preserved")
+    agents["strong"] = FakeAdapter(AgentResult(ok=False, error="broken"))
+    if mode == "cooldown":
+        LimitStore().set("strong", datetime.now(UTC) + timedelta(hours=2))
+    elif mode == "quota":
+        agents["strong"].result = AgentResult(ok=False, error="quota", limit=UsageLimit())
+    elif mode == "committed":
+
+        def commit(r):
+            git(r, "add", "-A")
+            git(r, "commit", "-m", "unexpected L commit")
+
+        agents["strong"].action = commit
+    code, out = invoke_chain(repo, repair_chain)
+    assert code == EXIT_FAILED
+    assert plan_of(repo).steps[0].status == "open"
+    assert (repo / "partial-fix").read_text() == "preserved"
+    assert len(agents["second"].prompts) == 1
+    if mode == "missing":
+        assert "[routes.fix] L" in out
+    elif mode == "committed":
+        assert "HEAD moved" in out
+    else:
+        assert "fix agent failed" in out
+
+
+def test_escalation_handoff_keeps_retry_budget_and_participants(
+    repo, repair_chain, routed_executions
+):
+    from baton.limits import UsageLimit
+
+    config, agents = repair_chain
+    config.write_text(
+        config.read_text()
+        .replace(
+            "[routes.fix]",
+            '[agents.limited]\nadapter="claude"\ncommand="limited"\n'
+            '[agents.final]\nadapter="pi"\ncommand="final"\n[routes.fix]',
+        )
+        .replace('L=["second"]', 'L=["limited", "final"]')
+    )
+    agents["second"].action = None
+    agents["limited"] = FakeAdapter(
+        AgentResult(ok=False, error="quota", limit=UsageLimit()),
+        lambda r: (r / "partial-L").write_text("preserve L work"),
+    )
+
+    def finish(r):
+        assert (r / "partial-L").read_text() == "preserve L work"
+        edit(r)
+
+    agents["final"] = FakeAdapter(action=finish)
+    write_plan(repo, verify="echo checked >> checks; echo latest-failure; test -s new.txt")
+    code, out = invoke_chain(repo, repair_chain)
+    assert code == EXIT_OK
+    assert (repo / "checks").read_text().splitlines() == ["checked"] * 3
+    assert [a.name for a in routed_executions[0].attempted_agents] == [
+        "first",
+        "second",
+        "limited",
+        "final",
+    ]
+    prompt = agents["final"].prompts[0]
+    assert "Handoff" in prompt and "latest-failure" in prompt and "partial-L" in prompt
+    assert out.count("Escalating repair to tier L") == 1
+    assert plan_of(repo).steps[0].status == "pending"
