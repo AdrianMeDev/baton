@@ -76,7 +76,7 @@ Updated: 2026-11-18
 - **Depends on:** M0
 - **Size:** M, ~5 commits
 
-### M3 [~] Erster Durchstich mit Claude
+### M3 [x] Erster Durchstich mit Claude
 - **Goal:** `baton next` setzt einen Schritt mit `claude -p` um und stoppt für den Commit.
 - **Includes:** Prompt-Vorlage (nur dieser Schritt, kein git), Claude-Adapter, Verify ausführen, `[~]` setzen, Bericht + Commit-Befehl
 - **Done when:** Beispiel-Repo: Schritt umgesetzt, geprüft, markiert; HEAD unverändert
@@ -157,3 +157,4 @@ Updated: 2026-11-18
 - 2026-11-18: M0 done (walking skeleton: --version, config, doctor, CI, Zed tasks, README)
 - 2026-11-18: M1 done (baton probe, runner with PTY mode, recorded fixtures for claude/codex/agy/pi, docs/adapters.md, agy needs no PTY)
 - 2026-11-18: M2 done (plan and roadmap parser/writer, commit gate, baton status)
+- 2026-11-18: M3 done (baton next: prompt, claude adapter, verify, `[~]` marking, report; HEAD unchanged)

@@ -3,8 +3,8 @@
 Command-line tool that distributes the steps of a commit plan (`.agent-plan.md`) across several
 coding agent CLIs (Claude Code, Codex, Antigravity, pi). See `docs/ROADMAP.md` for the plan.
 
-Status: milestone M2 (plan engine and commit gate). Currently available: `baton --version`,
-`baton doctor`, `baton probe` and `baton status`.
+Status: milestone M3 (first end-to-end run with Claude). Currently available: `baton --version`,
+`baton doctor`, `baton probe`, `baton status` and `baton next`.
 
 ## Installation
 
@@ -67,6 +67,39 @@ the commit gate. If the previous step is implemented (`[~]`) but not committed, 
 and `status` prints the `git add -A` / `git commit -m "<message>"` hint. If it is already committed,
 `status` reports that the step can be marked `[x]`; it never modifies any file. Exit code 0, or 1 for
 an unreadable or malformed plan.
+
+### `baton next`
+
+```
+baton next [--path DIR] [--timeout S] [--verify-timeout S] [--dry-run]
+```
+
+Implements exactly one plan step and stops for your commit, like the `/next` skill. M3 uses one
+fixed agent: the first configured agent with `adapter = "claude"` (routing and `--agent`/`--tier`
+come in M4). Flow:
+
+1. **Gate.** If a step is `[~]` and committed (HEAD is newer than the noted hash), it is marked
+   `[x]` and the run continues. If it is not committed yet, baton prints the changed files and the
+   `git add -A` / `git commit -m "<message>"` hint and stops. If the changes were discarded
+   (clean tree, HEAD unchanged), it stops as well. A dirty tree without a `[~]` step also refuses
+   to start, so the agent never mixes its work with yours.
+2. **Implement.** `claude -p` runs in the repo root with the prompt for the first open step only
+   (no git, do not touch `.agent-plan.md`, include tests). Flags: `docs/adapters.md`.
+3. **Check HEAD.** If the agent moved HEAD, baton reports an error and does not mark the step.
+4. **Verify.** baton runs the step's **Verify** command itself (`bash -c` in the repo root); its
+   result, not the agent's, decides.
+5. **Mark and report.** The step becomes `[~] (on <HEAD>)`, a Log line is added, and the report
+   lists the changed files, the checks and the commit commands. baton never commits or pushes.
+
+Exit codes: 0 step done and verified; 1 agent or Verify failed, or the plan/config is invalid (the
+changes stay in the tree, the step stays `[ ]`, a Log line records the failure; there is no
+automatic fix loop yet); 2 nothing was started (gate blocked, no open step, dirty tree, no plan).
+`--timeout` (default 1800 s) limits the agent, `--verify-timeout` (default 900 s) the Verify
+command. `--dry-run` prints the step, the command and the prompt and changes nothing.
+
+Safety: the agent runs with `--permission-mode acceptEdits`, Bash allowed but `Bash(git:*)`
+disallowed. It edits files in the working tree and uses your login's quota; review the diff
+before committing.
 
 ### Plan format
 

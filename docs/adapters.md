@@ -32,6 +32,23 @@ Probes never read tokens or auth files; the CLIs use the login the user already 
   `result`; the wording must be recorded when it occurs.
 - Fixtures: `tests/fixtures/claude/ok.json`, `error.json`.
 
+### Implement call (`baton next`)
+
+`baton next` uses a write-enabled call, built by `ClaudeAdapter.argv()` in `src/baton/adapter.py`:
+
+```
+claude -p <prompt> --output-format json [--model M] \
+  --permission-mode acceptEdits --allowedTools Bash --disallowedTools "Bash(git:*)"
+```
+
+- `acceptEdits` lets the agent change files without prompting; there is no plan mode here.
+- `Bash` is allowed so the agent can run tests; `Bash(git:*)` is disallowed, so the agent cannot
+  commit, stash or reset. This is a guard, not a sandbox: baton additionally compares HEAD before
+  and after the run and refuses to mark the step if it moved.
+- The working directory is the repository root. The agent is told not to touch `.agent-plan.md`.
+- The result is parsed as in the read-only call: failure means `is_error: true`, empty or invalid
+  JSON, or a timeout. The agent's own test runs are advisory; baton's Verify run decides.
+
 ## codex
 
 - Call: `codex exec <prompt> --json --sandbox read-only --skip-git-repo-check [-m M]`.
