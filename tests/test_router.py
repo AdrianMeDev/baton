@@ -2,7 +2,16 @@ from pathlib import Path
 
 import pytest
 
-from baton.config import AgentConfig, Config, ConfigError, ConfigLocation
+from baton.config import (
+    ROUTE_ROLES,
+    ROUTE_TIERS,
+    AgentConfig,
+    Config,
+    ConfigError,
+    ConfigLocation,
+    bundled_config_path,
+    load_config,
+)
 from baton.router import Route, resolve_route
 
 CLAUDE = AgentConfig("sonnet", "claude", "claude", "sonnet")
@@ -109,3 +118,47 @@ def test_review_route_with_no_eligible_agents(config: Config) -> None:
 def test_review_requires_implementer_provider_for_multi_provider_adapter(config: Config) -> None:
     with pytest.raises(ConfigError, match=r"set 'provider' in \[agents\.pi-unknown\]"):
         resolve_route(config, "review", implementer=PI_UNKNOWN)
+
+
+@pytest.fixture
+def bundled() -> Config:
+    return load_config(ConfigLocation(bundled_config_path(), "bundled"))
+
+
+@pytest.mark.parametrize("role", ROUTE_ROLES)
+@pytest.mark.parametrize("tier", ROUTE_TIERS)
+def test_bundled_routes_cover_every_role_and_tier(bundled: Config, role: str, tier: str) -> None:
+    route = resolve_route(bundled, role, tier=tier)
+    assert route.tier == tier
+    assert [agent.name for agent in route.agents] == bundled.routes[role][tier]
+
+
+@pytest.mark.parametrize(
+    ("role", "tier", "names"),
+    [
+        ("plan_roadmap", "S", ["claude-opus", "codex-astra", "agy"]),
+        ("plan_commits", "S", ["claude-sonnet", "agy"]),
+        ("plan_commits", "M", ["claude-sonnet", "agy"]),
+        ("plan_commits", "L", ["claude-opus", "codex-astra", "agy"]),
+        ("implement", "S", ["pi-ollama", "claude-haiku"]),
+        ("implement", "M", ["claude-sonnet", "codex"]),
+        ("implement", "L", ["claude-sonnet", "agy", "codex"]),
+    ],
+)
+def test_bundled_route_order(bundled: Config, role: str, tier: str, names: list[str]) -> None:
+    assert [agent.name for agent in resolve_route(bundled, role, tier=tier).agents] == names
+
+
+@pytest.mark.parametrize(
+    ("implementer", "reviewers"),
+    [
+        ("claude-sonnet", ["codex-astra", "agy"]),
+        ("codex", ["claude-opus", "agy"]),
+        ("agy", ["claude-opus", "codex-astra"]),
+    ],
+)
+def test_bundled_review_is_cross_provider(
+    bundled: Config, implementer: str, reviewers: list[str]
+) -> None:
+    route = resolve_route(bundled, "review", implementer=bundled.agents[implementer])
+    assert [agent.name for agent in route.agents] == reviewers
