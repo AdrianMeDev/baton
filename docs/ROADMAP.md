@@ -69,7 +69,7 @@ Updated: 2026-11-18
 - **Depends on:** M0
 - **Size:** M, ~5 commits
 
-### M2 [ ] Plan-Engine und Commit-Sperre
+### M2 [x] Plan-Engine und Commit-Sperre
 - **Goal:** `.agent-plan.md` und `ROADMAP.md` exakt im Skill-Format lesen und schreiben.
 - **Includes:** Parser/Writer (Status, Stufe, Verify, Milestone), Commit-Sperre wie `next`, `baton status`
 - **Done when:** Tests mit Beispielplänen und temporären Git-Repos decken alle Zustände ab
@@ -156,3 +156,4 @@ Updated: 2026-11-18
 - 2026-11-18: Auto-Modus ergänzt (M7–M10), Statistik/Doku nach hinten verschoben (M11–M12)
 - 2026-11-18: M0 done (walking skeleton: --version, config, doctor, CI, Zed tasks, README)
 - 2026-11-18: M1 done (baton probe, runner with PTY mode, recorded fixtures for claude/codex/agy/pi, docs/adapters.md, agy needs no PTY)
+- 2026-11-18: M2 done (plan and roadmap parser/writer, commit gate, baton status)

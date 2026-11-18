@@ -3,8 +3,8 @@
 Command-line tool that distributes the steps of a commit plan (`.agent-plan.md`) across several
 coding agent CLIs (Claude Code, Codex, Antigravity, pi). See `docs/ROADMAP.md` for the plan.
 
-Status: milestone M1 (CLI spike). Currently available: `baton --version`, `baton doctor` and
-`baton probe`.
+Status: milestone M2 (plan engine and commit gate). Currently available: `baton --version`,
+`baton doctor`, `baton probe` and `baton status`.
 
 ## Installation
 
@@ -54,6 +54,28 @@ directory and prints the call, exit code, duration, stdout and stderr. `--record
 redacted JSON recording (home path, e-mail addresses and UUIDs removed), `--tty` runs the agent
 through a pseudo-terminal, `--dry-run` only prints the call. The exit code is 0 only if the agent
 exited with 0. A live probe uses your login's quota. Results per CLI: `docs/adapters.md`.
+
+### `baton status`
+
+```
+baton status [--path DIR]
+```
+
+Read-only overview of the repository in `DIR` (default: current directory): the milestone from
+`docs/ROADMAP.md`, all steps of `.agent-plan.md` with their markers, the current and next step, and
+the commit gate. If the previous step is implemented (`[~]`) but not committed, the gate is blocked
+and `status` prints the `git add -A` / `git commit -m "<message>"` hint. If it is already committed,
+`status` reports that the step can be marked `[x]`; it never modifies any file. Exit code 0, or 1 for
+an unreadable or malformed plan.
+
+### Plan format
+
+baton reads and writes `.agent-plan.md` and `docs/ROADMAP.md` in the format of the `/plan-commits`,
+`/next` and `/plan-roadmap` skills. Step markers are `[ ]` open, `[~] (on <hash>)` implemented and
+waiting for the commit, `[x] – <hash>` committed, `[-]` skipped. Writes are in place (markers, hash
+suffixes, Log and Changelog lines only), so hand edits survive. Each step may carry an optional
+`- **Size:** S|M|L` bullet; unknown bullets are ignored. Structural errors (no `## Steps`, unknown
+marker, duplicate step numbers) are reported with the line number.
 
 ## Development
 
