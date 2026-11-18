@@ -132,7 +132,7 @@ Updated: 2026-11-18
 - **Depends on:** M8, M9
 - **Size:** L, ~7 commits
 
-### M11 [ ] Auswertung und Verteilung
+### M11 [~] Auswertung und Verteilung
 - **Goal:** Sehen, wer wie viel arbeitet, und Kontingente vorausschauend verteilen.
 - **Includes:** `runs.jsonl`, `baton stats` (Läufe, Dauer, Tokens je Agent), Tages-Budgets und Gewichte im Router
 - **Done when:** `stats` zeigt die Verteilung; überschrittenes Budget lenkt um

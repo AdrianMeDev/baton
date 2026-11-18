@@ -24,6 +24,8 @@ class AgentResult:
     cost: float | None = None
     raw: str = ""
     limit: UsageLimit | None = None
+    tokens: int | None = None
+    duration_s: float | None = None
 
 
 class Adapter(Protocol):
@@ -45,7 +47,11 @@ def _classify_failure(parse):
 
     @wraps(parse)
     def wrapped(self, result: RunResult) -> AgentResult:
-        parsed = parse(self, result)
+        parsed = replace(
+            parse(self, result),
+            tokens=_reported_tokens(type(self).__name__, result.stdout),
+            duration_s=result.duration_s,
+        )
         if parsed.ok or result.timed_out:
             return parsed
         try:
@@ -364,3 +370,46 @@ def _pi_message_cost(message: dict[str, Any]) -> float | None:
 def make_adapter(agent: AgentConfig) -> CommandAdapter:
     adapters = {"claude": ClaudeAdapter, "codex": CodexAdapter, "agy": AgyAdapter, "pi": PiAdapter}
     return adapters[agent.adapter](agent.command, agent.model, agent.limit_patterns)
+
+
+def _reported_tokens(adapter: str, raw: str) -> int | None:
+    """Read terminal usage only; cache/reasoning breakdowns are not extra output."""
+    try:
+        records = [json.loads(raw)]
+    except json.JSONDecodeError:
+        records = []
+        for line in raw.splitlines():
+            with suppress(json.JSONDecodeError):
+                records.append(json.loads(line))
+    totals = []
+    for event in records:
+        if not isinstance(event, dict):
+            continue
+        if adapter == "CodexAdapter" and event.get("type") != "turn.completed":
+            continue
+        if adapter == "PiAdapter":
+            if event.get("type") != "message_end":
+                continue
+            event = event.get("message", {})
+            if not isinstance(event, dict) or event.get("role") != "assistant":
+                continue
+        usage = event.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        if adapter == "ClaudeAdapter":
+            keys = (
+                "input_tokens",
+                "output_tokens",
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+            )
+        elif adapter == "CodexAdapter":
+            keys = ("input_tokens", "output_tokens")
+        elif adapter == "PiAdapter":
+            keys = ("totalTokens",)
+        else:
+            keys = ("total_tokens",)
+        values = [usage.get(key) for key in keys]
+        if all(type(value) is int and value >= 0 for value in values):
+            totals.append(sum(values))
+    return sum(totals) if totals else None

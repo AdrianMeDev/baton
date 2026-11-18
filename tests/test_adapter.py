@@ -485,3 +485,33 @@ def test_replay_every_real_m1_recording(path):
     )
     assert parsed.ok == path.name.startswith("ok")
     assert parsed.limit is None
+
+
+@pytest.mark.parametrize(
+    "name,total", [("claude", 22583), ("codex", 21454), ("agy", 10288), ("pi", 3202)]
+)
+def test_recorded_token_totals(name, total):
+    from baton.adapter import _reported_tokens
+    import json
+    from pathlib import Path
+
+    raw = json.loads((Path(__file__).parent / "fixtures" / name / "ok.json").read_text())["stdout"]
+    assert _reported_tokens(name.title() + "Adapter", raw) == total
+
+
+@pytest.mark.parametrize(
+    "usage,expected",
+    [
+        ({}, None),
+        ({"input_tokens": True, "output_tokens": 1}, None),
+        ({"input_tokens": 0, "output_tokens": 0}, 0),
+    ],
+)
+def test_optional_usage(usage, expected):
+    from baton.adapter import _reported_tokens
+    import json
+
+    event = json.dumps({"type": "turn.completed", "usage": usage})
+    assert _reported_tokens("CodexAdapter", event) == expected
+    if expected is not None:
+        assert _reported_tokens("CodexAdapter", event + "\n" + event) == expected * 2
