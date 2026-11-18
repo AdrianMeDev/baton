@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TextIO
 
 from baton.adapter import Adapter, AgentResult, CommandAdapter, make_adapter
-from baton.config import ConfigError, find_config_path, load_config
+from baton.config import AgentConfig, ConfigError, find_config_path, load_config
 from baton.gate import GateResult, apply_gate, check_gate
 from baton.git import PLAN_FILENAME, GitError, dirty_paths, handoff_context, head
 from baton.limits import LimitStateError, LimitStore
@@ -221,7 +221,9 @@ def _run_next(
     return EXIT_OK
 
 
-def _dry_run(repo: Path, select_adapter: Callable[[Step], CommandAdapter], out: TextIO) -> int:
+def _dry_run(
+    repo: Path, select_adapter: Callable[[Step], CommandAdapter | _RoutedAdapter], out: TextIO
+) -> int:
     """Print the prompt and argv for the first open step; change nothing."""
     plan_path = repo / PLAN_FILENAME
     if not plan_path.is_file():
@@ -251,10 +253,16 @@ def _dry_run(repo: Path, select_adapter: Callable[[Step], CommandAdapter], out: 
 
 
 class _RoutedAdapter:
-    """Try each available configured name once, handing off only on quota failures."""
+    """One invocation's route and actual participants, including partial quota attempts.
+
+    ``route.tier`` retains the effective tier even after a handoff. Participants are
+    configured identities, so later fix/review selection can inspect their providers.
+    Cooldown skips and argv previews are not attempts.
+    """
 
     def __init__(self, route: Route, store: LimitStore, out: TextIO) -> None:
         self.route = route
+        self.attempted_agents: list[AgentConfig] = []
         self.store = store
         self.out = out
 
@@ -296,7 +304,9 @@ class _RoutedAdapter:
             current_prompt = prompt
             if previous is not None:
                 current_prompt = handoff_prompt(prompt, previous, handoff_context(repo))
-            result = make_adapter(agent).run(current_prompt, repo, timeout)
+            adapter = make_adapter(agent)
+            self.attempted_agents.append(agent)
+            result = adapter.run(current_prompt, repo, timeout)
             # Check even failed attempts, before persisting a cooldown or trying a successor.
             if head(repo) != before:
                 return AgentResult(ok=False, error="agent moved HEAD")
@@ -332,7 +342,7 @@ def run_next_command(
     """CLI entry: select an agent for the step being run or previewed."""
     out = out or sys.stdout
 
-    def select_adapter(step: Step) -> CommandAdapter:
+    def select_adapter(step: Step) -> _RoutedAdapter:
         config = load_config(find_config_path(config_path))
         route = resolve_route(
             config, "implement", tier=tier, step_size=step.size, agent_name=agent_name

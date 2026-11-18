@@ -97,7 +97,7 @@ Updated: 2026-11-18
 - **Depends on:** M4
 - **Size:** M, ~5 commits
 
-### M6 [ ] Qualitätsschleife
+### M6 [~] Qualitätsschleife
 - **Goal:** Fehlschläge selbst reparieren, schwierige Schritte eskalieren, unabhängig reviewen.
 - **Includes:** Fix-Versuch mit Fehlerausgabe, Eskalation zur höheren Stufe (nach 2 Fehlschlägen auf L: Opus/Astra), Review durch anderen Anbieter (Schweregrade), Befunde im Bericht
 - **Done when:** Fake-Adapter-Tests zeigen Fix → Eskalation; Review nie beim selben Anbieter

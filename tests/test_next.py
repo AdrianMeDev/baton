@@ -224,6 +224,21 @@ M=["first", "first", "second"]
     return config, agents
 
 
+@pytest.fixture
+def routed_executions(monkeypatch):
+    from baton.next import _RoutedAdapter
+
+    executions = []
+
+    def capture(*args, **kwargs):
+        execution = _RoutedAdapter(*args, **kwargs)
+        executions.append(execution)
+        return execution
+
+    monkeypatch.setattr("baton.next._RoutedAdapter", capture)
+    return executions
+
+
 def invoke_chain(repo, chain, **kw):
     config, _ = chain
     out = io.StringIO()
@@ -231,7 +246,7 @@ def invoke_chain(repo, chain, **kw):
     return code, out.getvalue()
 
 
-def test_limit_handoff_preserves_partial_work_and_verifies_once(repo, chain):
+def test_limit_handoff_preserves_partial_work_and_verifies_once(repo, chain, routed_executions):
     from baton.limits import LimitStore, UsageLimit
 
     _, agents = chain
@@ -260,6 +275,10 @@ def test_limit_handoff_preserves_partial_work_and_verifies_once(repo, chain):
     assert sum("waiting for commit" in line for line in plan_of(repo).log) == 1
     assert "1h fallback" in out
     assert "first" in LimitStore().active()
+    execution = routed_executions[0]
+    assert execution.route.tier == "M"
+    assert [agent.name for agent in execution.attempted_agents] == ["first", "second"]
+    assert [agent.adapter for agent in execution.attempted_agents] == ["claude", "codex"]
 
 
 @pytest.mark.parametrize("pinned", [False, True])
@@ -307,7 +326,7 @@ def test_ordinary_failure_does_not_handoff(repo, chain):
     assert not agents["second"].prompts
 
 
-def test_cooldown_skips_agent_and_explicit_pin_does_not_fallback(repo, chain):
+def test_cooldown_skips_agent_and_explicit_pin_does_not_fallback(repo, chain, routed_executions):
     from datetime import UTC, datetime, timedelta
 
     from baton.limits import LimitStore
@@ -320,6 +339,8 @@ def test_cooldown_skips_agent_and_explicit_pin_does_not_fallback(repo, chain):
     code, out = invoke_chain(repo, chain)
     assert code == EXIT_OK and "Skipping first" in out
     assert not agents["first"].prompts and len(agents["second"].prompts) == 1
+    assert routed_executions[0].attempted_agents == []
+    assert [agent.name for agent in routed_executions[1].attempted_agents] == ["second"]
 
 
 def test_provider_reset_time_is_persisted(repo, chain):
@@ -334,7 +355,9 @@ def test_provider_reset_time_is_persisted(repo, chain):
     assert LimitStore().read()["first"] == reset
 
 
-def test_dry_run_selects_after_gate_and_skips_cooldown_without_writes(repo, chain):
+def test_dry_run_selects_after_gate_and_skips_cooldown_without_writes(
+    repo, chain, routed_executions
+):
     from datetime import UTC, datetime, timedelta
 
     from baton.adapter import CodexAdapter
@@ -355,9 +378,10 @@ def test_dry_run_selects_after_gate_and_skips_cooldown_without_writes(repo, chai
     assert (repo / ".agent-plan.md").read_bytes() == plan_before
     assert LimitStore().path.read_bytes() == state_before
     assert not (repo / "new.txt").exists()
+    assert routed_executions[0].attempted_agents == []
 
 
-def test_cli_limit_recovery(repo, chain, monkeypatch, capsys):
+def test_cli_limit_recovery(repo, chain, monkeypatch, capsys, routed_executions):
     import json
     import sys
 
@@ -405,6 +429,10 @@ def test_cli_limit_recovery(repo, chain, monkeypatch, capsys):
     assert head(repo) == before
     assert plan_of(repo).steps[0].status == "pending"
     assert "first" in LimitStore().active()
+    execution = routed_executions[0]
+    assert execution.route.tier == "M"
+    assert [agent.name for agent in execution.attempted_agents] == ["first", "second"]
+    assert [agent.adapter for agent in execution.attempted_agents] == ["claude", "codex"]
     assert main([*args, "status", "--path", str(repo)]) == EXIT_OK
     assert "first: cooldown until" in capsys.readouterr().out
     assert main([*args, "recheck", "first"]) == EXIT_OK
@@ -442,3 +470,30 @@ def test_malformed_state_stops_before_agent(repo, chain):
     assert code == EXIT_FAILED and "Repair or move" in out
     assert not agents["first"].prompts and not agents["second"].prompts
     assert store.path.read_text() == "broken"
+
+
+@pytest.mark.parametrize(
+    ("size", "tier", "agent_name", "expected_tier", "expected_agent"),
+    [
+        (None, None, None, "M", "first"),
+        ("S", None, None, "S", "first"),
+        ("S", "L", None, "L", "first"),
+        ("L", None, "second", "L", "second"),
+        ("L", "S", "second", "S", "second"),
+    ],
+)
+def test_execution_retains_effective_route(
+    repo, chain, routed_executions, size, tier, agent_name, expected_tier, expected_agent
+):
+    config, _ = chain
+    with config.open("a") as stream:
+        stream.write('S=["first", "second"]\nL=["first", "second"]\n')
+    if size:
+        plan = repo / ".agent-plan.md"
+        plan.write_text(plan.read_text().replace("- **Why:** w", f"- **Size:** {size}"))
+    assert invoke_chain(repo, chain, tier=tier, agent_name=agent_name)[0] == EXIT_OK
+    execution = routed_executions[0]
+    assert execution.route.tier == expected_tier
+    assert [agent.name for agent in execution.attempted_agents] == [expected_agent]
+    if agent_name:
+        assert [agent.name for agent in execution.route.agents] == [agent_name]
