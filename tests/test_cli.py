@@ -320,3 +320,79 @@ def test_next_accepts_push_flag() -> None:
 
     assert build_parser().parse_args(["next", "--push"]).push is True
     assert build_parser().parse_args(["next"]).push is False
+
+
+ROADMAP = (FIXTURES / "roadmaps" / "planning.md").read_text(encoding="utf-8")
+GENERATED = (
+    (FIXTURES / "plans" / "generated_valid.md")
+    .read_text(encoding="utf-8")
+    .replace("M2 – Widgets", "M1 – Widgets")
+)
+
+
+@pytest.fixture
+def plan_sample(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """A repo with a roadmap; the ``plan_commits`` route is a fake read-only claude."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    payload = bin_dir / "planner.json"
+    payload.write_text(json.dumps({"is_error": False, "result": GENERATED}), encoding="utf-8")
+    fake = bin_dir / "planner"
+    fake.write_text(f"#!/bin/sh\ncat {shlex.quote(str(payload))}\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    (repo / "docs" / "ROADMAP.md").write_text(ROADMAP, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[agents.planner]\nadapter = "claude"\ncommand = "planner"\n'
+        '[routes.plan_commits]\nM = ["planner"]\n',
+        encoding="utf-8",
+    )
+    return repo, config
+
+
+def _plan(repo: Path, config: Path, *args: str) -> int:
+    return main(["--config", str(config), "plan", "--path", str(repo), *args])
+
+
+def test_plan_dry_run_prints_prompt_and_writes_nothing(plan_sample, capsys):
+    repo, config = plan_sample
+    assert _plan(repo, config, "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert "Milestone: M1 – Widgets" in out
+    assert "Tier M, agent planner (claude)" in out
+    assert "### M1 [ ] Widgets" in out
+    assert not (repo / ".agent-plan.md").exists()
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_plan_writes_a_valid_plan(plan_sample, capsys):
+    repo, config = plan_sample
+    assert _plan(repo, config, "--milestone", "M1", "--timeout", "30") == 0
+    assert "Wrote .agent-plan.md" in capsys.readouterr().out
+    plan = parse_plan((repo / ".agent-plan.md").read_text(encoding="utf-8"))
+    assert plan.milestone.id == "M1"
+    assert len(plan.steps) == 3
+
+
+def test_plan_without_route_exits_1(plan_sample, capsys):
+    repo, config = plan_sample
+    config.write_text(CONFIG, encoding="utf-8")
+    assert _plan(repo, config) == 1
+    assert "configure [routes.plan_commits] M" in capsys.readouterr().out
+
+
+def test_plan_parser_options() -> None:
+    from baton.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["plan", "--milestone", "M3", "--agent", "a", "--tier", "S", "--dry-run"]
+    )
+    assert (args.milestone, args.agent, args.tier, args.dry_run) == ("M3", "a", "S", True)

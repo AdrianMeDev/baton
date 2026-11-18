@@ -92,6 +92,29 @@ def handoff_context(repo: Path) -> str:
     )
 
 
+def is_tracked(repo: Path, path: str) -> bool:
+    """Whether ``path`` (relative to the repository root) is tracked by git."""
+    try:
+        _git(repo, "ls-files", "--error-unmatch", "--", path)
+    except GitError:
+        return False
+    return True
+
+
+def ensure_excluded(repo: Path, pattern: str = PLAN_FILENAME) -> bool:
+    """Append ``pattern`` to ``.git/info/exclude`` unless listed; True if the file changed."""
+    exclude = Path(_git(repo, "rev-parse", "--git-path", "info/exclude").strip())
+    if not exclude.is_absolute():
+        exclude = repo / exclude
+    text = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+    if pattern in (line.strip() for line in text.splitlines()):
+        return False
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    sep = "" if not text or text.endswith("\n") else "\n"
+    exclude.write_text(f"{text}{sep}{pattern}\n", encoding="utf-8")
+    return True
+
+
 _UMLAUTS = str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"})
 
 

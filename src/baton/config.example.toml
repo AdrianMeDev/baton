@@ -72,6 +72,7 @@ S = ["claude-opus", "codex-astra", "agy"]
 M = ["claude-opus", "codex-astra", "agy"]
 L = ["claude-opus", "codex-astra", "agy"]
 
+# `baton plan`: the tier is the milestone's Size (or --tier); the reply is the plan text.
 [routes.plan_commits]
 S = ["claude-sonnet", "agy"]
 M = ["claude-sonnet", "agy"]
