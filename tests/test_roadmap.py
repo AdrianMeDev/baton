@@ -7,9 +7,11 @@ from baton.roadmap import (
     append_changelog,
     find_roadmap,
     load_roadmap,
+    milestone_text,
     next_milestone,
     parse_roadmap,
     save_roadmap,
+    section_text,
     set_milestone_status,
 )
 
@@ -131,3 +133,22 @@ def test_find_roadmap(tmp_path: Path):
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "ROADMAP.md").write_text("x")
     assert find_roadmap(tmp_path) == tmp_path / "docs" / "ROADMAP.md"
+
+
+def test_section_text_matches_heading_prefix():
+    text = read("planning.md")
+    assert section_text(text, "Decisions") == "## Decisions\n- D1: widgets are immutable."
+    assert section_text(text, "Definition of done") == (
+        "## Definition of done (every milestone)\n- tests green, lint clean"
+    )
+    assert section_text(text, "Risks") is None
+
+
+def test_milestone_text_is_the_raw_section():
+    text = read("planning.md")
+    milestone = parse_roadmap(text).get("M2")
+    assert milestone is not None
+    assert milestone_text(text, milestone) == (
+        "### M2 [ ] Gadgets\n- **Goal:** Gadgets exist.\n- **Depends on:** M1\n"
+        "- **Size:** L, ~6 commits"
+    )

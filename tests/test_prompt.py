@@ -1,7 +1,8 @@
 from pathlib import Path
 
-from baton.plan import parse_plan
-from baton.prompt import implement_prompt, step_text
+from baton.plan import Tracking, parse_plan
+from baton.prompt import implement_prompt, plan_prompt, plan_retry_prompt, step_text
+from baton.roadmap import parse_roadmap
 
 FIXTURES = Path(__file__).parent / "fixtures" / "plans"
 
@@ -81,3 +82,49 @@ def test_fix_prompt_reports_timeout():
     prompt = fix_prompt(original, VerifyResult(True, False, None, True, "hung test", "pytest"))
     assert "Outcome: timed out" in prompt
     assert "hung test" in prompt
+
+
+ROADMAPS = Path(__file__).parent / "fixtures" / "roadmaps"
+
+
+def _plan_prompt(tracking: Tracking = "tracked") -> str:
+    text = (ROADMAPS / "planning.md").read_text(encoding="utf-8")
+    milestone = parse_roadmap(text).get("M1")
+    assert milestone is not None
+    return plan_prompt(text, milestone, "docs/ROADMAP.md", tracking)
+
+
+def test_plan_prompt_contains_milestone_and_context_only():
+    prompt = _plan_prompt()
+    assert "### M1 [ ] Widgets" in prompt
+    assert "a widget renders" in prompt
+    assert "## Architecture" in prompt
+    assert "D1: widgets are immutable." in prompt
+    assert "## Definition of done (every milestone)" in prompt
+    assert "M2 [ ] Gadgets" not in prompt
+    assert "M0 [x] Skeleton" not in prompt
+    assert "Everyone uses widgets." not in prompt
+    assert "Milestone: M1 – Widgets (docs/ROADMAP.md, tracked)" in prompt
+
+
+def test_plan_prompt_contains_planning_rules():
+    prompt = _plan_prompt()
+    assert "One step = one commit" in prompt
+    assert "3 to 8 steps" in prompt
+    assert "**Size:** <S|M|L>" in prompt
+    assert "Do not edit, create or delete any file" in prompt
+    assert "git command" in prompt
+
+
+def test_plan_prompt_roadmap_hint_depends_on_tracking():
+    assert "List `docs/ROADMAP.md` under Changes" in _plan_prompt("tracked")
+    local = _plan_prompt("local")
+    assert "not tracked" in local
+    assert "under Changes" not in local
+
+
+def test_plan_retry_prompt_contains_errors_and_previous_output():
+    prompt = plan_retry_prompt("BASE", "# Plan: old", ["step 2: missing '**Verify:**'"])
+    assert prompt.startswith("BASE")
+    assert "- step 2: missing '**Verify:**'" in prompt
+    assert "# Plan: old" in prompt

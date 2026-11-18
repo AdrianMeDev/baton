@@ -183,3 +183,23 @@ def save_roadmap(path: Path, text: str) -> None:
     parse_roadmap(text)
     with path.open("w", encoding="utf-8", newline="") as f:
         f.write(text)
+
+
+def section_text(text: str, heading: str) -> str | None:
+    """The raw ``## <heading>…`` section up to the next ``## `` heading; prefix match, any case.
+
+    ``heading="Definition of done"`` also finds ``## Definition of done (every milestone)``.
+    """
+    lines = text.splitlines()
+    wanted = f"## {heading}".lower()
+    at = next((i for i, ln in enumerate(lines) if ln.strip().lower().startswith(wanted)), None)
+    if at is None:
+        return None
+    end = next((i for i in range(at + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    return "\n".join(lines[at:end]).strip()
+
+
+def milestone_text(text: str, milestone: Milestone) -> str:
+    """The raw lines of ``milestone`` (heading to last body line) from the roadmap text."""
+    lines = text.splitlines()
+    return "\n".join(lines[milestone.start_line - 1 : milestone.end_line]).strip()

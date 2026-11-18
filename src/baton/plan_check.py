@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
-from baton.plan import PlanError, parse_plan
+from baton.plan import MilestoneRef, PlanError, parse_plan
 
 MIN_STEPS = 3
 MAX_STEPS = 8
@@ -60,3 +61,44 @@ def validate_plan(text: str, milestone_id: str) -> list[str]:
         if step.size is None:
             errors.append(f"{where}: '**Size:**' must be S, M or L")
     return errors
+
+
+@dataclass(frozen=True)
+class PlanHeader:
+    """The header values baton owns; they replace whatever the planner wrote."""
+
+    created: str
+    branch: str
+    base: str
+    milestone: MilestoneRef
+
+    def lines(self) -> list[str]:
+        m = self.milestone
+        return [
+            f"Created: {self.created} · Branch: {self.branch} · Base: {self.base}",
+            f"Milestone: {m.id} – {m.name} ({m.roadmap}, {m.tracking})",
+        ]
+
+
+def assemble_plan(output: str, header: PlanHeader) -> str:
+    """Turn the planner's reply into plan file text with baton's header and an empty Log.
+
+    Prose or a Markdown fence before ``# Plan:`` and everything from a closing fence or the
+    ``## Log`` heading on are dropped. Without a ``# Plan:`` heading the reply is returned
+    stripped, so that validation reports it.
+    """
+    lines = output.strip().splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith("# Plan:")), None)
+    if start is None:
+        return output.strip() + "\n"
+    body = lines[start:]
+    end = next(
+        (i for i, ln in enumerate(body) if ln.strip().startswith("```") or ln.strip() == "## Log"),
+        len(body),
+    )
+    body = body[:end]
+    section = next((i for i, ln in enumerate(body) if ln.startswith("## ")), len(body))
+    rest = body[section:]
+    while rest and not rest[-1].strip():
+        rest.pop()
+    return "\n".join([body[0].rstrip(), *header.lines(), "", *rest, "", "## Log", ""])
