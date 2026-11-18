@@ -1266,7 +1266,7 @@ def test_missing_tracked_roadmap_blocks_commit(repo, git_identity) -> None:
     code, out = run(repo, FakeAdapter(action=edit), commit=True)
     assert code == EXIT_FAILED and head(repo) == before
     assert "roadmap docs/ROADMAP.md not found" in out
-    assert plan_of(repo).steps[0].status == "pending"
+    assert plan_of(repo).steps[0].status == "open"
 
 
 def _branch(repo: Path) -> str:

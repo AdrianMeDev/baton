@@ -12,7 +12,7 @@ import datetime
 import shlex
 import sys
 from collections.abc import Callable
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
@@ -371,8 +371,7 @@ def _run_next(
             return EXIT_EXHAUSTED if getattr(adapter, "exhausted", False) else EXIT_FAILED
 
         if commit:
-            with suppress(RoadmapError):
-                sync_milestone(repo, plan, step, date)
+            sync_milestone(repo, plan, step, date)
         with _protect_plan(plan_path):
             verify = run_verify(step.verify, repo, verify_timeout)
         repairs = 0
@@ -479,7 +478,7 @@ def _run_next(
         else:
             text = append_log(text, f"{date}: step {step.number} {note}, waiting for commit.")
         save_plan(plan_path, text)
-    except (ConfigError, GitError, LimitStateError, PlanError, OSError) as exc:
+    except (ConfigError, GitError, LimitStateError, PlanError, RoadmapError, OSError) as exc:
         say(out, f"Error: {exc}")
         return EXIT_FAILED
 
@@ -619,7 +618,7 @@ def run_next_command(
                 push=push,
                 worktree=worktree,
             )
-        except (ConfigError, GitError, LimitStateError, PlanError, OSError) as exc:
+        except (ConfigError, GitError, LimitStateError, PlanError, RoadmapError, OSError) as exc:
             say(out, f"Error: {exc}")
             return EXIT_FAILED
 
