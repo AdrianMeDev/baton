@@ -76,7 +76,7 @@ Updated: 2026-11-18
 - **Depends on:** M0
 - **Size:** M, ~5 commits
 
-### M3 [ ] Erster Durchstich mit Claude
+### M3 [~] Erster Durchstich mit Claude
 - **Goal:** `baton next` setzt einen Schritt mit `claude -p` um und stoppt für den Commit.
 - **Includes:** Prompt-Vorlage (nur dieser Schritt, kein git), Claude-Adapter, Verify ausführen, `[~]` setzen, Bericht + Commit-Befehl
 - **Done when:** Beispiel-Repo: Schritt umgesetzt, geprüft, markiert; HEAD unverändert
