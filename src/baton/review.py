@@ -7,8 +7,11 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Literal
 
+from baton.adapter import Adapter, AgentResult
+from baton.config import AgentConfig
 from baton.git import PLAN_FILENAME, _git
 
 Severity = Literal["critical", "warning", "informational"]
@@ -99,3 +102,22 @@ def review_context(repo: Path) -> str:
             content, encoding = base64.b64encode(raw).decode("ascii"), "base64"
         untracked.append({"path": name, "content": content, "encoding": encoding})
     return json.dumps({"diff": patch, "untracked": untracked}, ensure_ascii=True)
+
+
+@dataclass(frozen=True)
+class ReviewResult:
+    reviewer: AgentConfig
+    findings: tuple[Finding, ...]
+
+    def summary(self) -> str:
+        counts = ", ".join(
+            f"{severity}={sum(f.severity == severity for f in self.findings)}"
+            for severity in SEVERITIES
+        )
+        return f"review {self.reviewer.name}: {counts}"
+
+
+def run_isolated_review(adapter: Adapter, prompt: str, timeout: float) -> AgentResult:
+    """Supply changes via the prompt and give the reviewer an empty disposable cwd."""
+    with TemporaryDirectory(prefix="baton-review-") as directory:
+        return adapter.run(prompt, Path(directory), timeout)

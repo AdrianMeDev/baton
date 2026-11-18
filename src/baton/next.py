@@ -29,7 +29,15 @@ from baton.plan import (
     save_plan,
     set_step_status,
 )
-from baton.prompt import fix_prompt, handoff_prompt, implement_prompt, step_text
+from baton.prompt import fix_prompt, handoff_prompt, implement_prompt, review_prompt, step_text
+from baton.review import (
+    SEVERITIES,
+    ReviewError,
+    ReviewResult,
+    parse_review,
+    review_context,
+    run_isolated_review,
+)
 from baton.router import Route, resolve_route
 from baton.verify import VerifyResult, run_verify
 
@@ -95,7 +103,13 @@ def _handle_gate(
 
 
 def _report_success(
-    out: TextIO, plan: Plan, step: Step, repo: Path, verify: VerifyResult, cost: float | None
+    out: TextIO,
+    plan: Plan,
+    step: Step,
+    repo: Path,
+    verify: VerifyResult,
+    cost: float | None,
+    review: ReviewResult | None = None,
 ) -> None:
     _say(out)
     _say(out, f"Step {step.number}/{len(plan.steps)} done: {step.message}")
@@ -109,6 +123,19 @@ def _report_success(
         _say(out, "  (the step has no Verify command: not verified)")
     if cost is not None:
         _say(out, f"Agent cost: ${cost:.4f}")
+    if review is not None:
+        _say(out, f"Independent reviewer: {review.reviewer.name} ({review.reviewer.adapter})")
+        if not review.findings:
+            _say(out, "  No findings.")
+        for severity in SEVERITIES:
+            findings = [finding for finding in review.findings if finding.severity == severity]
+            if findings:
+                _say(out, f"  {severity.upper()}:")
+            for finding in findings:
+                location = finding.path or ""
+                if finding.line is not None:
+                    location += f":{finding.line}"
+                _say(out, f"    {location + ': ' if location else ''}{finding.message}")
     _say(out, "Review: `git diff`")
     _say(out, "Commit:")
     _commit_hint(out, step.message)
@@ -158,6 +185,7 @@ def _run_next(
     override: bool = False,
     today: str | None = None,
     select_fix: Callable[[Step, bool], Adapter | None] | None = None,
+    review_step: Callable[[Plan, Step, str], ReviewResult | None] | None = None,
 ) -> int:
     date = today or datetime.date.today().isoformat()
     plan_path = repo / PLAN_FILENAME
@@ -181,7 +209,8 @@ def _run_next(
 
         _say(out, f"Step {step.number}/{len(plan.steps)}: {step.message}")
         adapter = select_adapter(step)
-        prompt = implement_prompt(plan, step, step_text(plan_path.read_text("utf-8"), step))
+        raw_step = step_text(plan_path.read_text("utf-8"), step)
+        prompt = implement_prompt(plan, step, raw_step)
         before = head(repo)
 
         result = adapter.run(prompt, repo, agent_timeout)
@@ -240,19 +269,31 @@ def _run_next(
             )
             return EXIT_FAILED
 
+        review = None
+        if review_step is not None:
+            try:
+                review = review_step(plan, step, raw_step)
+            except (ReviewError, ConfigError, GitError, LimitStateError, OSError) as exc:
+                _say(out, f"Independent review failed: {exc}")
+                _say(out, "Changes stay in the working tree; the step stays open.")
+                _log(plan_path, f"step {step.number}: independent review failed ({exc})", date)
+                return EXIT_FAILED
+
         # Re-read: the agent may have touched the plan file despite the rules.
         text = plan_path.read_text(encoding="utf-8")
         text = set_step_status(text, step.number, "pending", after)
         note = "implemented" if verify.verified else "implemented (no Verify command)"
         if repairs:
             note += f" after {repairs} repair attempts"
+        if review is not None:
+            note += f"; {review.summary()}"
         text = append_log(text, f"{date}: step {step.number} {note}, waiting for commit.")
         save_plan(plan_path, text)
     except (ConfigError, GitError, LimitStateError, PlanError, OSError) as exc:
         _say(out, f"Error: {exc}")
         return EXIT_FAILED
 
-    _report_success(out, plan, step, repo, verify, result.cost)
+    _report_success(out, plan, step, repo, verify, result.cost, review)
     return EXIT_OK
 
 
@@ -295,8 +336,11 @@ class _RoutedAdapter:
     Cooldown skips and argv previews are not attempts.
     """
 
-    def __init__(self, route: Route, store: LimitStore, out: TextIO) -> None:
+    def __init__(
+        self, route: Route, store: LimitStore, out: TextIO, *, review: bool = False
+    ) -> None:
         self.route = route
+        self.review = review
         self.attempted_agents: list[AgentConfig] = []
         self.store = store
         self.out = out
@@ -332,18 +376,22 @@ class _RoutedAdapter:
         )
 
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
-        before = head(repo)
+        before = None if self.review else head(repo)
         previous = None
         for agent in self._eligible():
             self._announce(agent)
             current_prompt = prompt
-            if previous is not None:
+            if previous is not None and not self.review:
                 current_prompt = handoff_prompt(prompt, previous, handoff_context(repo))
             adapter = make_adapter(agent)
             self.attempted_agents.append(agent)
-            result = adapter.run(current_prompt, repo, timeout)
+            result = (
+                run_isolated_review(adapter, current_prompt, timeout)
+                if self.review
+                else adapter.run(current_prompt, repo, timeout)
+            )
             # Check even failed attempts, before persisting a cooldown or trying a successor.
-            if head(repo) != before:
+            if not self.review and head(repo) != before:
                 return AgentResult(ok=False, error="agent moved HEAD")
             if result.ok or result.limit is None:
                 return result
@@ -399,6 +447,26 @@ def run_next_command(
         fixer.attempted_agents = implementation.attempted_agents
         return fixer
 
+    def review_step(plan: Plan, step: Step, raw_step: str) -> ReviewResult | None:
+        assert config is not None and implementation is not None
+        if not config.routes:
+            return None
+        route = resolve_route(
+            config,
+            "review",
+            tier=implementation.route.tier,
+            authors=tuple(implementation.attempted_agents),
+        )
+        reviewer = _RoutedAdapter(route, implementation.store, out, review=True)
+        before = head(repo)
+        changes = review_context(repo)
+        result = reviewer.run(review_prompt(plan, step, raw_step, changes), repo, agent_timeout)
+        if head(repo) != before or review_context(repo) != changes:
+            raise ReviewError("Candidate changed during review; review is stale")
+        if not result.ok:
+            raise ReviewError(result.error)
+        return ReviewResult(reviewer.attempted_agents[-1], parse_review(result.text))
+
     if dry_run:
         try:
             return _dry_run(repo, select_adapter, out)
@@ -412,4 +480,5 @@ def run_next_command(
         agent_timeout=agent_timeout,
         verify_timeout=verify_timeout,
         select_fix=select_fix,
+        review_step=review_step,
     )

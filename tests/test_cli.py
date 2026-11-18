@@ -174,12 +174,25 @@ def test_next_agent_override_runs_each_adapter(sample, capsys, name, adapter, mo
 def routed_sample(sample):
     repo, config = sample
     _fake_agent(config.parent / "bin", "routed-codex", "codex")
+    _fake_agent(config.parent / "bin", "reviewer", "claude")
+    (config.parent / "bin" / "reviewer.jsonl").write_text(
+        json.dumps({"is_error": False, "result": '{"findings": []}'})
+    )
     config.write_text(
         CONFIG
         + """
 [agents.large]
 adapter = "codex"
 command = "routed-codex"
+
+[agents.reviewer]
+adapter = "claude"
+command = "reviewer"
+provider = "independent"
+
+[routes.review]
+S = ["reviewer"]
+L = ["reviewer"]
 
 [routes.implement]
 S = ["fake", "large"]
