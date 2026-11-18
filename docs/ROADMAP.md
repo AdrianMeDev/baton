@@ -61,7 +61,7 @@ Updated: 2026-11-18
 - **Depends on:** –
 - **Size:** S, ~4 commits
 
-### M1 [ ] Spike: Headless-Verhalten der CLIs
+### M1 [~] Spike: Headless-Verhalten der CLIs
 - **Goal:** Gesichertes Wissen über Aufruf, Rechte, Ausgabe und Limit-Meldungen von claude, codex, agy, pi.
 - **Includes:** `docs/adapters.md`, `baton probe <agent>`, echte Ausgaben unter `tests/fixtures/`, Entscheidung zum agy-Terminal-Problem
 - **Done when:** je CLI ein Probe-Lauf und ein Fehler-/Limit-Beispiel als Testdatei
