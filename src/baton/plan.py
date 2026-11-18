@@ -198,3 +198,77 @@ def parse_plan(text: str) -> Plan:
 
 def load_plan(path: Path) -> Plan:
     return parse_plan(path.read_text(encoding="utf-8"))
+
+
+_MARKER_OF: dict[Status, str] = {status: marker for marker, status in MARKERS.items()}
+_TRANSITIONS: frozenset[tuple[Status, Status]] = frozenset(
+    {
+        ("open", "pending"),
+        ("open", "skipped"),
+        ("pending", "done"),
+        ("pending", "skipped"),
+        ("pending", "open"),  # the commit was discarded
+    }
+)
+
+
+def first_open_step(plan: Plan) -> Step | None:
+    return next((s for s in plan.steps if s.status == "open"), None)
+
+
+def pending_step(plan: Plan) -> Step | None:
+    return next((s for s in plan.steps if s.status == "pending"), None)
+
+
+def _eol(text: str) -> str:
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def set_step_status(text: str, number: int, status: Status, hash: str | None = None) -> str:
+    """Change one step heading in place; every other byte of ``text`` stays untouched.
+
+    ``pending`` and ``done`` need the commit ``hash`` (HEAD at marking time / the new commit).
+    """
+    step = next((s for s in parse_plan(text).steps if s.number == number), None)
+    if step is None:
+        raise PlanError(f"no step {number}")
+    if (step.status, status) not in _TRANSITIONS:
+        raise PlanError(
+            f"step {number}: cannot change status from {step.status} to {status}", step.start_line
+        )
+    if status in ("pending", "done") and not hash:
+        raise PlanError(f"step {number}: a commit hash is required for status {status}")
+
+    suffix = {"pending": f" (on {hash})", "done": f" – {hash}"}.get(status, "")
+    lines = text.splitlines(keepends=True)
+    old = lines[step.start_line - 1]
+    eol = old[len(old.rstrip("\r\n")) :]
+    lines[step.start_line - 1] = (
+        f"### {number}. [{_MARKER_OF[status]}]{suffix} {step.message}".rstrip() + eol
+    )
+    return "".join(lines)
+
+
+def append_log(text: str, line: str) -> str:
+    """Append ``- <line>`` to the ``## Log`` section, creating it at the end if missing."""
+    eol = _eol(text)
+    entry = f"- {line.strip()}{eol}"
+    lines = text.splitlines(keepends=True)
+    log_at = next((i for i, ln in enumerate(lines) if ln.strip() == "## Log"), None)
+    if log_at is None:
+        sep = "" if not text or text.endswith(eol) else eol
+        return f"{text}{sep}{eol}## Log{eol}{entry}"
+
+    end = next((i for i in range(log_at + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    last = next((i for i in range(end - 1, log_at, -1) if lines[i].strip()), log_at)
+    if not lines[last].endswith(("\n", "\r")):
+        lines[last] += eol
+    lines.insert(last + 1, entry)
+    return "".join(lines)
+
+
+def save_plan(path: Path, text: str) -> None:
+    """Write ``text`` back after checking that it still parses."""
+    parse_plan(text)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        f.write(text)
