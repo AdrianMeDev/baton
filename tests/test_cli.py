@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from baton import __version__
@@ -14,3 +16,8 @@ def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
 def test_no_arguments_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
     assert main([]) == 0
     assert "usage: baton" in capsys.readouterr().out
+
+
+def test_status_command_without_plan(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["status", "--path", str(tmp_path)]) == 0
+    assert "No .agent-plan.md" in capsys.readouterr().out

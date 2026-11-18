@@ -1,9 +1,11 @@
 import argparse
 from collections.abc import Sequence
+from pathlib import Path
 
 from baton import __version__
 from baton.doctor import run_doctor
 from baton.probe import DEFAULT_PROMPT, DEFAULT_TIMEOUT, run_probe_command
+from baton.status import run_status
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -37,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     probe.add_argument("--record", metavar="PATH", help="save a redacted JSON recording")
     probe.add_argument("--dry-run", action="store_true", help="print the command, run nothing")
+    status = subparsers.add_parser(
+        "status", help="show plan, milestone and commit-gate state (read-only)"
+    )
+    status.add_argument(
+        "--path", default=".", metavar="DIR", help="repository root (default: current directory)"
+    )
     return parser
 
 
@@ -48,6 +56,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "doctor":
         return run_doctor(args.config)
+    if args.command == "status":
+        return run_status(Path(args.path))
     if args.command == "probe":
         return run_probe_command(
             args.agent,
