@@ -232,23 +232,23 @@ M=["first", "first", "second"]
         "second": FakeAdapter(action=edit),
         "reviewer": FakeAdapter(AgentResult(ok=True, text='{"findings": []}')),
     }
-    monkeypatch.setattr("baton.next.make_adapter", lambda agent: agents[agent.name])
+    monkeypatch.setattr("baton.routed.make_adapter", lambda agent: agents[agent.name])
     return config, agents
 
 
 @pytest.fixture
 def routed_executions(monkeypatch):
-    from baton.next import _RoutedAdapter
+    from baton.routed import RoutedAdapter
 
     executions = []
 
     def capture(*args, **kwargs):
-        execution = _RoutedAdapter(*args, **kwargs)
+        execution = RoutedAdapter(*args, **kwargs)
         if not kwargs.get("review"):
             executions.append(execution)
         return execution
 
-    monkeypatch.setattr("baton.next._RoutedAdapter", capture)
+    monkeypatch.setattr("baton.next.RoutedAdapter", capture)
     return executions
 
 
@@ -440,7 +440,7 @@ def test_cli_limit_recovery(repo, chain, monkeypatch, capsys, routed_executions)
         .replace('command="second"', f"command={json.dumps(str(second))}")
         .replace('command="reviewer"', f"command={json.dumps(str(reviewer))}")
     )
-    monkeypatch.setattr("baton.next.make_adapter", make_adapter)
+    monkeypatch.setattr("baton.routed.make_adapter", make_adapter)
     before = head(repo)
     args = ["--config", str(config)]
     assert main([*args, "next", "--path", str(repo)]) == EXIT_OK
