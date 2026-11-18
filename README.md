@@ -321,3 +321,46 @@ uv run ruff format --check
 
 The same commands are available as Zed tasks in `.zed/tasks.json`. CI (`.github/workflows/ci.yml`)
 runs them on Python 3.12 and 3.14.
+
+### Publish a milestone pull request
+
+After all plan steps are committed or explicitly skipped, run:
+
+```sh
+baton pr
+baton pr --merge
+baton pr --path /path/to/repository
+```
+
+Publication requires Git, an authenticated GitHub CLI (`gh auth login`), a GitHub
+`origin`, and permission to push the milestone branch. The plan's `Branch` names
+the starting base branch. Run on the existing `baton/...` milestone branch or
+from the main checkout when that branch has a registered worktree. Baton uses
+the worktree's plan and leaves the main checkout on its current branch.
+
+The default command pushes the branch and creates a PR containing the goal,
+step dispositions, verification outcomes and independent review findings.
+Retries refresh the matching open PR; a matching merged revision is recognized.
+A closed unmerged PR must be reopened before retrying. If creation fails after
+push, run the same command again.
+
+`--merge` requires successful recorded checks and independent review evidence
+for every published commit, with no critical findings. Legacy plans can publish,
+but missing or stale evidence prevents automatic merge. CI must report checks;
+Baton waits up to five minutes for pending or initially absent checks. Failed CI,
+a changed head, rejected merge or timeout prints the PR URL and a stopping reason.
+Merging uses squash and requires the exact published head SHA. Success is reported
+only after GitHub confirms that revision merged.
+
+Live acceptance (use a designated disposable GitHub test repository):
+
+1. Configure authenticated `gh`, a GitHub origin and CI on Python 3.12 and 3.14.
+2. Complete a milestone through `baton next --commit` with independent review.
+3. Run `baton pr`, inspect its report, then `baton pr --merge`. Record the URL and
+   confirm the PR is merged after both CI jobs pass. Repeat to check recognition.
+4. In another milestone, introduce a change whose step verification passes but
+   whose remote CI fails. Run `baton pr --merge`. Record the URL, the CI failure
+   output and confirm the PR remains open. Repeat to verify it reuses that PR.
+
+Offline CLI acceptance runs with `uv run pytest -q tests/test_pr_acceptance.py`;
+it uses temporary repositories, a bare push destination and a stateful fake `gh`.

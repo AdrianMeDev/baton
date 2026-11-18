@@ -152,6 +152,8 @@ Updated: 2026-11-18
 - README bzw. `docs/` aktualisiert, wenn sich Bedienung oder Konfiguration ändert
 
 ## Changelog
+
+- 2026-11-18: M9 offline acceptance passed: publish-only, green merge, red CI stop and retries via public CLI; 632 tests, Ruff checks, build and doctor passed on Python 3.12. Live GitHub acceptance and Python 3.14 CI remain outstanding.
 - 2026-11-18: roadmap created
 - 2026-11-18: Auto-Modus ergänzt (M7–M10), Statistik/Doku nach hinten verschoben (M11–M12)
 - 2026-11-18: M0 done (walking skeleton: --version, config, doctor, CI, Zed tasks, README)
