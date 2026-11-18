@@ -111,7 +111,7 @@ Updated: 2026-11-18
 - **Depends on:** M6
 - **Size:** M, ~5 commits
 
-### M8 [ ] Headless planen
+### M8 [~] Headless planen
 - **Goal:** `baton plan` macht aus dem nächsten offenen Meilenstein eine gültige `.agent-plan.md`.
 - **Includes:** Planungs-Prompt nach den Regeln von `plan-commits` (inkl. Stufe je Schritt), Rolle `plan`, Validierung (Struktur, 3–8 Schritte, Verify je Schritt), bei ungültigem Plan ein zweiter Versuch, dann Stopp
 - **Done when:** für die Beispiel-Roadmap entstehen gültige Pläne; ungültige werden abgewiesen
