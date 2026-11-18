@@ -559,3 +559,17 @@ def test_real_wait_detects_mixed_budget_and_cooldown(world):
         out=world.out,
     )
     assert "Daily run budget exhausted" in hooks.wait("implement", "M")
+
+
+@pytest.mark.parametrize("merge", [True, False])
+def test_stop_in_final_step_prevents_publication_and_can_resume(world, merge):
+    world.write_plan(s1="[x] – abc1234")
+    world.on_next = lambda _: world.store.update(world.repo, stop_requested=True)
+    result = world.run(merge=merge)
+    assert result.outcome == "stopped"
+    assert result.reason == "stop requested"
+    assert not world.pr_calls
+    world.store.update(world.repo, stop_requested=False)
+    result = world.run(merge=merge)
+    assert result.outcome == ("merged" if merge else "published")
+    assert len(world.next_calls) == 1

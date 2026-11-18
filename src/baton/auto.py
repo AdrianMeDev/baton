@@ -212,6 +212,8 @@ def run_milestone(
                 budget.steps += 1
                 store.update(repo, step=0, steps_done=store.read(repo).steps_done + 1)
 
+        if stop_requested():
+            return stop("stop requested", milestone)
         code, output = hooks.pr(merge)
         say(out, output.rstrip())
         url = next((m[0] for m in re.finditer(r"https?://\S+", output)), "")
@@ -331,7 +333,13 @@ def default_hooks(
 
     def pr(merge: bool) -> tuple[int, str]:
         buffer = io.StringIO()
-        return run_pr(repo, merge=merge, out=buffer), buffer.getvalue()
+        code = run_pr(
+            repo,
+            merge=merge,
+            out=buffer,
+            stop_requested=lambda: store.read(repo).stop_requested,
+        )
+        return code, buffer.getvalue()
 
     def wait(role: str, size: str | None) -> str:
         from baton.runs import RunStore, budget_reset_message, daily_counts
