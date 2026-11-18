@@ -4,6 +4,7 @@ from pathlib import Path
 
 from baton import __version__
 from baton.doctor import run_doctor
+from baton.next import DEFAULT_AGENT_TIMEOUT, DEFAULT_VERIFY_TIMEOUT, run_next_command
 from baton.probe import DEFAULT_PROMPT, DEFAULT_TIMEOUT, run_probe_command
 from baton.status import run_status
 
@@ -45,6 +46,29 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument(
         "--path", default=".", metavar="DIR", help="repository root (default: current directory)"
     )
+    nxt = subparsers.add_parser(
+        "next", help="implement the first open plan step with Claude, verify it, stop for commit"
+    )
+    nxt.add_argument(
+        "--path", default=".", metavar="DIR", help="repository root (default: current directory)"
+    )
+    nxt.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_AGENT_TIMEOUT,
+        metavar="S",
+        help="seconds before the agent is killed (default: %(default)s)",
+    )
+    nxt.add_argument(
+        "--verify-timeout",
+        type=float,
+        default=DEFAULT_VERIFY_TIMEOUT,
+        metavar="S",
+        help="seconds before the Verify command is killed (default: %(default)s)",
+    )
+    nxt.add_argument(
+        "--dry-run", action="store_true", help="print the command and prompt, change nothing"
+    )
     return parser
 
 
@@ -58,6 +82,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_doctor(args.config)
     if args.command == "status":
         return run_status(Path(args.path))
+    if args.command == "next":
+        return run_next_command(
+            Path(args.path),
+            config_path=args.config,
+            agent_timeout=args.timeout,
+            verify_timeout=args.verify_timeout,
+            dry_run=args.dry_run,
+        )
     if args.command == "probe":
         return run_probe_command(
             args.agent,
