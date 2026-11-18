@@ -118,7 +118,7 @@ Updated: 2026-11-18
 - **Depends on:** M4, M2
 - **Size:** M, ~5 commits
 
-### M9 [~] Pull Requests und Merge
+### M9 [x] Pull Requests und Merge
 - **Goal:** Jeder fertige Meilenstein wird ein PR und je nach Regel gemergt.
 - **Includes:** `gh pr create` mit Beschreibung (Ziel, Schritte, Prüfungen, Review-Befunde), auf CI warten, Auto-Merge bei grün und ohne kritische Befunde, sonst offen lassen und stoppen
 - **Done when:** im Test-Repo entsteht ein PR, der bei grüner CI gemergt wird und bei roter offen bleibt
@@ -152,6 +152,11 @@ Updated: 2026-11-18
 - README bzw. `docs/` aktualisiert, wenn sich Bedienung oder Konfiguration ändert
 
 ## Changelog
+
+- 2026-11-18: M9 live acceptance complete in AdrianMeDev/baton, targeting `feat/milestone-pull-requests` (main unchanged). `baton next --commit` used Claude Haiku implementation and isolated Codex review; both final fixtures passed local verification and review without findings.
+  - Green: [PR #13](https://github.com/AdrianMeDev/baton/pull/13), reviewed head `3d064d96c04d0868095b6bbedf7c14a7100592d0`, merged by `baton pr --merge` as `b4c6096ebaf59d3c013aaadf9a6923eb56d82e0d` after [PR CI](https://github.com/AdrianMeDev/baton/actions/runs/44408538232) and [push CI](https://github.com/AdrianMeDev/baton/actions/runs/44408523588) passed on Python 3.12 and 3.14. Publish-only created the PR; repeat merge invocation reported Already merged.
+  - Red: [PR #12](https://github.com/AdrianMeDev/baton/pull/12), head `cbef71e38493807991515a224031e3eba2f8c349`, remains OPEN. The [intentional failure job](https://github.com/AdrianMeDev/baton/actions/runs/44408006014/job/135168304828) failed; `baton pr --merge` exited 1 with the PR URL and CI failed. Repeat invocation reused #12 and again stopped. This fixture must not merge.
+  - Live testing found that isolated Codex review requires `--skip-git-repo-check`; fixed the adapter and CLI assertions. Superseded [PR #11](https://github.com/AdrianMeDev/baton/pull/11) stopped on the stale assertion and was closed. Final local validation: 632 tests, Ruff lint/format, build and doctor passed.
 
 - 2026-11-18: M9 offline acceptance passed: publish-only, green merge, red CI stop and retries via public CLI; 632 tests, Ruff checks, build and doctor passed on Python 3.12. Live GitHub acceptance and Python 3.14 CI remain outstanding.
 - 2026-11-18: roadmap created
