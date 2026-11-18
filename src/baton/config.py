@@ -10,6 +10,8 @@ from importlib import resources
 from pathlib import Path
 
 ADAPTERS = ("claude", "codex", "agy", "pi")
+ROUTE_ROLES = ("plan_roadmap", "plan_commits", "implement", "fix", "review")
+ROUTE_TIERS = ("S", "M", "L")
 ENV_VAR = "BATON_CONFIG"
 
 
@@ -33,12 +35,14 @@ class AgentConfig:
     adapter: str
     command: str
     model: str | None = None
+    provider: str | None = None
 
 
 @dataclass(frozen=True)
 class Config:
     location: ConfigLocation
     agents: dict[str, AgentConfig] = field(default_factory=dict)
+    routes: dict[str, dict[str, list[str]]] = field(default_factory=dict)
 
 
 def bundled_config_path() -> Path:
@@ -85,7 +89,8 @@ def load_config(location: ConfigLocation) -> Config:
         raise ConfigError(f"{path}: 'agents' must be a table")
 
     agents = {name: _parse_agent(path, name, raw) for name, raw in raw_agents.items()}
-    return Config(location=location, agents=agents)
+    routes = _parse_routes(path, data.get("routes", {}), agents)
+    return Config(location=location, agents=agents, routes=routes)
 
 
 def _parse_agent(path: Path, name: str, raw: object) -> AgentConfig:
@@ -100,10 +105,41 @@ def _parse_agent(path: Path, name: str, raw: object) -> AgentConfig:
         )
     command = _require_str(raw, "command", where)
 
-    model = raw.get("model")
-    if model is not None and (not isinstance(model, str) or not model.strip()):
-        raise ConfigError(f"{where}: 'model' must be a non-empty string")
-    return AgentConfig(name=name, adapter=adapter, command=command, model=model)
+    model = _require_str(raw, "model", where) if "model" in raw else None
+    provider = _require_str(raw, "provider", where) if "provider" in raw else None
+    return AgentConfig(name=name, adapter=adapter, command=command, model=model, provider=provider)
+
+
+def _parse_routes(
+    path: Path, raw: object, agents: Mapping[str, AgentConfig]
+) -> dict[str, dict[str, list[str]]]:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path}: 'routes' must be a table")
+
+    routes: dict[str, dict[str, list[str]]] = {}
+    for role, raw_tiers in raw.items():
+        where = f"{path}: [routes.{role}]"
+        if role not in ROUTE_ROLES:
+            raise ConfigError(f"{where}: unknown role (expected one of: {', '.join(ROUTE_ROLES)})")
+        if not isinstance(raw_tiers, dict):
+            raise ConfigError(f"{where} must be a table")
+
+        tiers: dict[str, list[str]] = {}
+        for tier, chain in raw_tiers.items():
+            where = f"{path}: routes.{role}.{tier}"
+            if tier not in ROUTE_TIERS:
+                raise ConfigError(f"{where}: unknown tier (expected one of: S, M, L)")
+            if not isinstance(chain, list) or not chain:
+                raise ConfigError(f"{where} must be a non-empty array of agent names")
+            for name in chain:
+                if not isinstance(name, str) or not name.strip():
+                    raise ConfigError(f"{where}: agent names must be non-empty strings")
+                if name not in agents:
+                    raise ConfigError(f"{where}: unknown agent {name!r}")
+            tiers[tier] = chain
+        routes[role] = tiers
+
+    return routes
 
 
 def _require_str(raw: dict[str, object], key: str, where: str) -> str:
