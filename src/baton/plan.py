@@ -249,22 +249,28 @@ def set_step_status(text: str, number: int, status: Status, hash: str | None = N
     return "".join(lines)
 
 
-def append_log(text: str, line: str) -> str:
-    """Append ``- <line>`` to the ``## Log`` section, creating it at the end if missing."""
+def append_bullet(text: str, section: str, line: str) -> str:
+    """Append ``- <line>`` to the ``## <section>`` section, creating it at the end if missing."""
+    heading = f"## {section}"
     eol = _eol(text)
     entry = f"- {line.strip()}{eol}"
     lines = text.splitlines(keepends=True)
-    log_at = next((i for i, ln in enumerate(lines) if ln.strip() == "## Log"), None)
-    if log_at is None:
+    at = next((i for i, ln in enumerate(lines) if ln.strip() == heading), None)
+    if at is None:
         sep = "" if not text or text.endswith(eol) else eol
-        return f"{text}{sep}{eol}## Log{eol}{entry}"
+        return f"{text}{sep}{eol}{heading}{eol}{entry}"
 
-    end = next((i for i in range(log_at + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
-    last = next((i for i in range(end - 1, log_at, -1) if lines[i].strip()), log_at)
+    end = next((i for i in range(at + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    last = next((i for i in range(end - 1, at, -1) if lines[i].strip()), at)
     if not lines[last].endswith(("\n", "\r")):
         lines[last] += eol
     lines.insert(last + 1, entry)
     return "".join(lines)
+
+
+def append_log(text: str, line: str) -> str:
+    """Append ``- <line>`` to the ``## Log`` section, creating it at the end if missing."""
+    return append_bullet(text, "Log", line)
 
 
 def save_plan(path: Path, text: str) -> None:
