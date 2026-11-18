@@ -1229,3 +1229,92 @@ def test_missing_tracked_roadmap_blocks_commit(repo, git_identity) -> None:
     assert code == EXIT_FAILED and head(repo) == before
     assert "roadmap docs/ROADMAP.md not found" in out
     assert plan_of(repo).steps[0].status == "pending"
+
+
+def _branch(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "branch", "--show-current"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _commit_count(repo: Path, ref: str) -> int:
+    return int(
+        subprocess.run(
+            ["git", "-C", str(repo), "rev-list", "--count", ref],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+
+
+def test_commit_creates_milestone_branch_and_leaves_base_untouched(repo, git_identity) -> None:
+    base = _branch(repo)
+    base_head = head(repo)
+    code, out = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_OK
+    assert _branch(repo) == "baton/demo"
+    assert f"Branch: baton/demo (created from {base_head})" in out
+    code, out = run(
+        repo, FakeAdapter(action=lambda r: (r / "b.txt").write_text("b\n")), commit=True
+    )
+    assert code == EXIT_OK and "Branch: baton/demo\n" in out
+    assert _commit_count(repo, "baton/demo") == _commit_count(repo, base) + 2
+    base_now = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--short", base], capture_output=True, text=True
+    ).stdout.strip()
+    assert base_now == base_head
+
+
+def test_commit_switches_to_existing_milestone_branch(repo, git_identity) -> None:
+    base = _branch(repo)
+    git(repo, "branch", "baton/demo")
+    code, out = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_OK and "Branch: baton/demo (switched to)" in out
+    assert _branch(repo) == "baton/demo" and _commit_count(repo, base) == 1
+
+
+def test_dirty_tree_never_leads_to_a_branch_switch(repo, git_identity) -> None:
+    base = _branch(repo)
+    (repo / "wip.txt").write_text("wip\n")
+    adapter = FakeAdapter(action=edit)
+    code, _ = run(repo, adapter, commit=True)
+    assert code == EXIT_STOPPED and _branch(repo) == base and not adapter.prompts
+
+
+def test_enter_branch_refuses_dirty_tree(repo) -> None:
+    from baton.next import _enter_branch
+
+    (repo / "wip.txt").write_text("wip\n")
+    base = _branch(repo)
+    out = io.StringIO()
+    assert _enter_branch(repo, plan_of(repo), out) is False
+    assert "wip.txt" in out.getvalue() and "Cannot switch to baton/demo" in out.getvalue()
+    assert _branch(repo) == base
+
+
+def test_dirty_tree_is_fine_when_already_on_milestone_branch(repo, git_identity) -> None:
+    git(repo, "switch", "-c", "baton/demo")
+    code, _ = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_OK and _branch(repo) == "baton/demo"
+
+
+def test_without_commit_flag_no_branch_is_created(repo, git_identity) -> None:
+    base = _branch(repo)
+    run(repo, FakeAdapter(action=edit))
+    assert _branch(repo) == base
+
+
+def test_dry_run_with_commit_shows_target_branch_without_creating_it(
+    repo, chain, git_identity
+) -> None:
+    from baton.adapter import ClaudeAdapter
+
+    chain[1]["first"] = ClaudeAdapter()
+    base = _branch(repo)
+    code, out = invoke_chain(repo, chain, dry_run=True, commit=True)
+    assert code == EXIT_OK and "Branch: baton/demo (would be created)" in out
+    assert _branch(repo) == base

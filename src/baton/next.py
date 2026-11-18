@@ -18,7 +18,18 @@ from typing import TextIO
 from baton.adapter import Adapter, AgentResult, CommandAdapter, make_adapter
 from baton.config import AgentConfig, ConfigError, find_config_path, load_config
 from baton.gate import GateResult, apply_gate, check_gate
-from baton.git import PLAN_FILENAME, GitError, commit_all, dirty_paths, handoff_context, head
+from baton.git import (
+    PLAN_FILENAME,
+    GitError,
+    branch_exists,
+    commit_all,
+    current_branch,
+    dirty_paths,
+    handoff_context,
+    head,
+    milestone_branch,
+    switch_branch,
+)
 from baton.limits import LimitStateError, LimitStore
 from baton.milestone import sync_milestone
 from baton.plan import (
@@ -163,6 +174,25 @@ def _report_success(
             _say(out, "Next: last open step. After committing, run `baton next` once more.")
 
 
+def _enter_branch(repo: Path, plan: Plan, out: TextIO) -> bool:
+    """Make the milestone branch current (creating it from HEAD); False if the tree is dirty."""
+    branch = milestone_branch(plan)
+    if current_branch(repo) == branch:
+        _say(out, f"Branch: {branch}")
+        return True
+    dirty = dirty_paths(repo)
+    if dirty:
+        _say(out, f"Cannot switch to {branch}: the working tree has uncommitted changes.")
+        for path in dirty:
+            _say(out, f"  {path}")
+        _say(out, "Commit or stash them, then run `baton next --commit` again.")
+        return False
+    exists = branch_exists(repo, branch)
+    switch_branch(repo, branch, create=not exists)
+    _say(out, f"Branch: {branch} ({'switched to' if exists else 'created from ' + head(repo)})")
+    return True
+
+
 def _verify_failure(verify: VerifyResult) -> str:
     if verify.timed_out:
         return "timed out"
@@ -227,6 +257,8 @@ def _run_next(
             return EXIT_STOPPED
 
         _say(out, f"Step {step.number}/{len(plan.steps)}: {step.message}")
+        if commit and not _enter_branch(repo, plan, out):
+            return EXIT_STOPPED
         adapter = select_adapter(step)
         raw_step = step_text(plan_path.read_text("utf-8"), step)
         prompt = implement_prompt(plan, step, raw_step)
@@ -350,7 +382,11 @@ def _run_next(
 
 
 def _dry_run(
-    repo: Path, select_adapter: Callable[[Step], CommandAdapter | _RoutedAdapter], out: TextIO
+    repo: Path,
+    select_adapter: Callable[[Step], CommandAdapter | _RoutedAdapter],
+    out: TextIO,
+    *,
+    commit: bool = False,
 ) -> int:
     """Print the prompt and argv for the first open step; change nothing."""
     plan_path = repo / PLAN_FILENAME
@@ -372,6 +408,13 @@ def _dry_run(
         return EXIT_STOPPED
     prompt = implement_prompt(plan, step, step_text(text, step))
     _say(out, f"Step {step.number}/{len(plan.steps)}: {step.message}")
+    if commit:
+        branch = milestone_branch(plan)
+        if current_branch(repo) == branch:
+            state = "current"
+        else:
+            state = "exists, would switch" if branch_exists(repo, branch) else "would be created"
+        _say(out, f"Branch: {branch} ({state})")
     adapter = select_adapter(step)
     _say(out, "Command (cwd = repo root):")
     _say(out, "  " + " ".join(shlex.quote(a) for a in adapter.argv("<prompt>")))
@@ -522,7 +565,7 @@ def run_next_command(
 
     if dry_run:
         try:
-            return _dry_run(repo, select_adapter, out)
+            return _dry_run(repo, select_adapter, out, commit=commit)
         except (ConfigError, GitError, LimitStateError, PlanError, OSError) as exc:
             _say(out, f"Error: {exc}")
             return EXIT_FAILED
