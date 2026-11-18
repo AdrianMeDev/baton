@@ -411,3 +411,20 @@ Live acceptance (use a designated disposable GitHub test repository):
 
 Offline CLI acceptance runs with `uv run pytest -q tests/test_pr_acceptance.py`;
 it uses temporary repositories, a bare push destination and a stateful fake `gh`.
+
+### Usage statistics
+
+`baton stats` reads the shared XDG state journal across repositories, grouped by
+configured agent name (including removed agents). It counts routed planning,
+implementation, fix and review attempts, including failures, retries and handoffs.
+Probes, rechecks, previews and cooldown skips do not count.
+
+```text
+Agent  Attempts  Seconds  Tokens
+claude  3  45.100  12000 (partial; 1 unknown)
+```
+
+Seconds are summed process durations; tokens are provider-reported totals. Cache
+and reasoning breakdowns are counted once. Unknown measurements are explicit;
+partial totals sum the known values. Interrupted attempts still count. The journal
+contains usage metadata only, without prompts, output or diffs.

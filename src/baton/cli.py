@@ -1,4 +1,5 @@
 import argparse
+import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "doctor", help="show configured agents and whether their CLIs are in PATH"
     )
+    subparsers.add_parser("stats", help="summarize recorded agent attempts and usage")
     probe = subparsers.add_parser(
         "probe", help="run an agent CLI headless with a tiny read-only request"
     )
@@ -168,6 +170,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()
+        return 0
+    if args.command == "stats":
+        from baton.runs import print_stats
+
+        try:
+            print_stats(sys.stdout)
+        except LimitStateError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
         return 0
     if args.command == "cooldown":
         try:

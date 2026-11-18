@@ -103,3 +103,42 @@ class RunStore:
                     tokens=result.tokens,
                 )
             )
+
+
+def summarize(records):
+    """Aggregate dispatch identities, keeping missing completion measurements visible."""
+    completed = {r["id"]: r for r in records if r["event"] == "completion"}
+    totals = {}
+    for row in records:
+        if row["event"] != "dispatch":
+            continue
+        stats = totals.setdefault(
+            row["agent"],
+            dict(attempts=0, duration_s=0.0, tokens=0, missing_duration=0, missing_tokens=0),
+        )
+        stats["attempts"] += 1
+        end = completed.get(row["id"], {})
+        for key, missing in [("duration_s", "missing_duration"), ("tokens", "missing_tokens")]:
+            if end.get(key) is None:
+                stats[missing] += 1
+            else:
+                stats[key] += end[key]
+    return totals
+
+
+def print_stats(out):
+    totals = summarize(RunStore().read())
+    if not totals:
+        print("No recorded attempts.", file=out)
+        return
+    print("Agent  Attempts  Seconds  Tokens", file=out)
+    for name, row in sorted(totals.items()):
+        values = []
+        for key, missing in [("duration_s", "missing_duration"), ("tokens", "missing_tokens")]:
+            value = f"{row[key]:.3f}" if key == "duration_s" else str(row[key])
+            if row[missing] == row["attempts"]:
+                value = "unknown"
+            elif row[missing]:
+                value += f" (partial; {row[missing]} unknown)"
+            values.append(value)
+        print(f"{name}  {row['attempts']}  {values[0]}  {values[1]}", file=out)
