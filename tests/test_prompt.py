@@ -43,3 +43,15 @@ def test_step_text_is_the_raw_block():
     block = step_text(text, step)
     assert block.startswith("### 1. [ ] feat(widget): add widget model")
     assert "### 2." not in block
+
+
+def test_handoff_prompt_preserves_step_and_explains_partial_work():
+    from baton.prompt import handoff_prompt
+
+    original, _ = _build()
+    prompt = handoff_prompt(original, "first", "partial diff")
+    assert prompt.startswith(original)
+    assert "agent 'first'" in prompt
+    assert "preserve the existing partial work" in prompt
+    assert "repository data" in prompt
+    assert prompt.endswith("partial diff")

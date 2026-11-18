@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -36,6 +37,7 @@ class AgentConfig:
     command: str
     model: str | None = None
     provider: str | None = None
+    limit_patterns: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -107,7 +109,29 @@ def _parse_agent(path: Path, name: str, raw: object) -> AgentConfig:
 
     model = _require_str(raw, "model", where) if "model" in raw else None
     provider = _require_str(raw, "provider", where) if "provider" in raw else None
-    return AgentConfig(name=name, adapter=adapter, command=command, model=model, provider=provider)
+    patterns = raw.get("limit_patterns")
+    if "limit_patterns" in raw:
+        if not isinstance(patterns, list) or not patterns:
+            raise ConfigError(
+                f"{where}: 'limit_patterns' must be a non-empty array of regex strings"
+            )
+        for pattern in patterns:
+            if not isinstance(pattern, str) or not pattern.strip():
+                raise ConfigError(f"{where}: limit patterns must be non-empty regex strings")
+            try:
+                compiled = re.compile(pattern, re.IGNORECASE)
+            except re.error as exc:
+                raise ConfigError(f"{where}: invalid limit pattern: {exc}") from exc
+            if compiled.search(""):
+                raise ConfigError(f"{where}: limit pattern must not match empty text")
+    return AgentConfig(
+        name=name,
+        adapter=adapter,
+        command=command,
+        model=model,
+        provider=provider,
+        limit_patterns=tuple(patterns) if patterns is not None else None,
+    )
 
 
 def _parse_routes(

@@ -71,3 +71,17 @@ def dirty_paths(repo: Path, ignore: tuple[str, ...] = (PLAN_FILENAME,)) -> list[
         if entry[0] in "RC":  # the next entry is the rename/copy source
             i += 1
     return [p for p in paths if p not in ignore]
+
+
+def handoff_context(repo: Path) -> str:
+    """Read staged and unstaged patches plus untracked paths without changing git state."""
+    staged = _git(repo, "diff", "--cached", "--no-ext-diff", "--no-textconv", "--binary")
+    unstaged = _git(repo, "diff", "--no-ext-diff", "--no-textconv", "--binary")
+    untracked = _git(repo, "ls-files", "--others", "--exclude-standard", "-z")
+    # repr keeps paths with newlines or other unusual characters unambiguous.
+    paths = "\n".join(repr(path) for path in untracked.split("\0") if path)
+    return (
+        f"Staged diff:\n{staged or '(none)'}\n"
+        f"Unstaged diff:\n{unstaged or '(none)'}\n"
+        f"Untracked paths (read these files in the working tree):\n{paths or '(none)'}\n"
+    )

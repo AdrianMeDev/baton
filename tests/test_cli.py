@@ -229,3 +229,67 @@ def test_next_timed_out_adapter_leaves_step_open(routed_sample, capsys):
     assert _next(repo, config, "--agent", "large", "--timeout", "0.1") == 1
     assert "The agent failed: timed out" in capsys.readouterr().out
     assert parse_plan((repo / ".agent-plan.md").read_text()).steps[0].status == "open"
+
+
+def test_cooldown_persists_for_fresh_cli_invocation(tmp_path, monkeypatch, capsys):
+    from datetime import UTC, datetime, timedelta
+
+    from baton.limits import LimitStore
+
+    now = datetime(2026, 11, 18, 12, tzinfo=UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr("baton.cli.datetime", Clock)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    config = tmp_path / "config.toml"
+    config.write_text(CONFIG + '\n[agents.other]\nadapter="pi"\ncommand="pi"\n')
+    assert main(["--config", str(config), "cooldown", "fake", "2h"]) == 0
+    assert "2026-11-18T14:00:00+00:00" in capsys.readouterr().out
+    assert LimitStore().active(now=now) == {"fake": now + timedelta(hours=2)}
+    proc = subprocess.run(
+        [os.sys.executable, "-m", "baton", "--config", str(config), "cooldown", "other", "1h"],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert set(LimitStore().read()) == {"fake", "other"}
+
+
+@pytest.mark.parametrize("agent,duration", [("missing", "2h"), ("fake", "0h"), ("fake", "oops")])
+def test_invalid_cooldown_creates_no_state(tmp_path, monkeypatch, capsys, agent, duration):
+    state = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    config = tmp_path / "config.toml"
+    config.write_text(CONFIG)
+    assert main(["--config", str(config), "cooldown", agent, duration]) == 1
+    assert "Cannot set cooldown" in capsys.readouterr().out
+    assert not state.exists()
+
+
+def test_cli_cooldown_malformed_state_is_not_overwritten(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    path = tmp_path / "baton/limits.json"
+    path.parent.mkdir()
+    path.write_text("broken")
+    config = tmp_path / "config.toml"
+    config.write_text(CONFIG)
+    assert main(["--config", str(config), "cooldown", "fake", "2h"]) == 1
+    assert "Repair or move" in capsys.readouterr().out
+    assert path.read_text() == "broken"
+
+
+@pytest.fixture(autouse=True)
+def isolated_limit_state(monkeypatch, tmp_path_factory):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("limits-state")))
+
+
+def test_status_uses_explicit_config_and_shows_agents_without_plan(tmp_path, capsys):
+    config = tmp_path / "config.toml"
+    config.write_text(CONFIG)
+    assert main(["--config", str(config), "status", "--path", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "fake: available" in out and "No .agent-plan.md" in out

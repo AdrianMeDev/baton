@@ -13,10 +13,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO
 
-from baton.adapter import Adapter, CommandAdapter, make_adapter
+from baton.adapter import Adapter, AgentResult, CommandAdapter, make_adapter
 from baton.config import ConfigError, find_config_path, load_config
 from baton.gate import GateResult, apply_gate, check_gate
-from baton.git import PLAN_FILENAME, GitError, dirty_paths, head
+from baton.git import PLAN_FILENAME, GitError, dirty_paths, handoff_context, head
+from baton.limits import LimitStateError, LimitStore
 from baton.plan import (
     Plan,
     PlanError,
@@ -27,8 +28,8 @@ from baton.plan import (
     save_plan,
     set_step_status,
 )
-from baton.prompt import implement_prompt, step_text
-from baton.router import resolve_route
+from baton.prompt import handoff_prompt, implement_prompt, step_text
+from baton.router import Route, resolve_route
 from baton.verify import VerifyResult, run_verify
 
 EXIT_OK = 0
@@ -182,16 +183,16 @@ def _run_next(
         before = head(repo)
 
         result = adapter.run(prompt, repo, agent_timeout)
-        if not result.ok:
-            _say(out, f"The agent failed: {result.error}")
-            _say(out, "Changes (if any) stay in the working tree; the step stays open.")
-            _log(plan_path, f"step {step.number}: agent failed ({result.error})", date)
-            return EXIT_FAILED
-
         after = head(repo)
         if after != before:
             _say(out, f"HEAD moved from {before} to {after}: the agent committed. Step not marked.")
             _log(plan_path, f"step {step.number}: agent moved HEAD {before} -> {after}", date)
+            return EXIT_FAILED
+
+        if not result.ok:
+            _say(out, f"The agent failed: {result.error}")
+            _say(out, "Changes (if any) stay in the working tree; the step stays open.")
+            _log(plan_path, f"step {step.number}: agent failed ({result.error})", date)
             return EXIT_FAILED
 
         verify = run_verify(step.verify, repo, verify_timeout)
@@ -212,7 +213,7 @@ def _run_next(
         note = "implemented" if verify.verified else "implemented (no Verify command)"
         text = append_log(text, f"{date}: step {step.number} {note}, waiting for commit.")
         save_plan(plan_path, text)
-    except (ConfigError, GitError, PlanError, OSError) as exc:
+    except (ConfigError, GitError, LimitStateError, PlanError, OSError) as exc:
         _say(out, f"Error: {exc}")
         return EXIT_FAILED
 
@@ -228,6 +229,13 @@ def _dry_run(repo: Path, select_adapter: Callable[[Step], CommandAdapter], out: 
         return EXIT_STOPPED
     text = plan_path.read_text(encoding="utf-8")
     plan = parse_plan(text)
+    gate = check_gate(plan, repo)
+    if gate.state in ("blocked_dirty", "discarded"):
+        _say(out, f"Gate: {gate.state}; no agent selected.")
+        return EXIT_STOPPED
+    if gate.state == "committed":
+        text = apply_gate(text, gate, datetime.date.today().isoformat())
+        plan = parse_plan(text)
     step = first_open_step(plan)
     if step is None:
         _say(out, "No open steps left in the plan.")
@@ -240,6 +248,74 @@ def _dry_run(repo: Path, select_adapter: Callable[[Step], CommandAdapter], out: 
     _say(out, "Prompt:")
     _say(out, prompt)
     return EXIT_OK
+
+
+class _RoutedAdapter:
+    """Try each available configured name once, handing off only on quota failures."""
+
+    def __init__(self, route: Route, store: LimitStore, out: TextIO) -> None:
+        self.route = route
+        self.store = store
+        self.out = out
+
+    def _eligible(self):
+        seen = set()
+        for agent in self.route.agents:
+            if agent.name in seen:
+                continue
+            seen.add(agent.name)
+            deadline = self.store.active().get(agent.name)
+            if deadline is not None:
+                _say(self.out, f"Skipping {agent.name}: cooldown until {deadline.isoformat()}.")
+                continue
+            yield agent
+
+    def _announce(self, agent) -> None:
+        _say(self.out, f"Tier {self.route.tier}, agent {agent.name} ({agent.adapter})")
+
+    def argv(self, prompt: str) -> list[str]:
+        for agent in self._eligible():
+            self._announce(agent)
+            return make_adapter(agent).argv(prompt)
+        raise ConfigError(self._exhausted())
+
+    @staticmethod
+    def _exhausted() -> str:
+        return (
+            "No available agents remain in this route. Changes stay in the working tree; "
+            "the step stays open. Wait for a cooldown to expire or sign in manually. "
+            "Review and preserve partial edits before retrying; baton next requires a clean "
+            "tree for an open step."
+        )
+
+    def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
+        before = head(repo)
+        previous = None
+        for agent in self._eligible():
+            self._announce(agent)
+            current_prompt = prompt
+            if previous is not None:
+                current_prompt = handoff_prompt(prompt, previous, handoff_context(repo))
+            result = make_adapter(agent).run(current_prompt, repo, timeout)
+            # Check even failed attempts, before persisting a cooldown or trying a successor.
+            if head(repo) != before:
+                return AgentResult(ok=False, error="agent moved HEAD")
+            if result.ok or result.limit is None:
+                return result
+            now = datetime.datetime.now(datetime.UTC)
+            deadline = result.limit.reset_at
+            fallback = deadline is None or deadline <= now
+            if fallback:
+                deadline = now + datetime.timedelta(hours=1)
+            self.store.set(agent.name, deadline)
+            note = " (1h fallback: no usable reset time)" if fallback else ""
+            _say(
+                self.out,
+                f"Agent {agent.name} reached its usage limit; "
+                f"cooldown until {deadline.isoformat()}{note}.",
+            )
+            previous = agent.name
+        return AgentResult(ok=False, error=self._exhausted())
 
 
 def run_next_command(
@@ -261,14 +337,12 @@ def run_next_command(
         route = resolve_route(
             config, "implement", tier=tier, step_size=step.size, agent_name=agent_name
         )
-        agent = route.agents[0]
-        _say(out, f"Tier {route.tier}, agent {agent.name} ({agent.adapter})")
-        return make_adapter(agent)
+        return _RoutedAdapter(route, LimitStore(), out)
 
     if dry_run:
         try:
             return _dry_run(repo, select_adapter, out)
-        except (ConfigError, PlanError, OSError) as exc:
+        except (ConfigError, GitError, LimitStateError, PlanError, OSError) as exc:
             _say(out, f"Error: {exc}")
             return EXIT_FAILED
     return _run_next(

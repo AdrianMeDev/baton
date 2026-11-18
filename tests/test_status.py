@@ -138,3 +138,62 @@ def test_milestone_status_from_roadmap(repo: Path) -> None:
     )
     _, out = status(repo)
     assert "Milestone: M2 Engine [~]" in out
+
+
+@pytest.fixture(autouse=True)
+def isolated_state(monkeypatch, tmp_path_factory):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("state") / "uncreated"))
+
+
+def test_status_shows_local_cooldowns_and_preserves_state_without_plan(tmp_path, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    from baton.limits import LimitStore
+
+    now = datetime.now(UTC)
+    deadline = now + timedelta(hours=2)
+    store = LimitStore()
+    store.set("cool", deadline)
+    store.set("expired", now - timedelta(seconds=1))
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "".join(
+            f'[agents.{name}]\nadapter="pi"\ncommand="pi"\n'
+            for name in ("cool", "expired", "fresh")
+        )
+    )
+    before = store.path.read_bytes()
+    buf = io.StringIO()
+    assert run_status(tmp_path, buf, config_path=str(config)) == 0
+    out = buf.getvalue()
+    assert "No .agent-plan.md" in out
+    assert f"cool: cooldown until {deadline.astimezone():%Y-%m-%d %H:%M:%S %Z (%z)}" in out
+    assert "expired: available" in out and "fresh: available" in out
+    assert store.path.read_bytes() == before
+
+
+def test_empty_config_and_missing_state_are_read_only(tmp_path):
+    from baton.limits import LimitStore
+
+    config = tmp_path / "empty.toml"
+    config.write_text("")
+    buf = io.StringIO()
+    assert run_status(tmp_path, buf, config_path=str(config)) == 0
+    assert "none configured" in buf.getvalue()
+    assert not LimitStore().path.parent.exists()
+
+
+def test_status_reports_state_error_but_keeps_plan_output(repo, tmp_path_factory):
+    from baton.limits import LimitStore
+
+    (repo / ".agent-plan.md").write_text(PLAN.replace("{marker}", "[ ]"))
+    config = tmp_path_factory.mktemp("config") / "config.toml"
+    config.write_text('[agents.a]\nadapter="pi"\ncommand="pi"\n')
+    store = LimitStore()
+    store.path.parent.mkdir(parents=True)
+    store.path.write_text("broken")
+    buf = io.StringIO()
+    assert run_status(repo, buf, config_path=str(config)) == 1
+    assert "Next: step 2/3" in buf.getvalue()
+    assert "Repair or move" in buf.getvalue()
+    assert store.path.read_text() == "broken"

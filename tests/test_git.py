@@ -70,3 +70,17 @@ def test_plan_file_is_ignored_by_default(repo: Path) -> None:
 def test_rename_reports_new_path_once(repo: Path) -> None:
     git(repo, "mv", "a.txt", "z.txt")
     assert dirty_paths(repo) == ["z.txt"]
+
+
+def test_handoff_context_includes_both_diffs_and_untracked_paths(repo):
+    from baton.git import handoff_context
+
+    (repo / "a.txt").write_text("staged\n")
+    git(repo, "add", "a.txt")
+    (repo / "a.txt").write_text("unstaged\n")
+    (repo / "new\nfile.txt").write_text("read me")
+    context = handoff_context(repo)
+    assert "Staged diff:" in context and "+staged" in context
+    assert "Unstaged diff:" in context and "+unstaged" in context
+    assert repr("new\nfile.txt") in context
+    assert sorted(dirty_paths(repo)) == ["a.txt", "new\nfile.txt"]

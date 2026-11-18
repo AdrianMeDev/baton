@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, replace
+from functools import wraps
 from pathlib import Path
 from typing import Any, Protocol
 
 from baton.config import AgentConfig
+from baton.limits import UsageLimit, classify_limit
 from baton.runner import RunResult, run_command
 
 ERROR_TAIL_CHARS = 500
@@ -20,6 +23,7 @@ class AgentResult:
     error: str = ""
     cost: float | None = None
     raw: str = ""
+    limit: UsageLimit | None = None
 
 
 class Adapter(Protocol):
@@ -27,6 +31,8 @@ class Adapter(Protocol):
 
 
 class CommandAdapter(Adapter, Protocol):
+    def parse(self, result: RunResult) -> AgentResult: ...
+
     def argv(self, prompt: str) -> list[str]: ...
 
 
@@ -34,12 +40,47 @@ def _failure(message: str, raw: str = "") -> AgentResult:
     return AgentResult(ok=False, error=message, raw=raw)
 
 
+def _classify_failure(parse):
+    """Keep success and timeout semantics; inspect only failure diagnostics."""
+
+    @wraps(parse)
+    def wrapped(self, result: RunResult) -> AgentResult:
+        parsed = parse(self, result)
+        if parsed.ok or result.timed_out:
+            return parsed
+        try:
+            fields = [json.loads(result.stdout)]
+        except json.JSONDecodeError:
+            fields = []
+            for line in result.stdout.split("\n"):
+                with suppress(json.JSONDecodeError):
+                    fields.append(json.loads(line))
+        diagnostic = parsed.error + "\n" + result.stderr
+        limit = classify_limit(diagnostic, patterns=self.limit_patterns)
+        for field in fields:
+            detected = classify_limit(diagnostic, field, patterns=self.limit_patterns)
+            if detected is not None and (limit is None or detected.reset_at is not None):
+                limit = detected
+        # Non-JSON failure output may itself contain the provider diagnostic.
+        if not fields and result.exit_code != 0:
+            limit = classify_limit(diagnostic + "\n" + result.stdout, patterns=self.limit_patterns)
+        return replace(parsed, limit=limit)
+
+    return wrapped
+
+
 class ClaudeAdapter:
     """``claude -p`` with edits allowed and git blocked (see docs/adapters.md)."""
 
-    def __init__(self, command: str = "claude", model: str | None = None) -> None:
+    def __init__(
+        self,
+        command: str = "claude",
+        model: str | None = None,
+        limit_patterns: tuple[str, ...] | None = None,
+    ) -> None:
         self.command = command
         self.model = model
+        self.limit_patterns = limit_patterns
 
     def argv(self, prompt: str) -> list[str]:
         argv = [self.command, "-p", prompt, "--output-format", "json"]
@@ -55,6 +96,7 @@ class ClaudeAdapter:
         ]
         return argv
 
+    @_classify_failure
     def parse(self, result: RunResult) -> AgentResult:
         """Interpret a finished run. Checks ``is_error``, not ``subtype`` (always "success")."""
         raw = result.stdout
@@ -90,9 +132,15 @@ class ClaudeAdapter:
 class CodexAdapter:
     """Run ``codex exec`` with workspace edits and JSONL events."""
 
-    def __init__(self, command: str = "codex", model: str | None = None) -> None:
+    def __init__(
+        self,
+        command: str = "codex",
+        model: str | None = None,
+        limit_patterns: tuple[str, ...] | None = None,
+    ) -> None:
         self.command = command
         self.model = model
+        self.limit_patterns = limit_patterns
 
     def argv(self, prompt: str) -> list[str]:
         argv = [self.command, "exec", "--json", "--sandbox", "workspace-write"]
@@ -100,6 +148,7 @@ class CodexAdapter:
             argv += ["-m", self.model]
         return [*argv, "--", prompt]
 
+    @_classify_failure
     def parse(self, result: RunResult) -> AgentResult:
         raw = result.stdout
         if result.timed_out:
@@ -159,9 +208,15 @@ class CodexAdapter:
 class AgyAdapter:
     """Run Antigravity in headless accept-edits mode over ordinary pipes."""
 
-    def __init__(self, command: str = "agy", model: str | None = None) -> None:
+    def __init__(
+        self,
+        command: str = "agy",
+        model: str | None = None,
+        limit_patterns: tuple[str, ...] | None = None,
+    ) -> None:
         self.command = command
         self.model = model
+        self.limit_patterns = limit_patterns
 
     def argv(self, prompt: str) -> list[str]:
         argv = [self.command, "-p", prompt, "--output-format", "json", "--mode", "accept-edits"]
@@ -169,6 +224,7 @@ class AgyAdapter:
             argv += ["--model", self.model]
         return argv
 
+    @_classify_failure
     def parse(self, result: RunResult) -> AgentResult:
         raw = result.stdout
         if result.timed_out:
@@ -204,9 +260,15 @@ class AgyAdapter:
 class PiAdapter:
     """Run pi with JSONL events and pass its provider-qualified model through."""
 
-    def __init__(self, command: str = "pi", model: str | None = None) -> None:
+    def __init__(
+        self,
+        command: str = "pi",
+        model: str | None = None,
+        limit_patterns: tuple[str, ...] | None = None,
+    ) -> None:
         self.command = command
         self.model = model
+        self.limit_patterns = limit_patterns
 
     def argv(self, prompt: str) -> list[str]:
         argv = [self.command, "-p", prompt, "--mode", "json"]
@@ -214,6 +276,7 @@ class PiAdapter:
             argv += ["--model", self.model]
         return argv
 
+    @_classify_failure
     def parse(self, result: RunResult) -> AgentResult:
         raw = result.stdout
         if result.timed_out:
@@ -293,4 +356,4 @@ def _pi_message_cost(message: dict[str, Any]) -> float | None:
 
 def make_adapter(agent: AgentConfig) -> CommandAdapter:
     adapters = {"claude": ClaudeAdapter, "codex": CodexAdapter, "agy": AgyAdapter, "pi": PiAdapter}
-    return adapters[agent.adapter](agent.command, agent.model)
+    return adapters[agent.adapter](agent.command, agent.model, agent.limit_patterns)

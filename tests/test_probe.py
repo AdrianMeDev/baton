@@ -113,3 +113,181 @@ def test_exit_code_follows_agent(
 def test_missing_command_exits_1(tmp_path: Path) -> None:
     cfg = write_config(tmp_path, str(tmp_path / "does-not-exist"))
     assert main(["--config", str(cfg), "probe", "fake"]) == 1
+
+
+@pytest.fixture(autouse=True)
+def isolated_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+
+@pytest.mark.parametrize("adapter", ["claude", "codex", "agy", "pi"])
+@pytest.mark.parametrize("outcome", ["success", "ordinary_error", "limit"])
+def test_recheck_parses_each_adapter_and_updates_only_requested_agent(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    adapter,
+    outcome,
+):
+    from dataclasses import replace
+    from datetime import UTC, datetime, timedelta
+
+    from baton.limits import LimitStore
+    from baton.runner import RunResult
+
+    now = datetime(2026, 11, 18, 12, tzinfo=UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr("baton.probe.datetime", Clock)
+    store = LimitStore()
+    store.set("target", now + timedelta(hours=2))
+    store.set("other", now + timedelta(hours=4))
+    config = tmp_path / "recheck.toml"
+    config.write_text(
+        f'[agents.target]\nadapter="{adapter}"\ncommand="target-cli"\n'
+        '[agents.other]\nadapter="pi"\ncommand="must-not-run"\n'
+    )
+    recording = load(
+        Path(__file__).parent
+        / "fixtures"
+        / adapter
+        / ("ok.json" if outcome == "success" else "error.json")
+    )
+    run = RunResult(recording.stdout, recording.stderr, recording.exit_code, False, 1)
+    if outcome == "limit":
+        # Simulated diagnostics; pi intentionally exits zero on provider failure.
+        payload = {
+            "claude": {"is_error": True, "result": "Usage limit reached"},
+            "codex": {"type": "turn.failed", "error": {"code": "insufficient_quota"}},
+            "agy": {"status": "ERROR", "error": "Quota exhausted"},
+            "pi": {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "stopReason": "error",
+                    "errorMessage": "Usage limit reached",
+                },
+            },
+        }[adapter]
+        run = replace(run, stdout=json.dumps(payload), stderr="", exit_code=0)
+    calls = []
+
+    def fake_command(argv, cwd, timeout, **kwargs):
+        calls.append(argv)
+        assert argv[0] == "target-cli"
+        assert Path(cwd).is_dir() and not list(Path(cwd).iterdir())
+        return RunResult("v1", "", 0, False, 1) if "--version" in argv else run
+
+    monkeypatch.setattr("baton.probe.run_command", fake_command)
+    code = main(["--config", str(config), "recheck", "target", "--timeout", "17"])
+    assert code == (0 if outcome == "success" else 1)
+    assert len(calls) == 2
+    assert (
+        store.read().get("target")
+        == {
+            "success": None,
+            "ordinary_error": now + timedelta(hours=2),
+            "limit": now + timedelta(hours=1),
+        }[outcome]
+    )
+    assert store.read()["other"] == now + timedelta(hours=4)
+    out = capsys.readouterr().out
+    assert {
+        "success": "probe succeeded",
+        "ordinary_error": "Cooldown unchanged",
+        "limit": "1h fallback",
+    }[outcome] in out
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_stale_successful_recheck_preserves_newer_cooldown(tmp_path, monkeypatch, capsys, existing):
+    from datetime import UTC, datetime, timedelta
+
+    from baton.limits import LimitStore
+
+    now = datetime.now(UTC)
+    store = LimitStore()
+    if existing:
+        store.set("fake", now + timedelta(hours=1))
+    newer = now + timedelta(hours=3)
+
+    def probe(*args, **kwargs):
+        store.set("fake", newer)
+        return load(Path(__file__).parent / "fixtures/claude/ok.json")
+
+    monkeypatch.setattr("baton.probe.run_probe", probe)
+    cfg = write_config(tmp_path)
+    assert main(["--config", str(cfg), "recheck", "fake"]) == 0
+    assert store.read()["fake"] == newer
+    assert "newer cooldown was preserved" in capsys.readouterr().out
+
+
+def test_recheck_unknown_agent_and_bad_state_never_probe(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    from baton.limits import LimitStore
+
+    probe = Mock()
+    monkeypatch.setattr("baton.probe.run_probe", probe)
+    cfg = write_config(tmp_path)
+    assert main(["--config", str(cfg), "recheck", "missing"]) == 1
+    store = LimitStore()
+    store.path.parent.mkdir(parents=True)
+    store.path.write_text("broken")
+    assert main(["--config", str(cfg), "recheck", "fake"]) == 1
+    probe.assert_not_called()
+    assert store.path.read_text() == "broken"
+
+
+def test_recheck_uses_provider_reset(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from datetime import UTC, datetime, timedelta
+
+    from baton.limits import LimitStore
+
+    deadline = datetime.now(UTC) + timedelta(hours=3)
+    rec = load(Path(__file__).parent / "fixtures/claude/error.json")
+    rec = replace(
+        rec,
+        stdout=json.dumps(
+            {
+                "is_error": True,
+                "result": "Usage limit reached",
+                "error": {"reset_at": deadline.isoformat()},
+            }
+        ),
+        exit_code=0,
+    )
+    monkeypatch.setattr("baton.probe.run_probe", lambda *a, **kw: rec)
+    cfg = write_config(tmp_path)
+    assert main(["--config", str(cfg), "recheck", "fake"]) == 1
+    assert LimitStore().read()["fake"] == deadline
+
+
+def test_recheck_timeout_preserves_cooldown(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from datetime import UTC, datetime, timedelta
+
+    from baton.limits import LimitStore
+
+    deadline = datetime.now(UTC) + timedelta(hours=2)
+    LimitStore().set("fake", deadline)
+    rec = load(Path(__file__).parent / "fixtures/claude/ok.json")
+    monkeypatch.setattr("baton.probe.run_probe", lambda *a, **kw: replace(rec, timed_out=True))
+    cfg = write_config(tmp_path)
+    assert main(["--config", str(cfg), "recheck", "fake"]) == 1
+    assert LimitStore().read()["fake"] == deadline
+
+
+def test_recheck_success_without_cooldown_does_not_create_state(tmp_path, monkeypatch):
+    from baton.limits import LimitStore
+
+    rec = load(Path(__file__).parent / "fixtures/claude/ok.json")
+    monkeypatch.setattr("baton.probe.run_probe", lambda *a, **kw: rec)
+    cfg = write_config(tmp_path)
+    assert main(["--config", str(cfg), "recheck", "fake"]) == 0
+    assert not LimitStore().path.parent.exists()
