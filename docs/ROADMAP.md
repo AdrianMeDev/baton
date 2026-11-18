@@ -104,7 +104,7 @@ Updated: 2026-11-18
 - **Depends on:** M5
 - **Size:** M, ~5 commits
 
-### M7 [~] Auto-Commit und Branches
+### M7 [x] Auto-Commit und Branches
 - **Goal:** baton committet grüne Schritte selbst auf einem Meilenstein-Branch.
 - **Includes:** `baton next --commit`, Branch `baton/m<n>-<name>`, Commit mit Plan-Message, Roadmap-Status im ersten/letzten Commit, Push, eigener Worktree
 - **Done when:** ein Meilenstein im Beispiel-Repo endet als Branch mit einem Commit pro Schritt, alle Commits grün
@@ -164,3 +164,4 @@ Updated: 2026-11-18
 - 2026-11-18: M5 accepted: the user explicitly waived the real quota recording requirement. No real quota capture exists; acceptance relies on offline recovery coverage (133 adapter, limit and next tests passed) and previously recorded green CI for `6b5adcc` (run `44377237276`). See [acceptance notes](adapters.md#offline-recovery-evidence-and-m5-acceptance).
 - 2026-11-18: M6 implementation and documentation delivered: same-tier repair then one L repair, independent provider review with severity findings before manual commit, and isolated reviewer working directories. The offline CLI quality-loop test covers partial quota handoff, escalation and exclusion of all contributing providers. Local verification: 483 tests pass on Python 3.12 and 3.14; lint, formatting, package build and doctor pass (gh is not installed). M6 remains [~] until CI is green for the final committed changes on both Python versions.
 - 2026-11-18: M6 accepted: [GitHub Actions run 44385734356](https://github.com/AdrianMeDev/baton/actions/runs/44385734356) passed for `0f8ac1a` on Python 3.12 and 3.14 (lint, formatting, tests and doctor). Local package build and 483 tests on each Python version were already verified. The quality-loop milestone is complete; commits remain manual.
+- 2026-11-18: M7 done (baton next --commit/--push/--worktree: milestone branch `baton/m<n>-<name>`, one commit per step with the plan message, roadmap status in the first and last commit; acceptance test builds a 3-step milestone branch where every commit passes its Verify)
