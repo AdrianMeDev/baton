@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
@@ -121,3 +121,40 @@ def run_isolated_review(adapter: Adapter, prompt: str, timeout: float) -> AgentR
     """Supply changes via the prompt and give the reviewer an empty disposable cwd."""
     with TemporaryDirectory(prefix="baton-review-") as directory:
         return adapter.run(prompt, Path(directory), timeout)
+
+
+def candidate_tree(repo: Path) -> str:
+    """Snapshot candidate contents using a disposable index, preserving the user's index."""
+    import subprocess
+
+    with TemporaryDirectory(prefix="baton-index-") as directory:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(directory) / "index"))
+
+        def git(*args: str) -> str:
+            result = subprocess.run(
+                ["git", "-C", str(repo), *args], env=env, capture_output=True, text=True
+            )
+            if result.returncode:
+                raise ReviewError(result.stderr.strip())
+            return result.stdout.strip()
+
+        git("read-tree", "HEAD")
+        git("add", "-A", "--", ".")
+        git("rm", "--cached", "--ignore-unmatch", "--", PLAN_FILENAME)
+        return git("write-tree")
+
+
+def evidence_entry(step: int, tree: str, parent: str, verify, review: ReviewResult | None) -> str:
+    """One JSON log line; embedded newlines cannot become plan headings."""
+    return "baton-evidence: " + json.dumps(
+        {
+            "version": 1,
+            "step": step,
+            "tree": tree,
+            "parent": parent,
+            "verify": asdict(verify),
+            "reviewer": asdict(review.reviewer) if review else None,
+            "findings": [asdict(f) for f in review.findings] if review else None,
+        },
+        ensure_ascii=True,
+    )

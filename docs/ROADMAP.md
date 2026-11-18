@@ -118,7 +118,7 @@ Updated: 2026-11-18
 - **Depends on:** M4, M2
 - **Size:** M, ~5 commits
 
-### M9 [ ] Pull Requests und Merge
+### M9 [~] Pull Requests und Merge
 - **Goal:** Jeder fertige Meilenstein wird ein PR und je nach Regel gemergt.
 - **Includes:** `gh pr create` mit Beschreibung (Ziel, Schritte, Prüfungen, Review-Befunde), auf CI warten, Auto-Merge bei grün und ohne kritische Befunde, sonst offen lassen und stoppen
 - **Done when:** im Test-Repo entsteht ein PR, der bei grüner CI gemergt wird und bei roter offen bleibt
