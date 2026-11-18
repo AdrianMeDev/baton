@@ -90,7 +90,7 @@ Updated: 2026-11-18
 - **Depends on:** M3
 - **Size:** L, ~7 commits
 
-### M5 [ ] Limit-Erkennung und Wechsel
+### M5 [~] Limit-Erkennung und Wechsel
 - **Goal:** Am Limit übernimmt automatisch der nächste Agent.
 - **Includes:** Limit-Muster, Cooldowns mit Reset-Zeit, Wechsel mit aktuellem Diff, `baton cooldown`, Verfügbarkeit in `status`, Wiedererkennung nach manuellem Kontowechsel bei jedem Adapter: `baton recheck <agent>` startet eine winzige Probeanfrage und hebt den Cooldown bei Erfolg auf, im Auto-Modus optional mit Hinweis "agy im Cooldown, anmelden mit anderem Konto oder warten bis HH:MM" und alle paar Minuten erneuter Probe; kein Anmelden, keine Token-Dateien anfassen
 - **Done when:** simuliertes Limit löst Wechsel aus; echte Meldungen aus M1 werden erkannt; Fake-Adapter: erst Limit-Fehler, nach `recheck` Erfolg → Cooldown aufgehoben

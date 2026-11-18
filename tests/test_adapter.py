@@ -378,3 +378,95 @@ def test_pi_timeout_takes_precedence_over_output():
     res = PiAdapter().parse(run)
     assert not res.ok
     assert res.error == "timed out after 30s"
+
+
+# Simulated quota failures: M1 has no real quota recording yet.
+@pytest.mark.parametrize(
+    ("adapter", "payload"),
+    [
+        (ClaudeAdapter, {"is_error": True, "result": "You've hit your usage limit"}),
+        (CodexAdapter, {"type": "turn.failed", "error": {"code": "insufficient_quota"}}),
+        (AgyAdapter, {"status": "ERROR", "error": "Quota exhausted"}),
+        (
+            PiAdapter,
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "stopReason": "error",
+                    "errorMessage": "Usage limit reached",
+                },
+            },
+        ),
+    ],
+)
+def test_simulated_usage_limit_at_exit_zero(adapter, payload):
+    result = adapter().parse(RunResult(json.dumps(payload), "", 0, False, 1))
+    assert not result.ok
+    assert result.limit is not None
+    assert result.limit.reset_at is None
+    assert result.raw == json.dumps(payload)
+
+
+@pytest.mark.parametrize("adapter", [ClaudeAdapter, CodexAdapter, AgyAdapter, PiAdapter])
+def test_plain_failure_diagnostic_and_timeout(adapter):
+    run = RunResult("", "Usage limit reached; reset in 2 hours", 1, False, 1)
+    assert adapter().parse(run).limit.reset_at is not None
+    assert adapter().parse(replace(run, timed_out=True)).limit is None
+    assert adapter().parse(replace(run, stderr="HTTP 429: too many requests")).limit is None
+
+
+@pytest.mark.parametrize(
+    ("adapter", "fixture"),
+    [(ClaudeAdapter, "claude"), (CodexAdapter, "codex"), (AgyAdapter, "agy"), (PiAdapter, "pi")],
+)
+def test_real_m1_errors_are_not_limits_and_success_mentions_stay_successful(adapter, fixture):
+    assert adapter().parse(_run_result("error.json", fixture)).limit is None
+    run = _run_result("ok.json", fixture)
+    run = replace(
+        run, stdout=run.stdout.replace("OK", "Usage limit reached"), stderr="Quota exhausted"
+    )
+    parsed = adapter().parse(run)
+    assert parsed.ok
+    assert parsed.limit is None
+
+
+def test_custom_limit_patterns_replace_defaults_and_reach_factory():
+    from baton.adapter import make_adapter
+    from baton.config import AgentConfig
+
+    adapter = make_adapter(AgentConfig("local", "pi", "pi", limit_patterns=("NO TOKENS",)))
+    assert adapter.parse(RunResult("", "NO TOKENS", 1, False, 1)).limit is not None
+    assert adapter.parse(RunResult("", "Quota exhausted", 1, False, 1)).limit is None
+
+
+@pytest.mark.parametrize("adapter", [ClaudeAdapter, CodexAdapter, AgyAdapter, PiAdapter])
+def test_structured_reset_fields(adapter):
+    from datetime import UTC, datetime
+
+    payload = {"error": {"code": "insufficient_quota", "reset_at": "2026-11-19T10:00:00Z"}}
+    parsed = adapter().parse(RunResult(json.dumps(payload, indent=2), "", 1, False, 1))
+    assert parsed.limit.reset_at == datetime(2026, 11, 19, 10, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("fields", "diagnostic", "expected"),
+    [
+        ({"retry_after_seconds": 120}, "quota exhausted", "2026-11-18T12:02:00+00:00"),
+        ({}, "Usage limit reached; reset in 2 hours", "2026-11-18T14:00:00+00:00"),
+        ({}, "Quota exceeded; resets at 2026-11-19T10:00:00Z", "2026-11-19T10:00:00+00:00"),
+        ({"reset_at": "2026-11-18T14:00:00+02:00"}, "quota exhausted", "2026-11-18T12:00:00+00:00"),
+        ({"reset_at": "tomorrow"}, "quota exhausted", None),
+        ({"reset_at": "2026-11-19T10:00:00"}, "quota exhausted", None),
+        ({"retry_after": -1}, "quota exhausted", None),
+        ({"retry_after": float("inf")}, "quota exhausted", None),
+    ],
+)
+def test_limit_reset_hints_with_fixed_clock(fields, diagnostic, expected):
+    from datetime import UTC, datetime
+
+    from baton.limits import classify_limit
+
+    limit = classify_limit(diagnostic, fields, now=datetime(2026, 11, 18, 12, tzinfo=UTC))
+    assert limit is not None
+    assert (limit.reset_at.isoformat() if limit.reset_at else None) == expected

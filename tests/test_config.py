@@ -179,3 +179,15 @@ def test_bundled_example_is_valid() -> None:
 
 def test_cli_accepts_config_option() -> None:
     assert build_parser().parse_args(["--config", "x.toml"]).config == "x.toml"
+
+
+def test_limit_patterns_default_and_override(tmp_path):
+    assert load_text(tmp_path, VALID).agents["a"].limit_patterns is None
+    cfg = load_text(tmp_path, VALID + 'limit_patterns = ["NO TOKENS", "quota.*empty"]\n')
+    assert cfg.agents["b"].limit_patterns == ("NO TOKENS", "quota.*empty")
+
+
+@pytest.mark.parametrize("value", ['"quota"', "[]", "[3]", '[""]', '["["]', '[".*"]'])
+def test_invalid_limit_patterns(tmp_path, value):
+    with pytest.raises(ConfigError, match="limit.pattern"):
+        load_text(tmp_path, VALID + f"limit_patterns = {value}\n")
