@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import fcntl
+import json
+import os
 import re
+import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 # Deliberately exclude generic HTTP 429: it can mean a transient request-rate limit.
@@ -102,3 +107,109 @@ def _absolute_reset(value: Any) -> datetime | None:
     except (ValueError, OverflowError, OSError):
         pass
     return None
+
+
+class LimitStateError(Exception):
+    """Cooldown state cannot safely be read or updated."""
+
+
+def limit_state_path() -> Path:
+    """Cooldowns are shared across repositories, keyed by configured agent name."""
+    base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    return base / "baton" / "limits.json"
+
+
+def parse_duration(value: str) -> timedelta:
+    """Accept positive whole seconds, minutes or hours, such as 30m or 2h."""
+    match = re.fullmatch(r"([0-9]+)([smh])", value)
+    if match is None:
+        raise ValueError("duration must be a positive number followed by s, m or h (e.g. 2h)")
+    try:
+        duration = timedelta(seconds=int(match[1]) * {"s": 1, "m": 60, "h": 3600}[match[2]])
+    except (ValueError, OverflowError):
+        raise ValueError("duration is too large") from None
+    if duration <= timedelta(0):
+        raise ValueError("duration must be greater than zero (e.g. 2h)")
+    return duration
+
+
+class LimitStore:
+    """UTC deadlines with serialized read/modify/write and atomic replacement.
+
+    The persistent sibling lock file is never replaced or deleted. Readers see
+    either complete version of limits.json and do not create directories or files.
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = limit_state_path() if path is None else path
+
+    def read(self) -> dict[str, datetime]:
+        try:
+            raw = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}
+        except (OSError, UnicodeError) as exc:
+            raise LimitStateError(
+                f"Cannot read {self.path}: {exc}. Check file permissions."
+            ) from exc
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise ValueError("expected an object mapping agent names to UTC deadlines")
+            deadlines = {}
+            for name, value in data.items():
+                if not isinstance(name, str) or not name.strip() or not isinstance(value, str):
+                    raise ValueError("expected non-empty agent names and timestamp strings")
+                deadline = _absolute_reset(value)
+                if deadline is None:
+                    raise ValueError(f"invalid timezone-aware deadline for {name!r}")
+                deadlines[name] = deadline
+            return deadlines
+        except (ValueError, TypeError) as exc:
+            raise LimitStateError(
+                f"Invalid cooldown state in {self.path}: {exc}. "
+                "Repair or move this file before retrying; it was not overwritten."
+            ) from exc
+
+    def active(self, *, now: datetime | None = None) -> dict[str, datetime]:
+        """Expired entries remain stored but are no longer active at their exact deadline."""
+        now = datetime.now(UTC) if now is None else now
+        return {name: deadline for name, deadline in self.read().items() if deadline > now}
+
+    def set(self, agent: str, deadline: datetime) -> None:
+        if not agent.strip():
+            raise ValueError("agent name must not be empty")
+        if deadline.tzinfo is None or deadline.utcoffset() is None:
+            raise ValueError("cooldown deadline must include a timezone")
+        deadline = deadline.astimezone(UTC)
+        temp_path = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.with_suffix(".lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                deadlines = self.read()
+                deadlines[agent] = deadline
+                payload = {name: dt.isoformat() for name, dt in deadlines.items()}
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=self.path.parent,
+                    prefix=".limits-",
+                    suffix=".tmp",
+                    delete=False,
+                ) as temp:
+                    temp_path = Path(temp.name)
+                    json.dump(payload, temp, indent=2, sort_keys=True)
+                    temp.write("\n")
+                    temp.flush()
+                    os.fsync(temp.fileno())
+                os.replace(temp_path, self.path)
+        except OSError as exc:
+            raise LimitStateError(
+                f"Cannot update {self.path}: {exc}. "
+                "Check state directory permissions and free space."
+            ) from exc
+        finally:
+            if temp_path is not None:
+                with suppress(OSError):
+                    temp_path.unlink(missing_ok=True)

@@ -1,10 +1,12 @@
 import argparse
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from baton import __version__
-from baton.config import ROUTE_TIERS
+from baton.config import ROUTE_TIERS, ConfigError, find_config_path, load_config
 from baton.doctor import run_doctor
+from baton.limits import LimitStateError, LimitStore, parse_duration
 from baton.next import DEFAULT_AGENT_TIMEOUT, DEFAULT_VERIFY_TIMEOUT, run_next_command
 from baton.probe import DEFAULT_PROMPT, DEFAULT_TIMEOUT, run_probe_command
 from baton.status import run_status
@@ -41,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     probe.add_argument("--record", metavar="PATH", help="save a redacted JSON recording")
     probe.add_argument("--dry-run", action="store_true", help="print the command, run nothing")
+    cooldown = subparsers.add_parser(
+        "cooldown", help="set a shared cooldown for a configured agent"
+    )
+    cooldown.add_argument("agent", help="agent name from the config")
+    cooldown.add_argument("duration", help="positive duration, such as 30m or 2h (units: s, m, h)")
     status = subparsers.add_parser(
         "status", help="show plan, milestone and commit-gate state (read-only)"
     )
@@ -80,6 +87,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()
+        return 0
+    if args.command == "cooldown":
+        try:
+            duration = parse_duration(args.duration)
+            config = load_config(find_config_path(args.config))
+            if args.agent not in config.agents:
+                raise ValueError(
+                    f"unknown agent {args.agent!r}; check your config or run baton doctor"
+                )
+            deadline = datetime.now(UTC) + duration
+            LimitStore().set(args.agent, deadline)
+        except (ValueError, OverflowError, ConfigError, LimitStateError) as exc:
+            print(f"Cannot set cooldown: {exc}")
+            return 1
+        print(f"Agent {args.agent} is in cooldown until {deadline.isoformat()} (UTC).")
         return 0
     if args.command == "doctor":
         return run_doctor(args.config)
