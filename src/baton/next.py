@@ -12,7 +12,7 @@ import datetime
 import shlex
 import sys
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
@@ -92,6 +92,26 @@ def _log(plan_path: Path, line: str, date: str) -> None:
     """Append a Log line to the plan as it is now on disk."""
     text = plan_path.read_text(encoding="utf-8")
     save_plan(plan_path, append_log(text, f"{date}: {line}"))
+
+
+@contextmanager
+def _protect_plan(path: Path):
+    """Restore trusted bytes before reporting any externally induced plan change."""
+    trusted = path.read_bytes()
+    try:
+        yield
+    finally:
+        try:
+            intact = not path.is_symlink() and path.read_bytes() == trusted
+        except OSError:
+            intact = False
+        if not intact:
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+            elif path.is_dir():
+                path.rmdir()
+            path.write_bytes(trusted)
+            raise PlanError("Active plan changed during execution; trusted plan restored")
 
 
 def _handle_gate(
@@ -327,7 +347,8 @@ def _run_next(
             prompt = handoff_prompt(prompt, "previous run", handoff_context(repo))
         before = head(repo)
 
-        result = adapter.run(prompt, repo, agent_timeout)
+        with _protect_plan(plan_path):
+            result = adapter.run(prompt, repo, agent_timeout)
         after = head(repo)
         if after != before:
             say(out, f"HEAD moved from {before} to {after}: the agent committed. Step not marked.")
@@ -349,7 +370,8 @@ def _run_next(
         if commit:
             with suppress(RoadmapError):
                 sync_milestone(repo, plan, step, date)
-        verify = run_verify(step.verify, repo, verify_timeout)
+        with _protect_plan(plan_path):
+            verify = run_verify(step.verify, repo, verify_timeout)
         repairs = 0
         for escalated in (False, True):
             if not verify.verified or verify.passed:
@@ -362,7 +384,8 @@ def _run_next(
             repairs += 1
             label = "Escalating repair to tier L." if escalated else "Attempting same-tier repair."
             say(out, label)
-            repair = fixer.run(fix_prompt(prompt, verify), repo, agent_timeout)
+            with _protect_plan(plan_path):
+                repair = fixer.run(fix_prompt(prompt, verify), repo, agent_timeout)
             after = head(repo)
             if after != before:
                 say(out, f"HEAD moved from {before} to {after}: fixer committed. Step not marked.")
@@ -373,7 +396,8 @@ def _run_next(
                 say(out, "Changes stay in the working tree; the step stays open.")
                 _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
                 return EXIT_FAILED
-            verify = run_verify(step.verify, repo, verify_timeout)
+            with _protect_plan(plan_path):
+                verify = run_verify(step.verify, repo, verify_timeout)
             cost = (
                 result.cost + repair.cost
                 if result.cost is not None and repair.cost is not None
@@ -395,7 +419,8 @@ def _run_next(
         review = None
         if review_step is not None:
             try:
-                review = review_step(plan, step, raw_step)
+                with _protect_plan(plan_path):
+                    review = review_step(plan, step, raw_step)
             except (ReviewError, ConfigError, GitError, LimitStateError, OSError) as exc:
                 say(out, f"Independent review failed: {exc}")
                 say(out, "Changes stay in the working tree; the step stays open.")

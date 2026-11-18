@@ -1514,3 +1514,25 @@ def test_implementer_roadmap_problem_stops_without_marking(repo):
 def test_normal_output_is_not_a_roadmap_problem(repo):
     code, _ = run(repo, FakeAdapter(action=edit))
     assert code == EXIT_OK
+
+
+@pytest.mark.parametrize("mode", ["edit", "delete", "symlink"])
+@pytest.mark.parametrize("worktree", [False, True])
+def test_active_plan_tampering_restored(repo, mode, worktree, git_identity):
+    def tamper(work):
+        edit(work)
+        path = work / ".agent-plan.md"
+        if mode == "edit":
+            path.write_text(path.read_text().replace("true", "touch compromised"))
+        else:
+            path.unlink()
+            if mode == "symlink":
+                path.symlink_to(work / "new.txt")
+
+    code, output = run(repo, FakeAdapter(action=tamper), worktree=worktree)
+    assert code == EXIT_FAILED
+    assert "trusted plan restored" in output
+    assert plan_of(repo).steps[0].status == "open"
+    active = worktree_path_for(repo, "baton/demo") if worktree else repo
+    assert (active / "new.txt").read_text() == "hello\n"
+    assert not (active / "compromised").exists()
