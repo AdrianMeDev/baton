@@ -139,7 +139,7 @@ Updated: 2026-11-18
 - **Depends on:** M5
 - **Size:** M, ~4 commits
 
-### M12 [ ] Integration und Doku
+### M12 [~] Integration und Doku
 - **Goal:** baton fügt sich nahtlos in den Workflow ein.
 - **Includes:** Stufen-Feld für den Skill `plan-commits` unter `integrations/`, gemeinsame `AGENTS.md`-Vorlage, Zed-Tasks `baton next`/`baton auto`, README (Installation, Konfiguration, Auto-Modus, Sicherheit)
 - **Done when:** README führt auf einem frischen Rechner bis zu einem durchgelaufenen `baton auto`
