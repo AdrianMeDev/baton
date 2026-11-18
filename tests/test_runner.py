@@ -1,7 +1,7 @@
 import sys
 import time
 
-from baton.runner import run_command
+from baton.runner import run_command, strip_ansi
 
 
 def py(code: str) -> list[str]:
@@ -59,3 +59,46 @@ def test_missing_command(tmp_path):
     assert res.exit_code == 127
     assert res.stderr
     assert not res.timed_out
+
+
+TTY_ONLY = "import sys; print('tty' if sys.stdout.isatty() else '', end='')"
+
+
+def test_tty_only_output_needs_terminal(tmp_path):
+    assert run_command(py(TTY_ONLY), tmp_path, timeout=10).stdout == ""
+    res = run_command(py(TTY_ONLY), tmp_path, timeout=10, tty=True)
+    assert res.stdout == "tty"
+    assert res.exit_code == 0
+
+
+def test_tty_merges_streams_and_strips_ansi(tmp_path):
+    code = "import sys; print('\\x1b[31mred\\x1b[0m'); sys.stderr.write('err\\n')"
+    res = run_command(py(code), tmp_path, timeout=10, tty=True)
+    assert res.stdout == "red\nerr\n"
+    assert res.stderr == ""
+
+
+def test_tty_exit_code(tmp_path):
+    res = run_command(py("import sys; print('x'); sys.exit(4)"), tmp_path, timeout=10, tty=True)
+    assert res.exit_code == 4
+    assert res.stdout == "x\n"
+
+
+def test_tty_timeout(tmp_path):
+    start = time.monotonic()
+    code = "import time; print('start', flush=True); time.sleep(60)"
+    res = run_command(py(code), tmp_path, timeout=1, tty=True)
+    assert res.timed_out
+    assert res.exit_code is None
+    assert res.stdout == "start\n"
+    assert time.monotonic() - start < 15
+
+
+def test_tty_missing_command(tmp_path):
+    res = run_command(["definitely-not-a-command-xyz"], tmp_path, timeout=5, tty=True)
+    assert res.exit_code == 127
+    assert res.stderr
+
+
+def test_strip_ansi():
+    assert strip_ansi("\x1b[1;32mok\x1b[0m\x1b]0;title\x07 done\r\n") == "ok done\n"
