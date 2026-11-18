@@ -5,6 +5,14 @@
 #   command  executable looked up in PATH
 #   model    optional model name passed to the agent
 #   provider model provider identity for review (set explicitly for agy and pi)
+#   limit_patterns optional non-empty array of Python regex strings; REPLACES defaults
+#     Example inside an agent table (uncomment and tailor to recorded failure text):
+#     limit_patterns = ['usage[_ -]limit', 'insufficient_quota', 'quota exhausted']
+# Cooldowns are shared by configured name across repositories. A detected limit without
+# a usable reset time uses 1h. Manual: baton cooldown claude-sonnet 2h
+# Inspect: baton status; after manual login or reset: baton recheck claude-sonnet
+# Implementation routes try each name once, skip cooldowns, and hand off only on limits.
+# --agent pins one name. Login/account selection stay manual.
 # Model IDs and aliases below are examples. Adjust them to match your CLI and account.
 
 [agents.claude-opus]

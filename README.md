@@ -3,7 +3,8 @@
 Command-line tool that distributes the steps of a commit plan (`.agent-plan.md`) across several
 coding agent CLIs (Claude Code, Codex, Antigravity, pi). See `docs/ROADMAP.md` for the plan.
 
-Available commands include `baton doctor`, `baton probe`, `baton status` and `baton next`.
+Available commands include `baton doctor`, `baton probe`, `baton status`, `baton next`,
+`baton cooldown` and `baton recheck`.
 `baton next` can run Claude Code, Codex, Antigravity or pi.
 
 ## Installation
@@ -46,9 +47,11 @@ M = ["claude-sonnet", "codex"]
 L = ["claude-sonnet", "agy", "codex"]
 ```
 
-`baton next` uses the first agent in the implementation chain. Planning, fixing, review and
-automatic switching are planned for later milestones. Agents-only configs use the first
-configured Claude agent by default.
+`baton next` tries the implementation chain in order, skipping active cooldowns and continuing
+with the next available agent after a usage-limit failure. Each configured name runs at most once
+per invocation. `--agent NAME` pins a single-agent route, so it never falls back to another name.
+Planning, fixing and review commands belong to later milestones. Agents-only configs use the
+first configured Claude agent by default.
 
 ## Usage
 
@@ -83,7 +86,10 @@ Read-only overview of the repository in `DIR` (default: current directory): the 
 the commit gate. If the previous step is implemented (`[~]`) but not committed, the gate is blocked
 and `status` prints the `git add -A` / `git commit -m "<message>"` hint. If it is already committed,
 `status` reports that the step can be marked `[x]`; it never modifies any file. Exit code 0, or 1 for
-an unreadable or malformed plan.
+an unreadable or malformed plan, configuration or cooldown state. Configured agents are shown
+even without a plan: each has either an active cooldown with a local reset time (including zone
+and UTC offset), or no active cooldown. This is local eligibility information, not a live account
+check. `status` never starts an agent or writes state.
 
 ### `baton next`
 
@@ -104,7 +110,10 @@ implementation route.
 2. **Implement.** baton prints the effective tier and agent, then runs the selected CLI in the
    repo root with the prompt for the first open step. See the adapter notes for implementation
    modes and a smoke test. [Adapter notes](docs/adapters.md)
-3. **Check HEAD.** If the agent moved HEAD, baton reports an error and does not mark the step.
+3. **Check HEAD and hand off.** After every attempt, including failures, baton checks HEAD.
+   A moved HEAD stops the run. A usage-limit failure records a cooldown and passes the same step
+   to the next available agent in the same working tree, with staged and unstaged diffs and
+   untracked paths. Ordinary errors and timeouts stop the run without switching.
 4. **Verify.** baton runs the step's **Verify** command itself (`bash -c` in the repo root); its
    result, not the agent's, decides.
 5. **Mark and report.** The step becomes `[~] (on <HEAD>)`, a Log line is added, and the report
@@ -119,6 +128,56 @@ command. `--dry-run` prints the step, the command and the prompt and changes not
 
 The agent can edit your working tree and may use your account quota. Review the diff before
 committing.
+
+### Cooldowns and recovery
+
+```bash
+baton cooldown claude-sonnet 2h
+baton status
+# After waiting for reset or signing in manually with the official CLI:
+baton recheck claude-sonnet --timeout 120
+```
+
+`cooldown` requires a configured agent and a positive whole duration with `s`, `m` or `h`
+(e.g. `30m`). Deadlines are stored in UTC in `$XDG_STATE_HOME/baton/limits.json`, falling back
+to `~/.local/state/baton/limits.json`. They apply to that configured name across repositories.
+Writes are locked and atomic; unreadable or malformed state produces an error without replacing it.
+An agent becomes eligible at its deadline; expired entries may remain in the file.
+
+A detected limit uses a parsed reset time when usable. Missing, ambiguous or past reset times
+use a **1 hour fallback**, stated in the output. Supported hints include timezone-aware ISO
+timestamps and relative seconds/minutes/hours; detailed fields are in [adapter notes](docs/adapters.md#usage-limit-classification).
+
+`recheck <agent> [--timeout S]` bypasses cooldown selection and probes only that agent in an
+empty temporary directory using your existing CLI login. It uses quota. Exit 0 requires parsed
+success, which clears only the observed cooldown; a newer cooldown set during the probe survives.
+Another quota failure refreshes the deadline and exits 1. Other failures preserve the cooldown
+and exit 1. Login and account selection remain manual. Scheduled rechecks belong to M10.
+`probe` remains a diagnostic command based on process exit status; use `recheck` for availability,
+especially with pi, whose provider failures can exit 0.
+
+If a chain is exhausted, baton leaves edits intact and the step open. Review and preserve that
+partial work before retrying: `baton next` refuses a dirty tree without a pending `[~]` step.
+Automatic continuation with partial edits happens within the current invocation.
+
+Optional per-agent patterns **replace** the defaults. Use Python regex strings in a non-empty
+array; invalid, blank and empty-text-matching patterns are rejected:
+
+```toml
+[agents.custom]
+adapter = "pi"
+command = "pi"
+limit_patterns = ['usage[_ -]limit', 'insufficient_quota', 'provider credits exhausted']
+```
+
+Only failures are classified; successful answers mentioning limits remain successful. Generic
+HTTP 429 alone does not imply exhausted usage. All four adapters have simulated quota coverage;
+real M1 recordings cover success and ordinary errors only. A real quota capture or explicit
+waiver remains required for M5 acceptance. To reproduce the offline recovery sequence:
+
+```bash
+uv run pytest -q tests/test_next.py -k cli_limit_recovery
+```
 
 ### Plan format
 

@@ -159,3 +159,5 @@ Updated: 2026-11-18
 - 2026-11-18: M2 done (plan and roadmap parser/writer, commit gate, baton status)
 - 2026-11-18: M3 done (baton next: prompt, claude adapter, verify, `[~]` marking, report; HEAD unchanged)
 - 2026-11-18: M4 done (S/M/L routing, agent and tier overrides, verified file edits with all four adapters). GitHub Actions passed on `aa6525c`. See [adapter smoke results](adapters.md#m4-smoke-results) for the outstanding Ollama and OpenRouter checks.
+
+- 2026-11-18: M5 implementation delivered: quota-only handoff with partial edits, persistent cooldowns, local reset times in status, manual cooldown and parsed one-shot recheck. Offline fake-executable recovery and all real M1 recordings are covered by tests. Local verification: 390 tests pass on Python 3.12 and 3.14; lint, formatting, build and doctor pass (gh is not installed). M5 remains [~]: no real quota recording exists; acceptance requires a redacted capture or explicit waiver, plus green CI for the final changes. Scheduled rechecks remain in M10.

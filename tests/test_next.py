@@ -357,11 +357,12 @@ def test_dry_run_selects_after_gate_and_skips_cooldown_without_writes(repo, chai
     assert not (repo / "new.txt").exists()
 
 
-def test_fake_executables_resume_the_same_tree(repo, chain, monkeypatch):
+def test_cli_limit_recovery(repo, chain, monkeypatch, capsys):
     import json
     import sys
 
     from baton.adapter import make_adapter
+    from baton.cli import main
     from baton.limits import LimitStore
 
     config, _ = chain
@@ -369,7 +370,10 @@ def test_fake_executables_resume_the_same_tree(repo, chain, monkeypatch):
     second = config.parent / "second"
     first.write_text(
         f"#!{sys.executable}\n"
-        "import json\nfrom pathlib import Path\n"
+        "import json, sys\nfrom pathlib import Path\n"
+        "if '--version' in sys.argv:\n    print('fake 1.0'); sys.exit(0)\n"
+        "if 'plan' in sys.argv:\n"
+        "    print(json.dumps({'is_error': False, 'result': 'OK'})); sys.exit(0)\n"
         "Path('a.txt').write_text('partial implementation\\n')\n"
         "Path('notes.txt').write_text('partial notes\\n')\n"
         "print(json.dumps({'is_error': True, 'result': 'Usage limit reached'}))\n"
@@ -394,11 +398,22 @@ def test_fake_executables_resume_the_same_tree(repo, chain, monkeypatch):
     )
     monkeypatch.setattr("baton.next.make_adapter", make_adapter)
     before = head(repo)
-    assert invoke_chain(repo, chain)[0] == EXIT_OK
+    args = ["--config", str(config)]
+    assert main([*args, "next", "--path", str(repo)]) == EXIT_OK
+    assert "1h fallback" in capsys.readouterr().out
     assert (repo / "a.txt").read_text() == "finished implementation\n"
     assert head(repo) == before
     assert plan_of(repo).steps[0].status == "pending"
     assert "first" in LimitStore().active()
+    assert main([*args, "status", "--path", str(repo)]) == EXIT_OK
+    assert "first: cooldown until" in capsys.readouterr().out
+    assert main([*args, "recheck", "first"]) == EXIT_OK
+    assert "probe succeeded" in capsys.readouterr().out
+    assert "first" not in LimitStore().active()
+    assert main([*args, "status", "--path", str(repo)]) == EXIT_OK
+    assert "first: available" in capsys.readouterr().out
+    assert (repo / "notes.txt").read_text() == "partial notes\n"
+    assert head(repo) == before
 
 
 def test_dry_run_without_state_creates_no_files(repo, chain, monkeypatch, tmp_path_factory):

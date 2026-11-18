@@ -1,7 +1,7 @@
 # Adapter notes: headless behaviour of the agent CLIs
 
 The probe recordings live in `tests/fixtures/<adapter>/` and are the reference for the adapters
-and future limit detection.
+and ordinary-error regression tests. Usage-limit cases are simulated until real captures exist.
 All runs used the prompt `Reply with exactly: OK` in an empty temporary directory.
 
 CLI versions: claude 2.1.311, codex 0.169.0, agy 1.5.11, pi 1.5.0.
@@ -155,8 +155,50 @@ lacked an API key.
 home path becomes `~`, the temporary working directory `<workdir>`, e-mail addresses `<email>` and
 UUIDs `<uuid>`. Check new recordings for personal data before committing them.
 
-## Open points for M5 (limit detection)
+## Usage-limit classification
 
-No real limit message was recorded for any CLI because limits cannot be triggered on purpose. When
-one occurs, run `baton probe <agent> --record tests/fixtures/<adapter>/limit.json` and add the
-wording here.
+Classification runs only after an adapter reports failure and skips timeouts. It inspects
+failure diagnostics and structured error fields (`code`, `type`, `message`, `errorMessage`,
+`error`/`errors`). It does not classify successful assistant text. The defaults recognize usage
+limits, insufficient quota/credits, exhausted quota/credit balances and messages saying the user
+hit a usage, daily or weekly limit. Generic HTTP 429 alone stays an ordinary failure.
+Per-agent `limit_patterns` replace the defaults; see the commented example in
+`src/baton/config.example.toml`. Regex matching is case-insensitive.
+
+| Adapter | Simulated quota case | Real M1 error replay |
+|---|---|---|
+| claude | `is_error: true`, `result: "You've hit your usage limit"` | Unknown model; ordinary failure |
+| codex | `turn.failed.error.code: "insufficient_quota"` | Unsupported model; ordinary failure |
+| agy | `status: "ERROR"`, `error: "Quota exhausted"` | Invalid model selection; ordinary failure |
+| pi | assistant `stopReason: "error"`, `errorMessage: "Usage limit reached"`, exit 0 | Unknown Model at exit 0; ordinary failure |
+
+Reset fields include `reset_at`, `resets_at`, `reset_time` (timezone-aware ISO timestamps or
+Unix seconds) and `retry_after`, `retry_after_seconds`, `reset_after_seconds` (relative seconds).
+Diagnostics also support ISO timestamps with a zone and phrases such as `reset in 2 hours`.
+Naive timestamps and ambiguous wording leave reset time unknown. Routing and recheck use a stated
+1h fallback when the parsed reset time is absent or already past. Cooldowns are UTC deadlines in
+`$XDG_STATE_HOME/baton/limits.json` or `~/.local/state/baton/limits.json`, keyed by configured name.
+
+`baton recheck <agent>` uses the probe arguments above in an empty temporary directory, even when
+that agent is cooling down, and interprets the result with the same adapter parser as `next`.
+Parsed success conditionally clears the observed cooldown under a lock; a stale success cannot
+remove a different, newer deadline. Another quota failure refreshes it; other failures preserve it.
+`baton status` shows local reset times without probing or writing. Login and account changes are
+manual; no scheduled recheck is implemented in M5 (the auto loop belongs to M10).
+
+### Offline recovery evidence and remaining acceptance
+
+`uv run pytest -q tests/test_next.py -k cli_limit_recovery` runs fake executables in a real
+temporary git repository. The first edits a tracked file, leaves an untracked note and reports a
+simulated usage limit. The successor receives the diff and paths, preserves the note and finishes
+the same step. Status shows the first agent's cooldown; a successful recheck restores eligibility.
+No live provider request is made. `tests/test_adapter.py` replays all available M1 JSON recordings,
+including agy's terminal and non-terminal successes, and keeps their ordinary errors distinct
+from usage limits.
+
+No real quota message has been recorded for any CLI. **M5 acceptance remains open** until a
+redacted capture is added and replayed, or the user explicitly waives that evidence requirement.
+When one occurs, use `baton probe <agent> --record tests/fixtures/<adapter>/limit.json`, review the
+redaction, document CLI/model and reset wording here, and add a parser regression test. Do not
+infer real-provider compatibility from simulated cases. CI for these changes must also pass
+before accepting the milestone.

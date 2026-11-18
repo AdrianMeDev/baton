@@ -470,3 +470,16 @@ def test_limit_reset_hints_with_fixed_clock(fields, diagnostic, expected):
     limit = classify_limit(diagnostic, fields, now=datetime(2026, 11, 18, 12, tzinfo=UTC))
     assert limit is not None
     assert (limit.reset_at.isoformat() if limit.reset_at else None) == expected
+
+
+@pytest.mark.parametrize(
+    "path", sorted(FIXTURES.glob("*/*.json")), ids=lambda path: f"{path.parent.name}/{path.name}"
+)
+def test_replay_every_real_m1_recording(path):
+    adapters = {"claude": ClaudeAdapter, "codex": CodexAdapter, "agy": AgyAdapter, "pi": PiAdapter}
+    rec = load(path)
+    parsed = adapters[rec.adapter]().parse(
+        RunResult(rec.stdout, rec.stderr, rec.exit_code, rec.timed_out, rec.duration_s)
+    )
+    assert parsed.ok == path.name.startswith("ok")
+    assert parsed.limit is None
