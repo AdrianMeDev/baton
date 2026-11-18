@@ -1428,3 +1428,36 @@ def test_dry_run_with_worktree_shows_path_without_creating_it(repo, chain, git_i
     work = worktree_path_for(repo, "baton/demo")
     assert code == EXIT_OK and f"Worktree: {work} (would be created)" in out
     assert not work.exists()
+
+
+def test_evidence_binds_manual_candidate_and_absent_review(repo):
+    import json
+
+    from baton.review import candidate_tree
+
+    code, _ = run(repo, FakeAdapter(action=edit))
+    assert code == EXIT_OK
+    entry = next(x for x in plan_of(repo).log if x.startswith("baton-evidence: "))
+    data = json.loads(entry.removeprefix("baton-evidence: "))
+    assert data["verify"]["passed"] is True
+    assert data["reviewer"] is None and data["findings"] is None
+    assert data["tree"] == candidate_tree(repo)
+    (repo / "new.txt").write_text("changed after review")
+    assert data["tree"] != candidate_tree(repo)
+
+
+def test_evidence_preserves_multiline_findings(repo):
+    import json
+
+    from baton.config import AgentConfig
+    from baton.review import Finding, ReviewResult, evidence_entry
+    from baton.verify import run_verify
+
+    review = ReviewResult(
+        AgentConfig(name="reviewer", adapter="claude", command="claude"),
+        (Finding("critical", "first\n## Steps\nlast", "new.txt", 1),),
+    )
+    entry = evidence_entry(1, "tree", "parent", run_verify("true", repo, 10), review)
+    assert "\n" not in entry
+    data = json.loads(entry.removeprefix("baton-evidence: "))
+    assert data["findings"][0]["message"] == review.findings[0].message

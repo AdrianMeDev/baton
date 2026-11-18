@@ -12,6 +12,7 @@ import datetime
 import shlex
 import sys
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
@@ -49,6 +50,8 @@ from baton.review import (
     SEVERITIES,
     ReviewError,
     ReviewResult,
+    candidate_tree,
+    evidence_entry,
     parse_review,
     review_context,
 )
@@ -314,6 +317,9 @@ def _run_next(
             _log(plan_path, f"step {step.number}: agent failed ({result.error})", date)
             return EXIT_FAILED
 
+        if commit:
+            with suppress(RoadmapError):
+                sync_milestone(repo, plan, step, date)
         verify = run_verify(step.verify, repo, verify_timeout)
         repairs = 0
         for escalated in (False, True):
@@ -367,6 +373,9 @@ def _run_next(
                 _log(plan_path, f"step {step.number}: independent review failed ({exc})", date)
                 return EXIT_FAILED
 
+        evidence = evidence_entry(
+            step.number, candidate_tree(repo), head(repo, short=False), verify, review
+        )
         changed = dirty_paths(repo)
         committed = None
         notice = None
@@ -396,6 +405,7 @@ def _run_next(
 
         # Re-read: the agent may have touched the plan file despite the rules.
         text = plan_path.read_text(encoding="utf-8")
+        text = append_log(text, evidence)
         text = set_step_status(text, step.number, "pending", after)
         note = "implemented" if verify.verified else "implemented (no Verify command)"
         if repairs:

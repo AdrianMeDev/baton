@@ -143,7 +143,14 @@ class CodexAdapter:
         self.limit_patterns = limit_patterns
 
     def argv(self, prompt: str) -> list[str]:
-        argv = [self.command, "exec", "--json", "--sandbox", "workspace-write"]
+        argv = [
+            self.command,
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "--sandbox",
+            "workspace-write",
+        ]
         if self.model:
             argv += ["-m", self.model]
         return [*argv, "--", prompt]
