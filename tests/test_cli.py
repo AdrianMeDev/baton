@@ -208,7 +208,7 @@ def test_next_tier_override_matches_dry_run(routed_sample, capsys):
     assert _next(repo, config, "--tier", "L", "--dry-run") == 0
     preview = capsys.readouterr().out
     assert "Tier L, agent large (codex)" in preview
-    assert "routed-codex exec --json --sandbox workspace-write" in preview
+    assert "routed-codex exec --json --skip-git-repo-check --sandbox workspace-write" in preview
     assert not (config.parent / "bin" / "routed-codex.argv").exists()
     assert _git(repo, "status", "--porcelain") == ""
 
