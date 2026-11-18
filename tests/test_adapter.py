@@ -1,15 +1,19 @@
 import json
+from dataclasses import replace
 from pathlib import Path
+from unittest.mock import Mock
 
-from baton.adapter import ClaudeAdapter
+import pytest
+
+from baton.adapter import AgyAdapter, ClaudeAdapter, CodexAdapter, PiAdapter
 from baton.recording import load
 from baton.runner import RunResult
 
-FIXTURES = Path(__file__).parent / "fixtures" / "claude"
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def _run_result(name: str) -> RunResult:
-    rec = load(FIXTURES / name)
+def _run_result(name: str, adapter: str = "claude") -> RunResult:
+    rec = load(FIXTURES / adapter / name)
     return RunResult(rec.stdout, rec.stderr, rec.exit_code, rec.timed_out, rec.duration_s)
 
 
@@ -41,7 +45,7 @@ def test_parse_ok_fixture():
 
 
 def test_parse_error_fixture_uses_is_error_not_subtype():
-    raw = json.loads(load(FIXTURES / "error.json").stdout)
+    raw = json.loads(load(FIXTURES / "claude" / "error.json").stdout)
     assert raw["subtype"] == "success"
     res = ClaudeAdapter().parse(_run_result("error.json"))
     assert not res.ok
@@ -74,3 +78,303 @@ def test_parse_nonzero_exit_with_ok_payload_fails():
     res = ClaudeAdapter().parse(RunResult('{"is_error": false, "result": "x"}', "", 2, False, 1.0))
     assert not res.ok
     assert "exit code 2" in res.error
+
+
+def test_codex_argv():
+    assert CodexAdapter().argv("do it") == [
+        "codex",
+        "exec",
+        "--json",
+        "--sandbox",
+        "workspace-write",
+        "--",
+        "do it",
+    ]
+    assert CodexAdapter("my-codex", "my-model").argv("--literal prompt") == [
+        "my-codex",
+        "exec",
+        "--json",
+        "--sandbox",
+        "workspace-write",
+        "-m",
+        "my-model",
+        "--",
+        "--literal prompt",
+    ]
+
+
+def test_codex_run_passes_cwd_and_timeout(monkeypatch, tmp_path):
+    adapter = CodexAdapter()
+
+    def fake_run(argv, cwd, timeout):
+        assert argv == adapter.argv("do it")
+        assert cwd == tmp_path
+        assert timeout == 17
+        return _run_result("ok.json", "codex")
+
+    monkeypatch.setattr("baton.adapter.run_command", fake_run)
+    assert adapter.run("do it", tmp_path, 17).text == "OK"
+
+
+def test_codex_parse_ok_fixture():
+    run = _run_result("ok.json", "codex")
+    res = CodexAdapter().parse(run)
+    assert res.ok
+    assert res.text == "OK"
+    assert res.raw == run.stdout
+
+
+def test_codex_returns_last_completed_message():
+    stdout = (
+        '{"type":"turn.started"}\n'
+        '{"type":"item.completed","item":{"type":"agent_message","text":"Working"}}\n'
+        '{"type":"item.completed","item":{"type":"command_execution","exit_code":1}}\n'
+        '{"type":"item.completed","item":{"type":"agent_message","text":"All\u2028done"}}\n'
+        '{"type":"item.updated","item":{"type":"agent_message","text":"Ignore"}}\n'
+        '{"type":"turn.completed"}\n'
+    )
+    res = CodexAdapter().parse(RunResult(stdout, "", 0, False, 1))
+    assert res.ok
+    assert res.text == "All\u2028done"
+
+
+def test_codex_parse_error_fixture():
+    res = CodexAdapter().parse(_run_result("error.json", "codex"))
+    assert not res.ok
+    assert "Codex turn failed" in res.error
+    assert "model is not supported" in res.error
+
+
+@pytest.mark.parametrize(
+    ("suffix", "diagnostic"),
+    [
+        ('{"type":"turn.failed","error":{"message":"request failed"}}\n', "request failed"),
+        ('{"type":"turn.completed"', "invalid JSON on output line 2"),
+        ("[]\n", "invalid Codex event on output line 2"),
+        ("", "missing turn.completed"),
+        ('{"type":"turn.completed"}\n{"type":"turn.started"}\n', "missing turn.completed"),
+    ],
+)
+def test_codex_message_without_successful_turn_fails(suffix, diagnostic):
+    stdout = '{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}\n' + suffix
+    res = CodexAdapter().parse(RunResult(stdout, "", 0, False, 1))
+    assert not res.ok
+    assert diagnostic in res.error
+
+
+def test_codex_completed_turn_requires_message():
+    res = CodexAdapter().parse(RunResult('{"type":"turn.completed"}\n', "", 0, False, 1))
+    assert not res.ok
+    assert "no agent message" in res.error
+
+
+def test_codex_nonzero_exit_with_completed_turn_fails():
+    run = replace(_run_result("ok.json", "codex"), exit_code=2, stderr="exit detail")
+    res = CodexAdapter().parse(run)
+    assert not res.ok
+    assert res.error == "exit code 2: exit detail"
+
+
+def test_codex_timeout_takes_precedence_over_output():
+    run = replace(_run_result("ok.json", "codex"), timed_out=True, duration_s=30)
+    res = CodexAdapter().parse(run)
+    assert not res.ok
+    assert res.error == "timed out after 30s"
+
+
+def test_agy_argv_requests_headless_edits():
+    assert AgyAdapter().argv("do it") == [
+        "agy",
+        "-p",
+        "do it",
+        "--output-format",
+        "json",
+        "--mode",
+        "accept-edits",
+    ]
+    argv = AgyAdapter("my-agy", "Gemini 4 Argon").argv("do it")
+    assert argv[0] == "my-agy"
+    assert argv[-2:] == ["--model", "Gemini 4 Argon"]
+
+
+def test_agy_empty_output_runs_once(monkeypatch, tmp_path):
+    adapter = AgyAdapter()
+    runner = Mock(return_value=RunResult("", "", 0, False, 1))
+    monkeypatch.setattr("baton.adapter.run_command", runner)
+    res = adapter.run("do it", tmp_path, 17)
+    assert not res.ok
+    assert res.error == "no output (exit 0)"
+    runner.assert_called_once_with(adapter.argv("do it"), tmp_path, 17)
+
+
+def test_agy_parse_success_fixture():
+    run = _run_result("ok-notty.json", "agy")
+    res = AgyAdapter().parse(run)
+    assert res.ok
+    assert res.text == "OK\n"
+    assert res.raw == run.stdout
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_agy_parse_error_fixture(exit_code):
+    run = replace(_run_result("error.json", "agy"), exit_code=exit_code, stderr="")
+    res = AgyAdapter().parse(run)
+    assert not res.ok
+    assert "invalid model selection" in res.error
+
+
+@pytest.mark.parametrize(
+    ("stdout", "diagnostic"),
+    [
+        ("{", "output is not valid JSON"),
+        ("[]", "output is not a JSON object"),
+        ('{"response":"OK"}', "unexpected agy status None"),
+        ('{"status":"SUCCESS","response":1}', "agy SUCCESS output has no string response"),
+        ('{"status":"ERROR"}', "agy reported an error"),
+    ],
+)
+def test_agy_parse_invalid_result(stdout, diagnostic):
+    res = AgyAdapter().parse(RunResult(stdout, "", 0, False, 1))
+    assert not res.ok
+    assert res.error == diagnostic
+
+
+def test_agy_nonzero_exit_with_success_payload_fails():
+    run = replace(_run_result("ok.json", "agy"), exit_code=2, stderr="exit detail")
+    res = AgyAdapter().parse(run)
+    assert not res.ok
+    assert res.error == "exit code 2: exit detail"
+
+
+def test_agy_timeout_takes_precedence_over_output():
+    run = replace(_run_result("ok.json", "agy"), timed_out=True, duration_s=30)
+    res = AgyAdapter().parse(run)
+    assert not res.ok
+    assert res.error == "timed out after 30s"
+
+
+@pytest.mark.parametrize("model", ["ollama/qwen2.5-coder", "openrouter/deepseek/deepseek-chat"])
+def test_pi_argv_keeps_provider_qualified_model(model):
+    assert PiAdapter("my-pi", model).argv("do it") == [
+        "my-pi",
+        "-p",
+        "do it",
+        "--mode",
+        "json",
+        "--model",
+        model,
+    ]
+
+
+def test_pi_run_uses_default_model_and_shared_runner(monkeypatch, tmp_path):
+    runner = Mock(return_value=_run_result("ok.json", "pi"))
+    monkeypatch.setattr("baton.adapter.run_command", runner)
+    assert PiAdapter().run("do it", tmp_path, 17).ok
+    runner.assert_called_once_with(["pi", "-p", "do it", "--mode", "json"], tmp_path, 17)
+
+
+def test_pi_parse_success_fixture():
+    run = _run_result("ok.json", "pi")
+    res = PiAdapter().parse(run)
+    assert res.ok
+    assert res.text == "OK"
+    assert res.cost == pytest.approx(0.00048135)
+    assert res.raw == run.stdout
+
+
+def test_pi_parse_exit_zero_error_fixture():
+    run = _run_result("error.json", "pi")
+    assert run.exit_code == 0
+    res = PiAdapter().parse(run)
+    assert not res.ok
+    assert "stopped (error)" in res.error
+    assert "Unknown Model" in res.error
+
+
+def test_pi_extracts_final_text_and_counts_each_assistant_message_once():
+    earlier = {
+        "role": "assistant",
+        "stopReason": "toolUse",
+        "content": [{"type": "text", "text": "Working"}],
+        "usage": {"cost": {"total": 0.01}},
+    }
+    final = {
+        "role": "assistant",
+        "stopReason": "stop",
+        "content": [
+            {"type": "thinking", "thinking": "private"},
+            {"type": "text", "text": "Done"},
+            {"type": "text", "text": "Verified"},
+        ],
+        "usage": {"cost": {"total": 0.02}},
+    }
+    events = [
+        {"type": "message_end", "message": earlier},
+        {"type": "message_end", "message": {"role": "toolResult", "content": []}},
+        {"type": "message_end", "message": final},
+        {"type": "agent_end", "messages": [earlier, final]},
+        {"type": "agent_settled", "aborted": False},
+    ]
+    res = PiAdapter().parse(RunResult("\n".join(map(json.dumps, events)), "", 0, False, 1))
+    assert res.ok
+    assert res.text == "Done\nVerified"
+    assert res.cost == pytest.approx(0.03)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "diagnostic"),
+    [
+        ("", "missing agent_settled"),
+        ("[]", "invalid pi event"),
+        ('{"type":"message_end"}', "invalid pi message"),
+        ('{"type":"agent_settled","aborted":true}', "pi run aborted"),
+        ('{"type":"agent_settled"}', "no final assistant message"),
+    ],
+)
+def test_pi_invalid_or_incomplete_result(stdout, diagnostic):
+    res = PiAdapter().parse(RunResult(stdout, "", 0, False, 1))
+    assert not res.ok
+    assert diagnostic in res.error
+
+
+def test_pi_truncated_run_with_assistant_text_fails():
+    run = _run_result("ok.json", "pi")
+    incomplete = "\n".join(run.stdout.splitlines()[:-1])
+    res = PiAdapter().parse(replace(run, stdout=incomplete))
+    assert not res.ok
+    assert "missing agent_settled" in res.error
+    res = PiAdapter().parse(replace(run, stdout=incomplete + '\n{"type":'))
+    assert not res.ok
+    assert "invalid JSON" in res.error
+
+
+@pytest.mark.parametrize(
+    ("reason", "error", "diagnostic"),
+    [("length", "", "stopped (length)"), ("stop", "provider error", "provider error")],
+)
+def test_pi_partial_assistant_response_fails(reason, error, diagnostic):
+    message = {
+        "role": "assistant",
+        "stopReason": reason,
+        "errorMessage": error,
+        "content": [{"type": "text", "text": "Partial answer"}],
+    }
+    stdout = json.dumps({"type": "message_end", "message": message})
+    stdout += '\n{"type":"agent_settled","aborted":false}\n'
+    res = PiAdapter().parse(RunResult(stdout, "", 0, False, 1))
+    assert not res.ok
+    assert diagnostic in res.error
+
+
+def test_pi_nonzero_exit_with_completed_run_fails():
+    run = replace(_run_result("ok.json", "pi"), exit_code=2, stderr="exit detail")
+    res = PiAdapter().parse(run)
+    assert not res.ok
+    assert res.error == "exit code 2: exit detail"
+
+
+def test_pi_timeout_takes_precedence_over_output():
+    run = replace(_run_result("ok.json", "pi"), timed_out=True, duration_s=30)
+    res = PiAdapter().parse(run)
+    assert not res.ok
+    assert res.error == "timed out after 30s"

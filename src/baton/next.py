@@ -9,11 +9,12 @@ from __future__ import annotations
 import datetime
 import shlex
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO
 
-from baton.adapter import Adapter, ClaudeAdapter
-from baton.config import AgentConfig, Config, ConfigError, find_config_path, load_config
+from baton.adapter import Adapter, CommandAdapter, make_adapter
+from baton.config import ConfigError, find_config_path, load_config
 from baton.gate import GateResult, apply_gate, check_gate
 from baton.git import PLAN_FILENAME, GitError, dirty_paths, head
 from baton.plan import (
@@ -27,6 +28,7 @@ from baton.plan import (
     set_step_status,
 )
 from baton.prompt import implement_prompt, step_text
+from baton.router import resolve_route
 from baton.verify import VerifyResult, run_verify
 
 EXIT_OK = 0
@@ -133,6 +135,27 @@ def run_next(
     today: str | None = None,
 ) -> int:
     """Implement the first open step of ``repo``'s plan; returns the process exit code."""
+    return _run_next(
+        repo,
+        lambda step: adapter,
+        out,
+        agent_timeout=agent_timeout,
+        verify_timeout=verify_timeout,
+        override=override,
+        today=today,
+    )
+
+
+def _run_next(
+    repo: Path,
+    select_adapter: Callable[[Step], Adapter],
+    out: TextIO,
+    *,
+    agent_timeout: float,
+    verify_timeout: float,
+    override: bool = False,
+    today: str | None = None,
+) -> int:
     date = today or datetime.date.today().isoformat()
     plan_path = repo / PLAN_FILENAME
     try:
@@ -154,6 +177,7 @@ def run_next(
             return EXIT_STOPPED
 
         _say(out, f"Step {step.number}/{len(plan.steps)}: {step.message}")
+        adapter = select_adapter(step)
         prompt = implement_prompt(plan, step, step_text(plan_path.read_text("utf-8"), step))
         before = head(repo)
 
@@ -188,7 +212,7 @@ def run_next(
         note = "implemented" if verify.verified else "implemented (no Verify command)"
         text = append_log(text, f"{date}: step {step.number} {note}, waiting for commit.")
         save_plan(plan_path, text)
-    except (GitError, PlanError, OSError) as exc:
+    except (ConfigError, GitError, PlanError, OSError) as exc:
         _say(out, f"Error: {exc}")
         return EXIT_FAILED
 
@@ -196,15 +220,7 @@ def run_next(
     return EXIT_OK
 
 
-def pick_claude_agent(config: Config) -> AgentConfig:
-    """M3 uses one fixed agent: the first configured agent with ``adapter = "claude"``."""
-    for agent in config.agents.values():
-        if agent.adapter == "claude":
-            return agent
-    raise ConfigError(f'{config.location.path}: no agent with adapter = "claude" configured')
-
-
-def _dry_run(repo: Path, adapter: ClaudeAdapter, out: TextIO) -> int:
+def _dry_run(repo: Path, select_adapter: Callable[[Step], CommandAdapter], out: TextIO) -> int:
     """Print the prompt and argv for the first open step; change nothing."""
     plan_path = repo / PLAN_FILENAME
     if not plan_path.is_file():
@@ -218,6 +234,7 @@ def _dry_run(repo: Path, adapter: ClaudeAdapter, out: TextIO) -> int:
         return EXIT_STOPPED
     prompt = implement_prompt(plan, step, step_text(text, step))
     _say(out, f"Step {step.number}/{len(plan.steps)}: {step.message}")
+    adapter = select_adapter(step)
     _say(out, "Command (cwd = repo root):")
     _say(out, "  " + " ".join(shlex.quote(a) for a in adapter.argv("<prompt>")))
     _say(out, "Prompt:")
@@ -229,20 +246,31 @@ def run_next_command(
     repo: Path,
     *,
     config_path: str | None = None,
+    agent_name: str | None = None,
+    tier: str | None = None,
     agent_timeout: float = DEFAULT_AGENT_TIMEOUT,
     verify_timeout: float = DEFAULT_VERIFY_TIMEOUT,
     dry_run: bool = False,
     out: TextIO | None = None,
 ) -> int:
-    """CLI entry: resolve the agent from the config, then run (or dry-run) one step."""
+    """CLI entry: select an agent for the step being run or previewed."""
     out = out or sys.stdout
-    try:
+
+    def select_adapter(step: Step) -> CommandAdapter:
         config = load_config(find_config_path(config_path))
-        agent = pick_claude_agent(config)
-        adapter = ClaudeAdapter(agent.command, agent.model)
-        if dry_run:
-            return _dry_run(repo, adapter, out)
-    except (ConfigError, PlanError, OSError) as exc:
-        _say(out, f"Error: {exc}")
-        return EXIT_FAILED
-    return run_next(repo, adapter, out, agent_timeout=agent_timeout, verify_timeout=verify_timeout)
+        route = resolve_route(
+            config, "implement", tier=tier, step_size=step.size, agent_name=agent_name
+        )
+        agent = route.agents[0]
+        _say(out, f"Tier {route.tier}, agent {agent.name} ({agent.adapter})")
+        return make_adapter(agent)
+
+    if dry_run:
+        try:
+            return _dry_run(repo, select_adapter, out)
+        except (ConfigError, PlanError, OSError) as exc:
+            _say(out, f"Error: {exc}")
+            return EXIT_FAILED
+    return _run_next(
+        repo, select_adapter, out, agent_timeout=agent_timeout, verify_timeout=verify_timeout
+    )

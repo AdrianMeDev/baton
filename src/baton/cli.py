@@ -3,6 +3,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from baton import __version__
+from baton.config import ROUTE_TIERS
 from baton.doctor import run_doctor
 from baton.next import DEFAULT_AGENT_TIMEOUT, DEFAULT_VERIFY_TIMEOUT, run_next_command
 from baton.probe import DEFAULT_PROMPT, DEFAULT_TIMEOUT, run_probe_command
@@ -47,11 +48,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--path", default=".", metavar="DIR", help="repository root (default: current directory)"
     )
     nxt = subparsers.add_parser(
-        "next", help="implement the first open plan step with Claude, verify it, stop for commit"
+        "next", help="implement the first open plan step, verify it, stop for commit"
     )
     nxt.add_argument(
         "--path", default=".", metavar="DIR", help="repository root (default: current directory)"
     )
+    nxt.add_argument("--agent", metavar="NAME", help="use a named agent from the config")
+    nxt.add_argument("--tier", choices=ROUTE_TIERS, help="override the step size used for routing")
     nxt.add_argument(
         "--timeout",
         type=float,
@@ -86,6 +89,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_next_command(
             Path(args.path),
             config_path=args.config,
+            agent_name=args.agent,
+            tier=args.tier,
             agent_timeout=args.timeout,
             verify_timeout=args.verify_timeout,
             dry_run=args.dry_run,

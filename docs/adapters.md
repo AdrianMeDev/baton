@@ -1,7 +1,7 @@
 # Adapter notes: headless behaviour of the agent CLIs
 
-Findings of milestone M1, recorded with `baton probe` (see `README.md`). The recordings live in
-`tests/fixtures/<adapter>/` and are the reference for the adapters (M3-M5) and limit detection (M6).
+The probe recordings live in `tests/fixtures/<adapter>/` and are the reference for the adapters
+and future limit detection.
 All runs used the prompt `Reply with exactly: OK` in an empty temporary directory.
 
 CLI versions: claude 2.1.311, codex 0.169.0, agy 1.5.11, pi 1.5.0.
@@ -45,9 +45,7 @@ claude -p <prompt> --output-format json [--model M] \
 - `Bash` is allowed so the agent can run tests; `Bash(git:*)` is disallowed, so the agent cannot
   commit, stash or reset. This is a guard, not a sandbox: baton additionally compares HEAD before
   and after the run and refuses to mark the step if it moved.
-- The working directory is the repository root. The agent is told not to touch `.agent-plan.md`.
-- The result is parsed as in the read-only call: failure means `is_error: true`, empty or invalid
-  JSON, or a timeout. The agent's own test runs are advisory; baton's Verify run decides.
+- A run fails on a nonzero exit, `is_error: true`, empty or invalid JSON, or a timeout.
 
 ## codex
 
@@ -63,6 +61,11 @@ claude -p <prompt> --output-format json [--model M] \
 - Limit message: not verified. Expect it in `turn.failed.error.message`.
 - Fixtures: `tests/fixtures/codex/ok.json`, `error.json`.
 
+### Implement call
+
+`codex exec --json --sandbox workspace-write [-m M] -- <prompt>` runs in the repository.
+Success requires exit 0, a `turn.completed` event and a final agent message.
+
 ## agy (Antigravity)
 
 - Call: `agy -p <prompt> --output-format json --mode plan [--model M]`.
@@ -73,14 +76,12 @@ claude -p <prompt> --output-format json [--model M] \
 - Limit message: not verified.
 - Fixtures: `tests/fixtures/agy/ok.json`, `ok-notty.json`, `ok-tty.json`, `error.json`.
 
-### Decision: no pseudo-terminal for agy
+### Implement call
 
-The roadmap risk was that `agy -p` prints nothing without a terminal. With 1.5.11, the run without
-a terminal (`ok-notty.json`, identical to `ok.json`) returns the full JSON answer and exit 0, and
-the run through a pseudo-terminal (`ok-tty.json`) returns the same content. So the adapter uses
-plain pipes. The runner keeps `tty=True` (`baton probe agy --tty`) as a fallback should an agy
-update bring the bug back; the adapter should treat "exit 0 but empty stdout" as a failure and
-may retry once with a terminal.
+`agy -p <prompt> --output-format json --mode accept-edits [--model M]` uses ordinary pipes.
+Both pipe and terminal probes returned valid JSON on 1.5.11. An empty response stream fails
+the implementation run. `baton probe agy --tty` remains available for investigating terminal
+behavior.
 
 ## pi
 
@@ -100,6 +101,53 @@ may retry once with a terminal.
 - Limit message: not verified; expect it in `errorMessage` (HTTP 429 or provider-specific text).
 - Fixtures: `tests/fixtures/pi/ok.json`, `error.json`.
 
+### Implement call
+
+Implementation uses the same pi arguments as the probe. The configured `model` is passed
+unchanged. baton waits for `agent_settled`, checks the final assistant stop reason and sums the
+available assistant message costs.
+
+## Disposable-repository smoke test
+
+Run this from the baton checkout with its development environment installed. Each selected agent
+gets a fresh repository. Use names and model IDs from your config if they differ from the example.
+The agent timeout defaults to 1,800 seconds and the Verify timeout to 900 seconds.
+
+```bash
+set -e
+config="$PWD/src/baton/config.example.toml"
+for agent in claude-sonnet codex-astra agy pi-ollama pi-openrouter; do
+  repo=$(mktemp -d)
+  git -C "$repo" init -qb main
+  cat > "$repo/.agent-plan.md" <<'PLAN'
+# Plan: Adapter smoke
+Milestone: none
+
+## Steps
+
+### 1. [ ] test: write a smoke marker
+- **Changes:** Create smoke.txt containing the single line baton-smoke.
+- **Verify:** `grep -Fxq baton-smoke smoke.txt`
+PLAN
+  git -C "$repo" add .agent-plan.md
+  git -C "$repo" -c user.name=Baton -c user.email=baton@example.invalid commit -qm init
+  before=$(git -C "$repo" rev-parse HEAD)
+  uv run baton --config "$config" next --path "$repo" --agent "$agent"
+  grep -Fxq baton-smoke "$repo/smoke.txt"
+  grep -Fq "[~] (on ${before:0:7})" "$repo/.agent-plan.md"
+  test "$(git -C "$repo" rev-parse HEAD)" = "$before"
+  printf '%s passed in %s\n' "$agent" "$repo"
+done
+```
+
+### M4 smoke results
+
+Claude Sonnet, Codex Astra, agy with Gemini 4 Argon High, and pi with Z.AI
+(`zai/glm-5.3-flash`) each edited a disposable repository, passed Verify and kept HEAD
+unchanged. agy timed out at 90 seconds and passed on a fresh run with a 150-second timeout.
+The example Ollama route could not connect to its backend. The example OpenRouter route
+lacked an API key.
+
 ## Recording format
 
 `baton probe --record PATH` writes JSON with `adapter`, `agent`, `argv`, `tty`, `exit_code`,
@@ -107,7 +155,7 @@ may retry once with a terminal.
 home path becomes `~`, the temporary working directory `<workdir>`, e-mail addresses `<email>` and
 UUIDs `<uuid>`. Check new recordings for personal data before committing them.
 
-## Open points for M6 (limit detection)
+## Open points for M5 (limit detection)
 
 No real limit message was recorded for any CLI because limits cannot be triggered on purpose. When
 one occurs, run `baton probe <agent> --record tests/fixtures/<adapter>/limit.json` and add the

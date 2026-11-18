@@ -6,7 +6,7 @@ import pytest
 
 from baton.adapter import AgentResult
 from baton.git import head
-from baton.next import EXIT_FAILED, EXIT_OK, EXIT_STOPPED, run_next
+from baton.next import EXIT_FAILED, EXIT_OK, EXIT_STOPPED, run_next, run_next_command
 from baton.plan import parse_plan
 
 PLAN = """# Plan: Demo
@@ -141,6 +141,15 @@ def test_gate_dirty_blocks(repo: Path) -> None:
     assert code == EXIT_STOPPED
     assert adapter.prompts == []
     assert "new.txt" in out and 'git commit -m "feat: first"' in out
+
+
+def test_command_checks_gate_before_resolving_agent(repo: Path) -> None:
+    write_plan(repo, s1=f"[~] (on {head(repo)})")
+    edit(repo)
+    out = io.StringIO()
+    code = run_next_command(repo, config_path=str(repo / "missing.toml"), out=out)
+    assert code == EXIT_STOPPED
+    assert "Step 1 is implemented but not committed" in out.getvalue()
 
 
 def test_gate_committed_continues_with_next_step(repo: Path) -> None:

@@ -4,6 +4,8 @@
 #   adapter  one of: claude, codex, agy, pi
 #   command  executable looked up in PATH
 #   model    optional model name passed to the agent
+#   provider model provider identity for review (set explicitly for agy and pi)
+# Model IDs and aliases below are examples. Adjust them to match your CLI and account.
 
 [agents.claude-opus]
 adapter = "claude"
@@ -24,16 +26,50 @@ model = "haiku"
 adapter = "codex"
 command = "codex"
 
+[agents.codex-astra]
+adapter = "codex"
+command = "codex"
+model = "gpt-6.2-astra"
+
 [agents.agy]
 adapter = "agy"
 command = "agy"
+model = "gemini-4-argon-high"
+provider = "google"
 
 [agents.pi-ollama]
 adapter = "pi"
 command = "pi"
 model = "ollama/qwen2.5-coder"
+provider = "ollama"
 
 [agents.pi-openrouter]
 adapter = "pi"
 command = "pi"
 model = "openrouter/deepseek/deepseek-chat"
+provider = "deepseek"
+
+[routes.plan_roadmap]
+S = ["claude-opus", "codex-astra", "agy"]
+M = ["claude-opus", "codex-astra", "agy"]
+L = ["claude-opus", "codex-astra", "agy"]
+
+[routes.plan_commits]
+S = ["claude-sonnet", "agy"]
+M = ["claude-sonnet", "agy"]
+L = ["claude-opus", "codex-astra", "agy"]
+
+[routes.implement]
+S = ["pi-ollama", "claude-haiku"]
+M = ["claude-sonnet", "codex"]
+L = ["claude-sonnet", "agy", "codex"]
+
+[routes.fix]
+S = ["claude-haiku", "codex"]
+M = ["claude-sonnet", "agy", "codex"]
+L = ["claude-opus", "codex-astra", "agy"]
+
+[routes.review]
+S = ["claude-opus", "codex-astra", "agy"]
+M = ["claude-opus", "codex-astra", "agy"]
+L = ["claude-opus", "codex-astra", "agy"]

@@ -3,8 +3,8 @@
 Command-line tool that distributes the steps of a commit plan (`.agent-plan.md`) across several
 coding agent CLIs (Claude Code, Codex, Antigravity, pi). See `docs/ROADMAP.md` for the plan.
 
-Status: milestone M3 (first end-to-end run with Claude). Currently available: `baton --version`,
-`baton doctor`, `baton probe`, `baton status` and `baton next`.
+Available commands include `baton doctor`, `baton probe`, `baton status` and `baton next`.
+`baton next` can run Claude Code, Codex, Antigravity or pi.
 
 ## Installation
 
@@ -30,8 +30,25 @@ mkdir -p ~/.config/baton
 cp src/baton/config.example.toml ~/.config/baton/config.toml
 ```
 
-Each `[agents.<name>]` table needs `adapter` (`claude`, `codex`, `agy` or `pi`) and `command`;
-`model` is optional.
+Each `[agents.<name>]` table needs `adapter` (`claude`, `codex`, `agy` or `pi`) and `command`.
+The optional `model` takes an ID supported by your CLI and account. pi accepts a provider-qualified
+model like `openrouter/deepseek/deepseek-chat`. The optional `provider` identifies the model
+provider for cross-provider review. Claude and Codex default to Anthropic and OpenAI, respectively.
+Set `provider` explicitly for agy and pi when using cross-provider review.
+
+Routes are ordered lists of configured agent names. The bundled example defines S, M and L for
+each role (`plan_roadmap`, `plan_commits`, `implement`, `fix`, and `review`).
+
+```toml
+[routes.implement]
+S = ["pi-ollama", "claude-haiku"]
+M = ["claude-sonnet", "codex"]
+L = ["claude-sonnet", "agy", "codex"]
+```
+
+`baton next` uses the first agent in the implementation chain. Planning, fixing, review and
+automatic switching are planned for later milestones. Agents-only configs use the first
+configured Claude agent by default.
 
 ## Usage
 
@@ -71,35 +88,37 @@ an unreadable or malformed plan.
 ### `baton next`
 
 ```
-baton next [--path DIR] [--timeout S] [--verify-timeout S] [--dry-run]
+baton next [--path DIR] [--agent NAME] [--tier {S,M,L}] [--timeout S] [--verify-timeout S] [--dry-run]
 ```
 
-Implements exactly one plan step and stops for your commit, like the `/next` skill. M3 uses one
-fixed agent: the first configured agent with `adapter = "claude"` (routing and `--agent`/`--tier`
-come in M4). Flow:
+Implements exactly one plan step and stops for your commit. The tier comes from `--tier`, the
+step’s `Size` field, or `M` in that order. `--agent` selects a named agent directly. For example,
+`baton next --agent codex --dry-run` previews Codex, and `baton next --tier L` uses the large
+implementation route.
 
 1. **Gate.** If a step is `[~]` and committed (HEAD is newer than the noted hash), it is marked
    `[x]` and the run continues. If it is not committed yet, baton prints the changed files and the
    `git add -A` / `git commit -m "<message>"` hint and stops. If the changes were discarded
    (clean tree, HEAD unchanged), it stops as well. A dirty tree without a `[~]` step also refuses
    to start, so the agent never mixes its work with yours.
-2. **Implement.** `claude -p` runs in the repo root with the prompt for the first open step only
-   (no git, do not touch `.agent-plan.md`, include tests). Flags: `docs/adapters.md`.
+2. **Implement.** baton prints the effective tier and agent, then runs the selected CLI in the
+   repo root with the prompt for the first open step. See the adapter notes for implementation
+   modes and a smoke test. [Adapter notes](docs/adapters.md)
 3. **Check HEAD.** If the agent moved HEAD, baton reports an error and does not mark the step.
 4. **Verify.** baton runs the step's **Verify** command itself (`bash -c` in the repo root); its
    result, not the agent's, decides.
 5. **Mark and report.** The step becomes `[~] (on <HEAD>)`, a Log line is added, and the report
    lists the changed files, the checks and the commit commands. baton never commits or pushes.
 
-Exit codes: 0 step done and verified; 1 agent or Verify failed, or the plan/config is invalid (the
-changes stay in the tree, the step stays `[ ]`, a Log line records the failure; there is no
-automatic fix loop yet); 2 nothing was started (gate blocked, no open step, dirty tree, no plan).
+Exit code 0 means the step is ready to commit. Steps without Verify are reported as unverified.
+Exit code 1 indicates an agent, Verify, plan or config error. Agent or Verify failures leave the
+step open and record the failure in the Log. Exit code 2 means the run stopped before starting
+an agent because of the gate, a dirty tree, a missing plan or no open steps.
 `--timeout` (default 1800 s) limits the agent, `--verify-timeout` (default 900 s) the Verify
 command. `--dry-run` prints the step, the command and the prompt and changes nothing.
 
-Safety: the agent runs with `--permission-mode acceptEdits`, Bash allowed but `Bash(git:*)`
-disallowed. It edits files in the working tree and uses your login's quota; review the diff
-before committing.
+The agent can edit your working tree and may use your account quota. Review the diff before
+committing.
 
 ### Plan format
 

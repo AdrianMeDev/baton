@@ -70,11 +70,71 @@ def test_valid_file(tmp_path: Path) -> None:
     assert cfg.agents["a"].model == "opus"
     assert cfg.agents["b"].model is None
     assert cfg.agents["b"].command == "codex"
+    assert cfg.agents["b"].provider is None
+    assert cfg.routes == {}
 
 
 def test_unknown_top_level_keys_are_ignored(tmp_path: Path) -> None:
-    cfg = load_text(tmp_path, VALID + '\n[routes]\nplan = ["a"]\n')
+    cfg = load_text(tmp_path, VALID + "\n[future]\nkey = true\n")
     assert set(cfg.agents) == {"a", "b"}
+
+
+def test_partial_routes_preserve_chain_order(tmp_path: Path) -> None:
+    cfg = load_text(
+        tmp_path,
+        """
+[routes.plan_roadmap]
+L = ["b", "a"]
+[routes.plan_commits]
+S = ["a"]
+[routes.implement]
+M = ["a", "b"]
+L = ["b", "a"]
+[routes.fix]
+S = ["b"]
+[routes.review]
+M = ["b", "a"]
+"""
+        + VALID
+        + 'provider = "openai"\n',
+    )
+    assert cfg.agents["b"].provider == "openai"
+    assert cfg.routes == {
+        "plan_roadmap": {"L": ["b", "a"]},
+        "plan_commits": {"S": ["a"]},
+        "implement": {"M": ["a", "b"], "L": ["b", "a"]},
+        "fix": {"S": ["b"]},
+        "review": {"M": ["b", "a"]},
+    }
+
+
+@pytest.mark.parametrize(
+    ("routes", "key", "error"),
+    [
+        ("routes = 1", "routes", "must be a table"),
+        ('[routes]\nplan = ["a"]', "routes.plan", "unknown role"),
+        ('[routes]\nimplement = ["a"]', "routes.implement", "must be a table"),
+        ('[routes.fix]\nXL = ["a"]', "routes.fix.XL", "unknown tier"),
+        ('[routes.fix]\nM = "a"', "routes.fix.M", "non-empty array"),
+        ("[routes.fix]\nM = []", "routes.fix.M", "non-empty array"),
+        ('[routes.fix]\nM = ["a", 2]', "routes.fix.M", "non-empty strings"),
+        ('[routes.fix]\nM = [" "]', "routes.fix.M", "non-empty strings"),
+        ('[routes.fix]\nM = ["a", "missing"]', "routes.fix.M", "unknown agent 'missing'"),
+    ],
+)
+def test_invalid_routes(tmp_path: Path, routes: str, key: str, error: str) -> None:
+    with pytest.raises(ConfigError) as exc:
+        load_text(tmp_path, routes + "\n" + VALID)
+    message = str(exc.value)
+    assert str(tmp_path / "c.toml") in message
+    assert key in message
+    assert error in message
+
+
+@pytest.mark.parametrize("provider", ['" "', "3"])
+def test_invalid_provider(tmp_path: Path, provider: str) -> None:
+    with pytest.raises(ConfigError, match=r"\[agents\.b\].*'provider' must be a non-empty string"):
+        load_text(tmp_path, VALID + f"provider = {provider}\n")
 
 
 def test_missing_file(tmp_path: Path) -> None:
