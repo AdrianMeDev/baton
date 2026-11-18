@@ -104,7 +104,7 @@ Updated: 2026-11-18
 - **Depends on:** M5
 - **Size:** M, ~5 commits
 
-### M7 [ ] Auto-Commit und Branches
+### M7 [~] Auto-Commit und Branches
 - **Goal:** baton committet grüne Schritte selbst auf einem Meilenstein-Branch.
 - **Includes:** `baton next --commit`, Branch `baton/m<n>-<name>`, Commit mit Plan-Message, Roadmap-Status im ersten/letzten Commit, Push, eigener Worktree
 - **Done when:** ein Meilenstein im Beispiel-Repo endet als Branch mit einem Commit pro Schritt, alle Commits grün
