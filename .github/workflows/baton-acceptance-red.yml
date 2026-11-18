@@ -1,0 +1,14 @@
+name: Intentional acceptance failure
+
+# Deliberate CI-only fixture for the red merge gate. Do not merge.
+on:
+  pull_request:
+
+jobs:
+  intentional-failure:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail on purpose
+        run: |
+          echo "Expected red acceptance fixture; do not merge"
+          exit 1
