@@ -54,7 +54,7 @@ Updated: 2026-11-18
 
 ## Milestones
 
-### M0 [~] Walking skeleton
+### M0 [x] Walking skeleton
 - **Goal:** Lauffähiges, getestetes Grundgerüst mit Konfiguration.
 - **Includes:** uv-Projekt, `baton --version`, `config.toml` laden + Beispiel, `baton doctor` (Agenten, CLIs im PATH), ruff, pytest, CI, `.zed/tasks.json`
 - **Done when:** `uv run baton doctor` zeigt die Beispiel-Agenten; CI grün
@@ -153,3 +153,4 @@ Updated: 2026-11-18
 ## Changelog
 - 2026-11-18: roadmap created
 - 2026-11-18: Auto-Modus ergänzt (M7–M10), Statistik/Doku nach hinten verschoben (M11–M12)
+- 2026-11-18: M0 done (walking skeleton: --version, config, doctor, CI, Zed tasks, README)
