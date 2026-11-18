@@ -3,7 +3,8 @@
 Command-line tool that distributes the steps of a commit plan (`.agent-plan.md`) across several
 coding agent CLIs (Claude Code, Codex, Antigravity, pi). See `docs/ROADMAP.md` for the plan.
 
-Status: milestone M0 (walking skeleton). Currently available: `baton --version` and `baton doctor`.
+Status: milestone M1 (CLI spike). Currently available: `baton --version`, `baton doctor` and
+`baton probe`.
 
 ## Installation
 
@@ -41,6 +42,18 @@ baton doctor    # shows the configured agents and whether their CLIs are in PATH
 
 `doctor` exits with 0 for a valid config (missing CLIs are marked, not treated as errors) and with
 1 for an invalid config.
+
+### `baton probe`
+
+```
+baton probe <agent> [--prompt TEXT] [--model NAME] [--tty] [--timeout S] [--record PATH] [--dry-run]
+```
+
+Starts the configured agent CLI headless with a tiny read-only request in an empty temporary
+directory and prints the call, exit code, duration, stdout and stderr. `--record PATH` saves a
+redacted JSON recording (home path, e-mail addresses and UUIDs removed), `--tty` runs the agent
+through a pseudo-terminal, `--dry-run` only prints the call. The exit code is 0 only if the agent
+exited with 0. A live probe uses your login's quota. Results per CLI: `docs/adapters.md`.
 
 ## Development
 

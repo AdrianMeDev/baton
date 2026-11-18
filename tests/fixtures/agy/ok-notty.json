@@ -1,0 +1,21 @@
+{
+  "adapter": "agy",
+  "agent": "agy",
+  "argv": [
+    "agy",
+    "-p",
+    "Reply with exactly: OK",
+    "--output-format",
+    "json",
+    "--mode",
+    "plan"
+  ],
+  "tty": false,
+  "exit_code": 0,
+  "timed_out": false,
+  "duration_s": 13.2,
+  "stdout": "{\"conversation_id\":\"<uuid>\",\"status\":\"SUCCESS\",\"response\":\"OK\\n\",\"duration_seconds\":10.841814715,\"num_turns\":1,\"usage\":{\"input_tokens\":10247,\"output_tokens\":41,\"thinking_tokens\":36,\"cache_read_tokens\":0,\"total_tokens\":10288}}\n",
+  "stderr": "",
+  "recorded_at": "2026-11-18T17:09:25+00:00",
+  "cli_version": "1.5.11"
+}

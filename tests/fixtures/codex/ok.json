@@ -1,0 +1,21 @@
+{
+  "adapter": "codex",
+  "agent": "codex",
+  "argv": [
+    "codex",
+    "exec",
+    "Reply with exactly: OK",
+    "--json",
+    "--sandbox",
+    "read-only",
+    "--skip-git-repo-check"
+  ],
+  "tty": false,
+  "exit_code": 0,
+  "timed_out": false,
+  "duration_s": 6.315,
+  "stdout": "{\"type\":\"thread.started\",\"thread_id\":\"<uuid>\"}\n{\"type\":\"turn.started\"}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"agent_message\",\"text\":\"OK\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":21449,\"cached_input_tokens\":12160,\"cache_write_input_tokens\":0,\"output_tokens\":5,\"reasoning_output_tokens\":0}}\n",
+  "stderr": "Reading additional input from stdin...\n",
+  "recorded_at": "2026-11-18T17:01:26+00:00",
+  "cli_version": "codex-cli 0.169.0"
+}
