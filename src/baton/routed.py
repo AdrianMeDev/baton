@@ -13,6 +13,7 @@ from baton.limits import LimitStore
 from baton.prompt import handoff_prompt
 from baton.review import run_isolated_review
 from baton.router import Route
+from baton.runs import RunStore
 
 
 def say(out: TextIO, text: str = "") -> None:
@@ -36,6 +37,7 @@ class RoutedAdapter:
         self.exhausted = False  # set by run(): every agent of the route was skipped or limited
         self.store = store
         self.out = out
+        self.runs = RunStore()
 
     def _eligible(self):
         seen = set()
@@ -82,11 +84,13 @@ class RoutedAdapter:
                 current_prompt = self._handoff(prompt, previous, repo)
             adapter = make_adapter(agent)
             self.attempted_agents.append(agent)
+            attempt = self.runs.dispatch(agent.name)
             result = (
                 run_isolated_review(adapter, current_prompt, timeout)
                 if self.review
                 else adapter.run(current_prompt, repo, timeout)
             )
+            self.runs.complete(attempt, result)
             # Check even failed attempts, before persisting a cooldown or trying a successor.
             if not self.review and head(repo) != before:
                 return AgentResult(ok=False, error="agent moved HEAD")
