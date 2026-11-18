@@ -149,3 +149,48 @@ class CodexAdapter:
 
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
         return self.parse(run_command(self.argv(prompt), repo, timeout))
+
+
+class AgyAdapter:
+    """Run Antigravity in headless accept-edits mode over ordinary pipes."""
+
+    def __init__(self, command: str = "agy", model: str | None = None) -> None:
+        self.command = command
+        self.model = model
+
+    def argv(self, prompt: str) -> list[str]:
+        argv = [self.command, "-p", prompt, "--output-format", "json", "--mode", "accept-edits"]
+        if self.model:
+            argv += ["--model", self.model]
+        return argv
+
+    def parse(self, result: RunResult) -> AgentResult:
+        raw = result.stdout
+        if result.timed_out:
+            return _failure(f"timed out after {result.duration_s:.0f}s", raw)
+        stderr = result.stderr.strip()[-ERROR_TAIL_CHARS:]
+        if not raw.strip():
+            return _failure(f"no output (exit {result.exit_code}): {stderr}".rstrip(": "), raw)
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return _failure("output is not valid JSON", raw)
+        if not isinstance(data, dict):
+            return _failure("output is not a JSON object", raw)
+
+        status = data.get("status")
+        error = data.get("error")
+        detail = error.strip() if isinstance(error, str) and error.strip() else stderr
+        if status == "ERROR":
+            return _failure(detail or "agy reported an error", raw)
+        if result.exit_code != 0:
+            return _failure(f"exit code {result.exit_code}: {detail}".rstrip(": "), raw)
+        if status != "SUCCESS":
+            return _failure(f"unexpected agy status {status!r}", raw)
+        response = data.get("response")
+        if not isinstance(response, str):
+            return _failure("agy SUCCESS output has no string response", raw)
+        return AgentResult(ok=True, text=response, raw=raw)
+
+    def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
+        return self.parse(run_command(self.argv(prompt), repo, timeout))

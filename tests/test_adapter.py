@@ -1,10 +1,11 @@
 import json
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
-from baton.adapter import ClaudeAdapter, CodexAdapter
+from baton.adapter import AgyAdapter, ClaudeAdapter, CodexAdapter
 from baton.recording import load
 from baton.runner import RunResult
 
@@ -177,5 +178,76 @@ def test_codex_nonzero_exit_with_completed_turn_fails():
 def test_codex_timeout_takes_precedence_over_output():
     run = replace(_run_result("ok.json", "codex"), timed_out=True, duration_s=30)
     res = CodexAdapter().parse(run)
+    assert not res.ok
+    assert res.error == "timed out after 30s"
+
+
+def test_agy_argv_requests_headless_edits():
+    assert AgyAdapter().argv("do it") == [
+        "agy",
+        "-p",
+        "do it",
+        "--output-format",
+        "json",
+        "--mode",
+        "accept-edits",
+    ]
+    argv = AgyAdapter("my-agy", "Gemini 4 Argon").argv("do it")
+    assert argv[0] == "my-agy"
+    assert argv[-2:] == ["--model", "Gemini 4 Argon"]
+
+
+def test_agy_empty_output_runs_once(monkeypatch, tmp_path):
+    adapter = AgyAdapter()
+    runner = Mock(return_value=RunResult("", "", 0, False, 1))
+    monkeypatch.setattr("baton.adapter.run_command", runner)
+    res = adapter.run("do it", tmp_path, 17)
+    assert not res.ok
+    assert res.error == "no output (exit 0)"
+    runner.assert_called_once_with(adapter.argv("do it"), tmp_path, 17)
+
+
+def test_agy_parse_success_fixture():
+    run = _run_result("ok-notty.json", "agy")
+    res = AgyAdapter().parse(run)
+    assert res.ok
+    assert res.text == "OK\n"
+    assert res.raw == run.stdout
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_agy_parse_error_fixture(exit_code):
+    run = replace(_run_result("error.json", "agy"), exit_code=exit_code, stderr="")
+    res = AgyAdapter().parse(run)
+    assert not res.ok
+    assert "invalid model selection" in res.error
+
+
+@pytest.mark.parametrize(
+    ("stdout", "diagnostic"),
+    [
+        ("{", "output is not valid JSON"),
+        ("[]", "output is not a JSON object"),
+        ('{"response":"OK"}', "unexpected agy status None"),
+        ('{"status":"SUCCESS","response":1}', "agy SUCCESS output has no string response"),
+        ('{"status":"ERROR"}', "agy reported an error"),
+    ],
+)
+def test_agy_parse_invalid_result(stdout, diagnostic):
+    res = AgyAdapter().parse(RunResult(stdout, "", 0, False, 1))
+    assert not res.ok
+    assert res.error == diagnostic
+
+
+def test_agy_nonzero_exit_with_success_payload_fails():
+    run = replace(_run_result("ok.json", "agy"), exit_code=2, stderr="exit detail")
+    res = AgyAdapter().parse(run)
+    assert not res.ok
+    assert res.error == "exit code 2: exit detail"
+
+
+def test_agy_timeout_takes_precedence_over_output():
+    run = replace(_run_result("ok.json", "agy"), timed_out=True, duration_s=30)
+    res = AgyAdapter().parse(run)
     assert not res.ok
     assert res.error == "timed out after 30s"
