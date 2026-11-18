@@ -10,6 +10,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Orchestrates coding agent CLIs through a commit plan.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        help="config file (default: $BATON_CONFIG, ~/.config/baton/config.toml, bundled example)",
+    )
     parser.add_subparsers(dest="command", metavar="<command>")
     return parser
 
