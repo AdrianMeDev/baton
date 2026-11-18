@@ -80,3 +80,72 @@ class ClaudeAdapter:
 
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
         return self.parse(run_command(self.argv(prompt), repo, timeout))
+
+
+class CodexAdapter:
+    """Run ``codex exec`` with workspace edits and JSONL events."""
+
+    def __init__(self, command: str = "codex", model: str | None = None) -> None:
+        self.command = command
+        self.model = model
+
+    def argv(self, prompt: str) -> list[str]:
+        argv = [self.command, "exec", "--json", "--sandbox", "workspace-write"]
+        if self.model:
+            argv += ["-m", self.model]
+        return [*argv, "--", prompt]
+
+    def parse(self, result: RunResult) -> AgentResult:
+        raw = result.stdout
+        if result.timed_out:
+            return _failure(f"timed out after {result.duration_s:.0f}s", raw)
+
+        text: str | None = None
+        completed = False
+        stream_error = ""
+        for line_number, line in enumerate(raw.split("\n"), 1):
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                return _failure(f"invalid JSON on output line {line_number}", raw)
+            if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+                return _failure(f"invalid Codex event on output line {line_number}", raw)
+
+            match event["type"]:
+                case "turn.started":
+                    text = None
+                    completed = False
+                    stream_error = ""
+                case "item.completed" if not completed:
+                    item = event.get("item")
+                    if isinstance(item, dict) and item.get("type") == "agent_message":
+                        text = item.get("text")
+                        if not isinstance(text, str):
+                            return _failure(
+                                f"invalid agent message on output line {line_number}", raw
+                            )
+                case "error":
+                    message = event.get("message")
+                    if isinstance(message, str):
+                        stream_error = message
+                case "turn.failed":
+                    error = event.get("error")
+                    message = error.get("message") if isinstance(error, dict) else None
+                    detail = message if isinstance(message, str) and message else stream_error
+                    return _failure(f"Codex turn failed: {detail}".rstrip(": "), raw)
+                case "turn.completed":
+                    completed = True
+
+        detail = stream_error or result.stderr.strip()[-ERROR_TAIL_CHARS:]
+        if result.exit_code != 0:
+            return _failure(f"exit code {result.exit_code}: {detail}".rstrip(": "), raw)
+        if not completed:
+            return _failure(f"missing turn.completed event: {detail}".rstrip(": "), raw)
+        if text is None:
+            return _failure("completed Codex turn has no agent message", raw)
+        return AgentResult(ok=True, text=text, raw=raw)
+
+    def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
+        return self.parse(run_command(self.argv(prompt), repo, timeout))
