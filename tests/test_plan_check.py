@@ -16,6 +16,13 @@ def test_valid_generated_plan_has_no_errors():
     assert _errors("generated_valid.md") == []
 
 
+def test_distributed_planning_skill_example_passes_validation():
+    skill = Path(__file__).resolve().parents[1] / "integrations" / "plan-commits" / "SKILL.md"
+    example = skill.read_text(encoding="utf-8").split("```markdown\n", 1)[1].split("```", 1)[0]
+
+    assert validate_plan(example, "M2") == []
+
+
 @pytest.mark.parametrize(
     ("name", "expected"),
     [
