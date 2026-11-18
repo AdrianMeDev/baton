@@ -38,6 +38,8 @@ def test_ok_recordings_succeed(path: Path) -> None:
 @pytest.mark.parametrize("path", sorted(FIXTURES.glob("*/error.json")), ids=lambda p: p.parent.name)
 def test_error_recordings_fail(path: Path) -> None:
     rec = load(path)
+    if rec.adapter == "pi":
+        return  # pi exits 0 on API errors, see test_pi_jsonl_events
     assert rec.exit_code != 0
     assert rec.stdout.strip() or rec.stderr.strip()
 
@@ -71,3 +73,17 @@ def test_agy_works_with_and_without_terminal(name: str) -> None:
     rec = load(FIXTURES / "agy" / name)
     assert rec.exit_code == 0
     assert json.loads(rec.stdout)["response"].strip() == "OK"
+
+
+def test_pi_jsonl_events() -> None:
+    ok = _json_lines(load(FIXTURES / "pi/ok.json").stdout)
+    ends = [e for e in ok if e.get("type") == "turn_end"]
+    assert ends[-1]["message"]["stopReason"] == "stop"
+    assert ends[-1]["message"]["content"][0]["text"] == "OK"
+    # pi exits 0 even when the API call failed; the error is only in the event stream.
+    rec = load(FIXTURES / "pi/error.json")
+    assert rec.exit_code == 0
+    err = _json_lines(rec.stdout)
+    ends = [e for e in err if e.get("type") == "turn_end"]
+    assert ends[-1]["message"]["stopReason"] == "error"
+    assert "Unknown Model" in ends[-1]["message"]["errorMessage"]
