@@ -231,3 +231,40 @@ def test_ensure_excluded_appends_once(repo: Path) -> None:
     assert ensure_excluded(repo) is True
     assert ensure_excluded(repo) is False
     assert exclude.read_text(encoding="utf-8") == "# comment\n.agent-plan.md\n"
+
+
+def test_fetch_ff_merge_and_worktree_remove(tmp_path: Path) -> None:
+    from baton.git import fetch, ff_merge, worktree_add, worktree_paths, worktree_remove
+
+    origin = tmp_path / "origin.git"
+    origin.mkdir()
+    git(origin, "init", "--bare", "-b", "main")
+    work, other = tmp_path / "work", tmp_path / "other"
+    git(tmp_path, "clone", "-q", str(origin), str(work))
+    (work / "a").write_text("1")
+    git(work, "add", ".")
+    git(work, "commit", "-qm", "base")
+    git(work, "push", "-q", "origin", "main")
+    git(tmp_path, "clone", "-q", str(origin), str(other))
+    (other / "a").write_text("2")
+    git(other, "commit", "-qam", "next")
+    git(other, "push", "-q", "origin", "main")
+
+    fetch(work)
+    ff_merge(work, "origin/main")
+    assert (work / "a").read_text() == "2"
+
+    (work / "a").write_text("local")
+    git(work, "commit", "-qam", "local")
+    (other / "a").write_text("3")
+    git(other, "commit", "-qam", "again")
+    git(other, "push", "-q", "origin", "main")
+    fetch(work)
+    with pytest.raises(GitError):
+        ff_merge(work, "origin/main")  # local and remote have diverged
+
+    path = tmp_path / "wt"
+    worktree_add(work, path, "feature", create=True)
+    assert path.resolve() in {p.resolve() for p in worktree_paths(work)}
+    worktree_remove(work, path)
+    assert not path.exists()

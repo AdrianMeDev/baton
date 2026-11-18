@@ -6,7 +6,15 @@ import pytest
 
 from baton.adapter import AgentResult
 from baton.git import head, worktree_path_for
-from baton.next import EXIT_FAILED, EXIT_OK, EXIT_STOPPED, run_next, run_next_command
+from baton.next import (
+    EXIT_EXHAUSTED,
+    EXIT_FAILED,
+    EXIT_OK,
+    EXIT_ROADMAP_PROBLEM,
+    EXIT_STOPPED,
+    run_next,
+    run_next_command,
+)
 from baton.plan import parse_plan
 
 PLAN = """# Plan: Demo
@@ -302,12 +310,42 @@ def test_limit_exhaustion_leaves_edits_and_step_open(repo, chain, pinned):
     for name in agents:
         agents[name] = FakeAdapter(AgentResult(ok=False, error="quota", limit=UsageLimit()), edit)
     code, out = invoke_chain(repo, chain, agent_name="first" if pinned else None)
-    assert code == EXIT_FAILED
+    assert code == EXIT_EXHAUSTED
     assert plan_of(repo).steps[0].status == "open"
     assert (repo / "new.txt").read_text() == "hello\n"
     assert len(agents["first"].prompts) == 1
     assert len(agents["second"].prompts) == (0 if pinned else 1)
     assert "No available agents" in out and "preserve partial edits" in out
+
+
+def test_resume_continues_open_step_from_partial_diff(repo, chain):
+    _, agents = chain
+    edit(repo)
+    for name in ("first", "second"):
+        agents[name] = FakeAdapter(action=lambda r: (r / "more.txt").write_text("more\n"))
+    code, out = invoke_chain(repo, chain, resume=True)
+    assert code == EXIT_OK, out
+    prompt = agents["first"].prompts[0]
+    assert "Handoff" in prompt and "new.txt" in prompt
+    assert "Resuming from the partial diff" in out
+    assert plan_of(repo).steps[0].status == "pending"
+
+
+def test_resume_with_clean_tree_uses_plain_prompt(repo, chain):
+    _, agents = chain
+    agents["first"] = FakeAdapter(action=edit)
+    code, _ = invoke_chain(repo, chain, resume=True)
+    assert code == EXIT_OK
+    assert "Handoff" not in agents["first"].prompts[0]
+
+
+def test_dirty_open_step_is_refused_without_resume(repo, chain):
+    _, agents = chain
+    edit(repo)
+    code, out = invoke_chain(repo, chain)
+    assert code == EXIT_STOPPED
+    assert "no step is marked" in out
+    assert not agents["first"].prompts
 
 
 @pytest.mark.parametrize("limited", [False, True])
@@ -347,7 +385,7 @@ def test_cooldown_skips_agent_and_explicit_pin_does_not_fallback(repo, chain, ro
     _, agents = chain
     LimitStore().set("first", datetime.now(UTC) + timedelta(hours=2))
     code, out = invoke_chain(repo, chain, agent_name="first")
-    assert code == EXIT_FAILED and "Skipping first" in out
+    assert code == EXIT_EXHAUSTED and "Skipping first" in out
     assert not agents["first"].prompts and not agents["second"].prompts
     code, out = invoke_chain(repo, chain)
     assert code == EXIT_OK and "Skipping first" in out
@@ -1461,3 +1499,18 @@ def test_evidence_preserves_multiline_findings(repo):
     assert "\n" not in entry
     data = json.loads(entry.removeprefix("baton-evidence: "))
     assert data["findings"][0]["message"] == review.findings[0].message
+
+
+def test_implementer_roadmap_problem_stops_without_marking(repo):
+    adapter = FakeAdapter(AgentResult(ok=True, text="BATON-ROADMAP-PROBLEM: contradicts M1"))
+    code, out = run(repo, adapter)
+    assert code == EXIT_ROADMAP_PROBLEM
+    assert "contradicts M1" in out
+    plan = plan_of(repo)
+    assert plan.steps[0].status == "open"
+    assert any("roadmap problem" in line for line in plan.log)
+
+
+def test_normal_output_is_not_a_roadmap_problem(repo):
+    code, _ = run(repo, FakeAdapter(action=edit))
+    assert code == EXIT_OK

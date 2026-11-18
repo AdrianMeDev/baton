@@ -92,3 +92,11 @@ L = ["claude-opus", "codex-astra", "agy"]
 S = ["claude-opus", "codex-astra", "agy"]
 M = ["claude-opus", "codex-astra", "agy"]
 L = ["claude-opus", "codex-astra", "agy"]
+
+# `baton auto` defaults; every key is optional (CLI flags win).
+# [auto]
+# notify = "notify-send"            # "none" (default) | "notify-send" | "ntfy"
+# ntfy_url = "https://ntfy.sh/my-private-topic"  # required for notify = "ntfy"
+# merge = true                      # false: stop after the PR is published
+# max_steps = 50                    # budget of one auto run
+# max_hours = 12

@@ -26,10 +26,17 @@ from baton.git import (
     is_tracked,
 )
 from baton.limits import LimitStateError, LimitStore
-from baton.next import DEFAULT_AGENT_TIMEOUT, EXIT_FAILED, EXIT_OK, EXIT_STOPPED
+from baton.next import (
+    DEFAULT_AGENT_TIMEOUT,
+    EXIT_EXHAUSTED,
+    EXIT_FAILED,
+    EXIT_OK,
+    EXIT_ROADMAP_PROBLEM,
+    EXIT_STOPPED,
+)
 from baton.plan import MilestoneRef, PlanError, Tracking, parse_plan
 from baton.plan_check import PlanHeader, assemble_plan, validate_plan
-from baton.prompt import plan_prompt, plan_retry_prompt
+from baton.prompt import plan_prompt, plan_retry_prompt, roadmap_problem
 from baton.roadmap import (
     Milestone,
     Roadmap,
@@ -132,8 +139,12 @@ def _run_planner(
         raise _Stop(
             EXIT_FAILED, f"The planner changed the working tree; review it yourself:{listing}"
         )
+    reason = roadmap_problem(result.text)
+    if reason is not None:
+        raise _Stop(EXIT_ROADMAP_PROBLEM, f"The planner reported a roadmap problem: {reason}")
     if not result.ok:
-        raise _Stop(EXIT_FAILED, f"The planner failed: {result.error}")
+        code = EXIT_EXHAUSTED if getattr(adapter, "exhausted", False) else EXIT_FAILED
+        raise _Stop(code, f"The planner failed: {result.error}")
     return result
 
 

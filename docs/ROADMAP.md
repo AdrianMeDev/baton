@@ -125,7 +125,7 @@ Updated: 2026-11-18
 - **Depends on:** M7
 - **Size:** M, ~5 commits
 
-### M10 [ ] Auto-Modus
+### M10 [x] Auto-Modus
 - **Goal:** `baton auto` arbeitet die ganze Roadmap ohne Zutun ab.
 - **Includes:** Schleife Meilenstein → Plan → Schritte → PR → Merge → nächster; Warten bis zum frühesten Limit-Reset, wenn alle Agenten pausieren; Fortsetzen nach Absturz aus Dateien + Git; Stopp-Regeln (Eskalation erschöpft, Merge abgelehnt, Roadmap-Problem gemeldet, Budget erreicht); `baton stop`; Benachrichtigung bei Stopp/Meilenstein (`notify-send` oder ntfy)
 - **Done when:** eine Beispiel-Roadmap mit 2 Meilensteinen läuft mit Fake-Adaptern vollständig durch; jede Stopp-Regel hat einen Test
@@ -153,6 +153,7 @@ Updated: 2026-11-18
 
 ## Changelog
 
+- 2026-11-18: M10 auto mode delivered: `baton auto` loops milestone → plan → steps (`next --worktree --push`) → PR → merge → fast-forward base, waits for the earliest cooldown reset, resumes from plan + roadmap + git + `auto.json`, stops on escalation exhausted, merge refused, roadmap problem, budget or `baton stop`, and notifies via notify-send or ntfy. New exit codes 3 (route exhausted) and 4 (roadmap problem) for `next`/`plan`. A two-milestone roadmap runs end to end offline with fake agents, a stateful fake `gh` and a bare origin (`tests/test_auto_acceptance.py`). CI result pending the push.
 - 2026-11-18: M9 live acceptance complete in AdrianMeDev/baton, targeting `feat/milestone-pull-requests` (main unchanged). `baton next --commit` used Claude Haiku implementation and isolated Codex review; both final fixtures passed local verification and review without findings.
   - Green: [PR #13](https://github.com/AdrianMeDev/baton/pull/13), reviewed head `3d064d96c04d0868095b6bbedf7c14a7100592d0`, merged by `baton pr --merge` as `b4c6096ebaf59d3c013aaadf9a6923eb56d82e0d` after [PR CI](https://github.com/AdrianMeDev/baton/actions/runs/44408538232) and [push CI](https://github.com/AdrianMeDev/baton/actions/runs/44408523588) passed on Python 3.12 and 3.14. Publish-only created the PR; repeat merge invocation reported Already merged.
   - Red: [PR #12](https://github.com/AdrianMeDev/baton/pull/12), head `cbef71e38493807991515a224031e3eba2f8c349`, remains OPEN. The [intentional failure job](https://github.com/AdrianMeDev/baton/actions/runs/44408006014/job/135168304828) failed; `baton pr --merge` exited 1 with the PR URL and CI failed. Repeat invocation reused #12 and again stopped. This fixture must not merge.

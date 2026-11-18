@@ -179,6 +179,53 @@ before starting an agent because of the gate, a dirty tree, a missing plan or no
 The agent can edit your working tree and may use your account quota. Review the diff before
 committing.
 
+### `baton auto`
+
+```
+baton auto [--path DIR] [--max-steps N] [--max-hours H] [--no-merge] [--timeout S] [--verify-timeout S]
+baton stop [--path DIR]
+```
+
+Works through the whole roadmap without stops for review: for each milestone it runs `baton plan`,
+every step with `baton next --worktree --push`, publishes the PR and merges it with
+`baton pr --merge`, then fast-forwards the base checkout (`git fetch` + `git merge --ff-only
+origin/<base>`) and removes the milestone worktree. Start it from a clean checkout of the base
+branch (e.g. `main`) with an `origin` remote; a dirty or diverged base is a stop, never forced.
+
+- **Waiting:** when every agent of a route is in cooldown, baton waits for the earliest reset
+  (sleeping in chunks of at most five minutes and re-reading the cooldowns, so `baton recheck`
+  ends the wait early). After a quota stop the step continues from its partial diff.
+- **Resuming:** just run `baton auto` again. The position is derived from `.agent-plan.md`, the
+  roadmap, git and `~/.local/state/baton/auto.json`; a step recorded as in progress continues from
+  its partial diff. Plain `baton next` still refuses a dirty tree with an open step.
+- **Stop rules:** a step failed after escalation, merge refused (CI red, critical finding, PR not
+  mergeable), a `BATON-ROADMAP-PROBLEM: <reason>` line from the planner or implementer, budget
+  reached (`--max-steps`, `--max-hours`; per run, across milestones), `baton stop`, or a base
+  checkout that cannot be fast-forwarded. `--no-merge` stops after the PR is published.
+- **`baton stop`** sets a stop request that `baton auto` honors before the next step or while
+  waiting; the current agent run finishes first. A request made before `baton auto` starts is
+  cleared on start.
+- **Exit codes:** `baton auto` 0 = roadmap complete (or PR published with `--no-merge`),
+  1 = stopped by a rule, 2 = not started (not a repository, invalid config, bad flag).
+  `baton next` and `baton plan` additionally use 3 = every agent of the route is in cooldown and
+  4 = roadmap problem reported.
+
+Optional defaults in the config (flags win):
+
+```toml
+[auto]
+notify = "notify-send"   # "none" (default) | "notify-send" | "ntfy"
+ntfy_url = "https://ntfy.sh/my-private-topic"   # required for notify = "ntfy"
+merge = true             # false: stop after the PR is published
+max_steps = 50
+max_hours = 12
+```
+
+Notifications go out when a milestone is merged, the roadmap is complete, a PR awaits review and on
+every stop. They contain only the milestone, the stop reason and the PR URL, never diffs or agent
+output; a failing notifier is logged and never stops the run. ntfy topics are readable by anyone
+who knows the URL, so choose an unguessable one.
+
 ### Auto-commit, branches and worktrees
 
 By default baton stops for your commit. Three opt-in flags change that:

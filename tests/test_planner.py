@@ -8,7 +8,13 @@ from baton.adapter import AgentResult
 from baton.config import AgentConfig
 from baton.git import head
 from baton.limits import LimitStore, UsageLimit
-from baton.next import EXIT_FAILED, EXIT_OK, EXIT_STOPPED
+from baton.next import (
+    EXIT_EXHAUSTED,
+    EXIT_FAILED,
+    EXIT_OK,
+    EXIT_ROADMAP_PROBLEM,
+    EXIT_STOPPED,
+)
 from baton.plan import parse_plan
 from baton.planner import RoutedPlanner, run_plan, run_plan_command
 from baton.roadmap import parse_roadmap
@@ -260,7 +266,7 @@ def test_exhausted_route_writes_nothing(repo: Path, monkeypatch):
     monkeypatch.setattr("baton.routed.make_adapter", lambda agent: Limited())
     out = io.StringIO()
     code = run_plan(repo, routed(("only",), out, LimitStore()), out, today="2026-11-19")
-    assert code == EXIT_FAILED
+    assert code == EXIT_EXHAUSTED
     assert "No plan was written" in out.getvalue()
     assert not (repo / ".agent-plan.md").exists()
 
@@ -333,3 +339,12 @@ def test_command_routes_and_writes_the_plan(repo: Path, config: Path, monkeypatc
     assert code == EXIT_OK, out
     assert "Tier M, agent small (claude)" in out
     assert parse_plan((repo / ".agent-plan.md").read_text("utf-8")).milestone.id == "M1"
+
+
+def test_planner_roadmap_problem_stops_and_writes_nothing(repo: Path):
+    planner = FakePlanner("BATON-ROADMAP-PROBLEM: M1 depends on a missing API")
+    code, out = plan_in(repo, planner)
+    assert code == EXIT_ROADMAP_PROBLEM
+    assert "M1 depends on a missing API" in out
+    assert len(planner.prompts) == 1  # no retry
+    assert not (repo / ".agent-plan.md").exists()

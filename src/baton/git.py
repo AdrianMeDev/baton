@@ -200,3 +200,18 @@ def worktree_paths(repo: Path) -> list[Path]:
     """Paths of all worktrees registered for ``repo`` (including the main one)."""
     out = _git(repo, "worktree", "list", "--porcelain", "-z")
     return [Path(f[len("worktree ") :]) for f in out.split("\0") if f.startswith("worktree ")]
+
+
+def fetch(repo: Path, remote: str = "origin") -> None:
+    """``git fetch <remote>``."""
+    _git(repo, "fetch", "-q", remote)
+
+
+def ff_merge(repo: Path, ref: str) -> None:
+    """Fast-forward the current branch to ``ref``; raises ``GitError`` if it has diverged."""
+    _git(repo, "merge", "-q", "--ff-only", ref)
+
+
+def worktree_remove(repo: Path, path: Path) -> None:
+    """``git worktree remove`` without ``--force``: git refuses when the worktree has changes."""
+    _git(repo, "worktree", "remove", str(path))

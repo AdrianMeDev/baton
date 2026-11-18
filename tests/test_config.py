@@ -191,3 +191,39 @@ def test_limit_patterns_default_and_override(tmp_path):
 def test_invalid_limit_patterns(tmp_path, value):
     with pytest.raises(ConfigError, match="limit.pattern"):
         load_text(tmp_path, VALID + f"limit_patterns = {value}\n")
+
+
+def test_auto_defaults_and_values(tmp_path: Path) -> None:
+    assert load_text(tmp_path, VALID).auto.notify == "none"
+    assert load_text(tmp_path, VALID).auto.merge is True
+    cfg = load_text(
+        tmp_path,
+        VALID
+        + '\n[auto]\nnotify = "ntfy"\nntfy_url = "https://ntfy.sh/t"\n'
+        + "merge = false\nmax_steps = 5\nmax_hours = 1.5\n",
+    )
+    assert (cfg.auto.notify, cfg.auto.ntfy_url, cfg.auto.merge) == (
+        "ntfy",
+        "https://ntfy.sh/t",
+        False,
+    )
+    assert (cfg.auto.max_steps, cfg.auto.max_hours) == (5, 1.5)
+
+
+@pytest.mark.parametrize(
+    "auto, error",
+    [
+        ('notify = "mail"', "notify"),
+        ('notify = "ntfy"', "ntfy_url"),
+        ('ntfy_url = "ftp://x"', "ntfy_url"),
+        ("merge = 1", "merge"),
+        ("max_steps = 0", "max_steps"),
+        ("max_steps = true", "max_steps"),
+        ("max_hours = -1", "max_hours"),
+        ('max_hours = "2"', "max_hours"),
+        ("surprise = 1", "unknown keys"),
+    ],
+)
+def test_invalid_auto(tmp_path: Path, auto: str, error: str) -> None:
+    with pytest.raises(ConfigError, match=error):
+        load_text(tmp_path, VALID + "\n[auto]\n" + auto + "\n")
