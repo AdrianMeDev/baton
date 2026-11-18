@@ -497,3 +497,127 @@ def test_execution_retains_effective_route(
     assert [agent.name for agent in execution.attempted_agents] == [expected_agent]
     if agent_name:
         assert [agent.name for agent in execution.route.agents] == [agent_name]
+
+
+@pytest.fixture
+def repair_chain(repo, chain):
+    config, agents = chain
+    with config.open("a") as stream:
+        stream.write('\n[routes.fix]\nM=["second"]\nL=["second"]\n')
+    write_plan(repo, verify="echo repair-needed; test -s new.txt")
+    return config, agents
+
+
+def test_failed_verify_is_repaired_in_same_tree(repo, repair_chain, routed_executions):
+    _, agents = repair_chain
+    agents["first"].action = lambda r: (r / "partial.txt").write_text("keep me")
+    before = head(repo)
+    code, out = invoke_chain(repo, repair_chain, agent_name="first", tier="L")
+    assert code == EXIT_OK
+    assert "Attempting same-tier repair" in out
+    prompt = agents["second"].prompts[0]
+    assert "repair-needed" in prompt and "Outcome: exit 1" in prompt
+    assert "feat: first" in prompt and "feat: second" not in prompt
+    assert (repo / "partial.txt").read_text() == "keep me"
+    assert (repo / "new.txt").exists()
+    assert plan_of(repo).steps[0].status == "pending"
+    assert head(repo) == before
+    assert [e.route.tier for e in routed_executions] == ["L", "L"]
+    assert [a.name for a in routed_executions[0].attempted_agents] == ["first", "second"]
+    assert "Agent cost: $0.0200" in out
+
+
+@pytest.mark.parametrize("mode", ["failed", "committed", "ineffective", "cooldown", "quota"])
+def test_unsuccessful_fix_leaves_step_open(repo, repair_chain, mode):
+    from datetime import UTC, datetime, timedelta
+
+    from baton.limits import LimitStore, UsageLimit
+
+    _, agents = repair_chain
+    agents["first"].action = lambda r: (r / "partial.txt").write_text("keep me")
+    if mode == "failed":
+        agents["second"] = FakeAdapter(AgentResult(ok=False, error="fix failed"))
+    elif mode == "committed":
+
+        def commit(r):
+            edit(r)
+            git(r, "add", "-A")
+            git(r, "commit", "-m", "unwanted fix commit")
+
+        agents["second"].action = commit
+    elif mode == "ineffective":
+        agents["second"].action = None
+    elif mode == "cooldown":
+        LimitStore().set("second", datetime.now(UTC) + timedelta(hours=2))
+    else:
+        agents["second"] = FakeAdapter(AgentResult(ok=False, error="quota", limit=UsageLimit()))
+    code, out = invoke_chain(repo, repair_chain)
+    assert code == EXIT_FAILED
+    assert plan_of(repo).steps[0].status == "open"
+    assert (repo / "partial.txt").read_text() == "keep me"
+    if mode == "committed":
+        assert "HEAD moved" in out
+    elif mode == "ineffective":
+        assert "Verify failed" in out and "repair-needed" in out
+    else:
+        assert "fix agent failed" in out
+
+
+@pytest.mark.parametrize("verify", ["true", ""])
+def test_passing_or_absent_verify_does_not_resolve_fix(repo, chain, verify):
+    # No fix route exists: resolution must remain lazy.
+    write_plan(repo, verify=verify)
+    assert invoke_chain(repo, chain)[0] == EXIT_OK
+    assert not chain[1]["second"].prompts
+
+
+def test_failed_verify_diagnoses_missing_fix_route(repo, chain):
+    write_plan(repo, verify="false")
+    code, out = invoke_chain(repo, chain)
+    assert code == EXIT_FAILED and "missing route" in out and "[routes.fix] M" in out
+    assert plan_of(repo).steps[0].status == "open"
+
+
+def test_legacy_config_does_not_require_fix_route(repo, chain):
+    config, agents = chain
+    config.write_text('[agents.first]\nadapter="claude"\ncommand="first"\n')
+    write_plan(repo, verify="false")
+    code, out = invoke_chain(repo, chain)
+    assert code == EXIT_FAILED and "Verify failed" in out
+    assert len(agents["first"].prompts) == 1
+    assert "missing route" not in out
+
+
+def test_fix_quota_handoff_keeps_all_participants(repo, repair_chain, routed_executions):
+    from baton.limits import UsageLimit
+
+    config, agents = repair_chain
+    config.write_text(
+        config.read_text()
+        .replace("[routes.fix]", '[agents.third]\nadapter="pi"\ncommand="third"\n[routes.fix]')
+        .replace('M=["second"]', 'M=["second", "third"]')
+    )
+    agents["second"] = FakeAdapter(AgentResult(ok=False, error="quota", limit=UsageLimit()))
+    agents["third"] = FakeAdapter(action=edit)
+    assert invoke_chain(repo, repair_chain)[0] == EXIT_OK
+    assert [a.name for a in routed_executions[0].attempted_agents] == ["first", "second", "third"]
+    assert "Handoff" in agents["third"].prompts[0]
+    assert "repair-needed" in agents["third"].prompts[0]
+
+
+def test_timed_out_verify_repairs_and_reruns_original_command(repo, repair_chain, monkeypatch):
+    from baton.verify import VerifyResult, run_verify
+
+    calls = []
+
+    def verify(command, cwd, timeout):
+        calls.append((command, cwd, timeout))
+        if len(calls) == 1:
+            return VerifyResult(True, False, None, True, "test hung", command)
+        return run_verify(command, cwd, timeout)
+
+    monkeypatch.setattr("baton.next.run_verify", verify)
+    assert invoke_chain(repo, repair_chain, verify_timeout=3)[0] == EXIT_OK
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert "Outcome: timed out" in repair_chain[1]["second"].prompts[0]
+    assert "test hung" in repair_chain[1]["second"].prompts[0]

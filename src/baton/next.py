@@ -10,6 +10,7 @@ import datetime
 import shlex
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
@@ -28,7 +29,7 @@ from baton.plan import (
     save_plan,
     set_step_status,
 )
-from baton.prompt import handoff_prompt, implement_prompt, step_text
+from baton.prompt import fix_prompt, handoff_prompt, implement_prompt, step_text
 from baton.router import Route, resolve_route
 from baton.verify import VerifyResult, run_verify
 
@@ -156,6 +157,7 @@ def _run_next(
     verify_timeout: float,
     override: bool = False,
     today: str | None = None,
+    select_fix: Callable[[Step], Adapter | None] | None = None,
 ) -> int:
     date = today or datetime.date.today().isoformat()
     plan_path = repo / PLAN_FILENAME
@@ -199,13 +201,42 @@ def _run_next(
         if verify.verified and not verify.passed:
             _say(out, f"Verify failed ({_verify_failure(verify)}): {verify.command}")
             _say(out, verify.output_tail)
-            _say(out, "Changes stay in the working tree; the step stays open.")
-            _log(
-                plan_path,
-                f"step {step.number}: verify failed ({_verify_failure(verify)})",
-                date,
-            )
-            return EXIT_FAILED
+            fixer = select_fix(step) if select_fix is not None else None
+            if fixer is not None:
+                _say(out, "Attempting same-tier repair.")
+                repair = fixer.run(fix_prompt(prompt, verify), repo, agent_timeout)
+                after = head(repo)
+                if after != before:
+                    _say(
+                        out,
+                        f"HEAD moved from {before} to {after}: fixer committed. Step not marked.",
+                    )
+                    _log(
+                        plan_path, f"step {step.number}: fixer moved HEAD {before} -> {after}", date
+                    )
+                    return EXIT_FAILED
+                if not repair.ok:
+                    _say(out, f"The fix agent failed: {repair.error}")
+                    _say(out, "Changes stay in the working tree; the step stays open.")
+                    _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
+                    return EXIT_FAILED
+                verify = run_verify(step.verify, repo, verify_timeout)
+                cost = (
+                    result.cost + repair.cost
+                    if result.cost is not None and repair.cost is not None
+                    else None
+                )
+                result = replace(result, cost=cost)
+            if not verify.passed:
+                _say(out, f"Verify failed ({_verify_failure(verify)}): {verify.command}")
+                _say(out, verify.output_tail)
+                _say(out, "Changes stay in the working tree; the step stays open.")
+                _log(
+                    plan_path,
+                    f"step {step.number}: verify failed ({_verify_failure(verify)})",
+                    date,
+                )
+                return EXIT_FAILED
 
         # Re-read: the agent may have touched the plan file despite the rules.
         text = plan_path.read_text(encoding="utf-8")
@@ -342,12 +373,27 @@ def run_next_command(
     """CLI entry: select an agent for the step being run or previewed."""
     out = out or sys.stdout
 
+    config = None
+    implementation = None
+
     def select_adapter(step: Step) -> _RoutedAdapter:
+        nonlocal config, implementation
         config = load_config(find_config_path(config_path))
         route = resolve_route(
             config, "implement", tier=tier, step_size=step.size, agent_name=agent_name
         )
-        return _RoutedAdapter(route, LimitStore(), out)
+        implementation = _RoutedAdapter(route, LimitStore(), out)
+        return implementation
+
+    def select_fix(step: Step) -> Adapter | None:
+        # Legacy configs have no role routes; injected callers likewise keep their behavior.
+        assert config is not None and implementation is not None
+        if not config.routes:
+            return None
+        route = resolve_route(config, "fix", tier=implementation.route.tier)
+        fixer = _RoutedAdapter(route, implementation.store, out)
+        fixer.attempted_agents = implementation.attempted_agents
+        return fixer
 
     if dry_run:
         try:
@@ -356,5 +402,10 @@ def run_next_command(
             _say(out, f"Error: {exc}")
             return EXIT_FAILED
     return _run_next(
-        repo, select_adapter, out, agent_timeout=agent_timeout, verify_timeout=verify_timeout
+        repo,
+        select_adapter,
+        out,
+        agent_timeout=agent_timeout,
+        verify_timeout=verify_timeout,
+        select_fix=select_fix,
     )
