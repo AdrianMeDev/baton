@@ -1,0 +1,23 @@
+{
+  "adapter": "codex",
+  "agent": "codex",
+  "argv": [
+    "codex",
+    "exec",
+    "Reply with exactly: OK",
+    "--json",
+    "--sandbox",
+    "read-only",
+    "--skip-git-repo-check",
+    "-m",
+    "does-not-exist-xyz"
+  ],
+  "tty": false,
+  "exit_code": 1,
+  "timed_out": false,
+  "duration_s": 3.589,
+  "stdout": "{\"type\":\"thread.started\",\"thread_id\":\"<uuid>\"}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"error\",\"message\":\"Model metadata for `does-not-exist-xyz` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.\"}}\n{\"type\":\"turn.started\"}\n{\"type\":\"error\",\"message\":\"The 'does-not-exist-xyz' model is not supported when using Codex with a ChatGPT account.\"}\n{\"type\":\"turn.failed\",\"error\":{\"message\":\"The 'does-not-exist-xyz' model is not supported when using Codex with a ChatGPT account.\"}}\n",
+  "stderr": "Reading additional input from stdin...\n",
+  "recorded_at": "2026-11-18T17:07:15+00:00",
+  "cli_version": "codex-cli 0.169.0"
+}
