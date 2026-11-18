@@ -13,7 +13,7 @@ from baton.limits import LimitStore
 from baton.prompt import handoff_prompt
 from baton.review import run_isolated_review
 from baton.router import Route
-from baton.runs import RunStore
+from baton.runs import RunStore, budget_reset_message, daily_counts
 
 
 def say(out: TextIO, text: str = "") -> None:
@@ -55,10 +55,20 @@ class RoutedAdapter:
         say(self.out, f"Tier {self.route.tier}, agent {agent.name} ({agent.adapter})")
 
     def argv(self, prompt: str) -> list[str]:
-        for agent in self._eligible():
+        agent, _ = self.runs.select(list(self._eligible()))
+        if agent is not None:
             self._announce(agent)
             return make_adapter(agent).argv(prompt)
-        raise ConfigError(self._exhausted())
+        raise ConfigError(self._exhaustion_message())
+
+    def _exhaustion_message(self):
+        counts = daily_counts(self.runs.read(), datetime.datetime.now(datetime.UTC))
+        if any(
+            a.daily_run_budget is not None and counts.get(a.name, 0) >= a.daily_run_budget
+            for a in self.route.agents
+        ):
+            return budget_reset_message()
+        return self._exhausted()
 
     @staticmethod
     def _exhausted() -> str:
@@ -77,14 +87,18 @@ class RoutedAdapter:
         before = None if self.review else head(repo)
         previous = None
         self.exhausted = False
-        for agent in self._eligible():
+        remaining = list(self._eligible())
+        while remaining:
+            agent, attempt = self.runs.select(remaining, claim=True)
+            if agent is None:
+                break
+            remaining = [a for a in remaining if a.name != agent.name]
             self._announce(agent)
             current_prompt = prompt
             if previous is not None and not self.review:
                 current_prompt = self._handoff(prompt, previous, repo)
             adapter = make_adapter(agent)
             self.attempted_agents.append(agent)
-            attempt = self.runs.dispatch(agent.name)
             result = (
                 run_isolated_review(adapter, current_prompt, timeout)
                 if self.review
@@ -110,4 +124,4 @@ class RoutedAdapter:
             )
             previous = agent.name
         self.exhausted = True
-        return AgentResult(ok=False, error=self._exhausted())
+        return AgentResult(ok=False, error=self._exhaustion_message())

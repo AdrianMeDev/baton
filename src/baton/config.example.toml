@@ -100,3 +100,5 @@ L = ["claude-opus", "codex-astra", "agy"]
 # merge = true                      # false: stop after the PR is published
 # max_steps = 50                    # budget of one auto run
 # max_hours = 12
+
+# Optional per-agent setting: daily_run_budget = 100 (positive integer, UTC day).

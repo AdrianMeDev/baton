@@ -32,3 +32,18 @@ def test_invalid_journal_has_line_diagnostic(tmp_path):
     with pytest.raises(LimitStateError, match="runs.jsonl:1"):
         store.dispatch("agent")
     assert store.path.read_text() == "{}\n"
+
+
+def test_atomic_budget_and_utc_rollover(tmp_path):
+    from baton.config import AgentConfig
+    from datetime import timedelta
+
+    store = RunStore(tmp_path / "runs.jsonl")
+    agent = AgentConfig("limited", "claude", "claude", daily_run_budget=1)
+    now = datetime(2026, 11, 18, tzinfo=UTC)
+    with ThreadPoolExecutor(2) as pool:
+        results = list(pool.map(lambda _: store.select([agent], claim=True, now=now), range(2)))
+    assert sum(a is not None for a, _ in results) == 1
+    assert store.select([agent], now=now) == (None, None)
+    assert store.select([agent], now=now + timedelta(days=1))[0] == agent
+    assert len(store.read()) == 1

@@ -39,6 +39,7 @@ class AgentConfig:
     model: str | None = None
     provider: str | None = None
     limit_patterns: tuple[str, ...] | None = None
+    daily_run_budget: int | None = None
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,9 @@ def _parse_agent(path: Path, name: str, raw: object) -> AgentConfig:
 
     model = _require_str(raw, "model", where) if "model" in raw else None
     provider = _require_str(raw, "provider", where) if "provider" in raw else None
+    daily_run_budget = raw.get("daily_run_budget")
+    if "daily_run_budget" in raw and (type(daily_run_budget) is not int or daily_run_budget < 1):
+        raise ConfigError(f"{where}: daily_run_budget must be a positive integer")
     patterns = raw.get("limit_patterns")
     if "limit_patterns" in raw:
         if not isinstance(patterns, list) or not patterns:
@@ -175,6 +179,7 @@ def _parse_agent(path: Path, name: str, raw: object) -> AgentConfig:
         command=command,
         model=model,
         provider=provider,
+        daily_run_budget=daily_run_budget,
         limit_patterns=tuple(patterns) if patterns is not None else None,
     )
 

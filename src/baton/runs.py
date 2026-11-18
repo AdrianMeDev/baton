@@ -91,6 +91,27 @@ class RunStore:
             )
             return ident
 
+    def select(self, agents, *, claim=False, now=None):
+        """Select and optionally reserve capacity using one serialized snapshot."""
+        from contextlib import nullcontext
+
+        now = now or datetime.now(UTC)
+        with self.locked() if claim else nullcontext():
+            counts = daily_counts(self.read(), now)
+            eligible = [
+                a
+                for a in agents
+                if a.daily_run_budget is None or counts.get(a.name, 0) < a.daily_run_budget
+            ]
+            if not eligible:
+                return None, None
+            agent = eligible[0]
+            ident = None
+            if claim:
+                ident = uuid.uuid4().hex
+                self._append(dict(event="dispatch", id=ident, agent=agent.name, at=now.isoformat()))
+            return agent, ident
+
     def complete(self, ident, result):
         with self.locked():
             self.read()
@@ -142,3 +163,24 @@ def print_stats(out):
                 value += f" (partial; {row[missing]} unknown)"
             values.append(value)
         print(f"{name}  {row['attempts']}  {values[0]}  {values[1]}", file=out)
+
+
+def daily_counts(records, now):
+    counts = {}
+    for row in records:
+        if (
+            row["event"] == "dispatch"
+            and datetime.fromisoformat(row["at"]).astimezone(UTC).date()
+            == now.astimezone(UTC).date()
+        ):
+            counts[row["agent"]] = counts.get(row["agent"], 0) + 1
+    return counts
+
+
+def budget_reset_message():
+    from datetime import timedelta
+
+    reset = (datetime.now(UTC) + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return f"Daily run budget exhausted; resets at {reset.isoformat()} (UTC). Resume after reset."
