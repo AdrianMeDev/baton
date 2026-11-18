@@ -10,11 +10,12 @@ import datetime
 import shlex
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
 from baton.adapter import Adapter, AgentResult, CommandAdapter, make_adapter
-from baton.config import ConfigError, find_config_path, load_config
+from baton.config import AgentConfig, ConfigError, find_config_path, load_config
 from baton.gate import GateResult, apply_gate, check_gate
 from baton.git import PLAN_FILENAME, GitError, dirty_paths, handoff_context, head
 from baton.limits import LimitStateError, LimitStore
@@ -28,7 +29,15 @@ from baton.plan import (
     save_plan,
     set_step_status,
 )
-from baton.prompt import handoff_prompt, implement_prompt, step_text
+from baton.prompt import fix_prompt, handoff_prompt, implement_prompt, review_prompt, step_text
+from baton.review import (
+    SEVERITIES,
+    ReviewError,
+    ReviewResult,
+    parse_review,
+    review_context,
+    run_isolated_review,
+)
 from baton.router import Route, resolve_route
 from baton.verify import VerifyResult, run_verify
 
@@ -94,7 +103,13 @@ def _handle_gate(
 
 
 def _report_success(
-    out: TextIO, plan: Plan, step: Step, repo: Path, verify: VerifyResult, cost: float | None
+    out: TextIO,
+    plan: Plan,
+    step: Step,
+    repo: Path,
+    verify: VerifyResult,
+    cost: float | None,
+    review: ReviewResult | None = None,
 ) -> None:
     _say(out)
     _say(out, f"Step {step.number}/{len(plan.steps)} done: {step.message}")
@@ -108,6 +123,19 @@ def _report_success(
         _say(out, "  (the step has no Verify command: not verified)")
     if cost is not None:
         _say(out, f"Agent cost: ${cost:.4f}")
+    if review is not None:
+        _say(out, f"Independent reviewer: {review.reviewer.name} ({review.reviewer.adapter})")
+        if not review.findings:
+            _say(out, "  No findings.")
+        for severity in SEVERITIES:
+            findings = [finding for finding in review.findings if finding.severity == severity]
+            if findings:
+                _say(out, f"  {severity.upper()}:")
+            for finding in findings:
+                location = finding.path or ""
+                if finding.line is not None:
+                    location += f":{finding.line}"
+                _say(out, f"    {location + ': ' if location else ''}{finding.message}")
     _say(out, "Review: `git diff`")
     _say(out, "Commit:")
     _commit_hint(out, step.message)
@@ -156,6 +184,8 @@ def _run_next(
     verify_timeout: float,
     override: bool = False,
     today: str | None = None,
+    select_fix: Callable[[Step, bool], Adapter | None] | None = None,
+    review_step: Callable[[Plan, Step, str], ReviewResult | None] | None = None,
 ) -> int:
     date = today or datetime.date.today().isoformat()
     plan_path = repo / PLAN_FILENAME
@@ -179,7 +209,8 @@ def _run_next(
 
         _say(out, f"Step {step.number}/{len(plan.steps)}: {step.message}")
         adapter = select_adapter(step)
-        prompt = implement_prompt(plan, step, step_text(plan_path.read_text("utf-8"), step))
+        raw_step = step_text(plan_path.read_text("utf-8"), step)
+        prompt = implement_prompt(plan, step, raw_step)
         before = head(repo)
 
         result = adapter.run(prompt, repo, agent_timeout)
@@ -196,32 +227,79 @@ def _run_next(
             return EXIT_FAILED
 
         verify = run_verify(step.verify, repo, verify_timeout)
+        repairs = 0
+        for escalated in (False, True):
+            if not verify.verified or verify.passed:
+                break
+            _say(out, f"Verify failed ({_verify_failure(verify)}): {verify.command}")
+            _say(out, verify.output_tail)
+            fixer = select_fix(step, escalated) if select_fix is not None else None
+            if fixer is None:
+                break
+            repairs += 1
+            label = "Escalating repair to tier L." if escalated else "Attempting same-tier repair."
+            _say(out, label)
+            repair = fixer.run(fix_prompt(prompt, verify), repo, agent_timeout)
+            after = head(repo)
+            if after != before:
+                _say(out, f"HEAD moved from {before} to {after}: fixer committed. Step not marked.")
+                _log(plan_path, f"step {step.number}: fixer moved HEAD {before} -> {after}", date)
+                return EXIT_FAILED
+            if not repair.ok:
+                _say(out, f"The fix agent failed: {repair.error}")
+                _say(out, "Changes stay in the working tree; the step stays open.")
+                _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
+                return EXIT_FAILED
+            verify = run_verify(step.verify, repo, verify_timeout)
+            cost = (
+                result.cost + repair.cost
+                if result.cost is not None and repair.cost is not None
+                else None
+            )
+            result = replace(result, cost=cost)
         if verify.verified and not verify.passed:
             _say(out, f"Verify failed ({_verify_failure(verify)}): {verify.command}")
             _say(out, verify.output_tail)
             _say(out, "Changes stay in the working tree; the step stays open.")
             _log(
                 plan_path,
-                f"step {step.number}: verify failed ({_verify_failure(verify)})",
+                f"step {step.number}: verify failed ({_verify_failure(verify)}) "
+                f"after {repairs} repair attempts",
                 date,
             )
             return EXIT_FAILED
+
+        review = None
+        if review_step is not None:
+            try:
+                review = review_step(plan, step, raw_step)
+            except (ReviewError, ConfigError, GitError, LimitStateError, OSError) as exc:
+                _say(out, f"Independent review failed: {exc}")
+                _say(out, "Changes stay in the working tree; the step stays open.")
+                _log(plan_path, f"step {step.number}: independent review failed ({exc})", date)
+                return EXIT_FAILED
 
         # Re-read: the agent may have touched the plan file despite the rules.
         text = plan_path.read_text(encoding="utf-8")
         text = set_step_status(text, step.number, "pending", after)
         note = "implemented" if verify.verified else "implemented (no Verify command)"
+        if repairs:
+            note += f" after {repairs} repair attempts"
+        if review is not None:
+            note += f"; {review.summary()}"
         text = append_log(text, f"{date}: step {step.number} {note}, waiting for commit.")
         save_plan(plan_path, text)
     except (ConfigError, GitError, LimitStateError, PlanError, OSError) as exc:
         _say(out, f"Error: {exc}")
         return EXIT_FAILED
 
-    _report_success(out, plan, step, repo, verify, result.cost)
+    _report_success(out, plan, step, repo, verify, result.cost, review)
     return EXIT_OK
 
 
-def _dry_run(repo: Path, select_adapter: Callable[[Step], CommandAdapter], out: TextIO) -> int:
+def _dry_run(
+    repo: Path, select_adapter: Callable[[Step], CommandAdapter | _RoutedAdapter], out: TextIO
+) -> int:
     """Print the prompt and argv for the first open step; change nothing."""
     plan_path = repo / PLAN_FILENAME
     if not plan_path.is_file():
@@ -251,10 +329,19 @@ def _dry_run(repo: Path, select_adapter: Callable[[Step], CommandAdapter], out: 
 
 
 class _RoutedAdapter:
-    """Try each available configured name once, handing off only on quota failures."""
+    """One invocation's route and actual participants, including partial quota attempts.
 
-    def __init__(self, route: Route, store: LimitStore, out: TextIO) -> None:
+    ``route.tier`` retains the effective tier even after a handoff. Participants are
+    configured identities, so later fix/review selection can inspect their providers.
+    Cooldown skips and argv previews are not attempts.
+    """
+
+    def __init__(
+        self, route: Route, store: LimitStore, out: TextIO, *, review: bool = False
+    ) -> None:
         self.route = route
+        self.review = review
+        self.attempted_agents: list[AgentConfig] = []
         self.store = store
         self.out = out
 
@@ -289,16 +376,22 @@ class _RoutedAdapter:
         )
 
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
-        before = head(repo)
+        before = None if self.review else head(repo)
         previous = None
         for agent in self._eligible():
             self._announce(agent)
             current_prompt = prompt
-            if previous is not None:
+            if previous is not None and not self.review:
                 current_prompt = handoff_prompt(prompt, previous, handoff_context(repo))
-            result = make_adapter(agent).run(current_prompt, repo, timeout)
+            adapter = make_adapter(agent)
+            self.attempted_agents.append(agent)
+            result = (
+                run_isolated_review(adapter, current_prompt, timeout)
+                if self.review
+                else adapter.run(current_prompt, repo, timeout)
+            )
             # Check even failed attempts, before persisting a cooldown or trying a successor.
-            if head(repo) != before:
+            if not self.review and head(repo) != before:
                 return AgentResult(ok=False, error="agent moved HEAD")
             if result.ok or result.limit is None:
                 return result
@@ -332,12 +425,47 @@ def run_next_command(
     """CLI entry: select an agent for the step being run or previewed."""
     out = out or sys.stdout
 
-    def select_adapter(step: Step) -> CommandAdapter:
+    config = None
+    implementation = None
+
+    def select_adapter(step: Step) -> _RoutedAdapter:
+        nonlocal config, implementation
         config = load_config(find_config_path(config_path))
         route = resolve_route(
             config, "implement", tier=tier, step_size=step.size, agent_name=agent_name
         )
-        return _RoutedAdapter(route, LimitStore(), out)
+        implementation = _RoutedAdapter(route, LimitStore(), out)
+        return implementation
+
+    def select_fix(step: Step, escalated: bool) -> Adapter | None:
+        # Legacy configs have no role routes; injected callers likewise keep their behavior.
+        assert config is not None and implementation is not None
+        if not config.routes:
+            return None
+        route = resolve_route(config, "fix", tier="L" if escalated else implementation.route.tier)
+        fixer = _RoutedAdapter(route, implementation.store, out)
+        fixer.attempted_agents = implementation.attempted_agents
+        return fixer
+
+    def review_step(plan: Plan, step: Step, raw_step: str) -> ReviewResult | None:
+        assert config is not None and implementation is not None
+        if not config.routes:
+            return None
+        route = resolve_route(
+            config,
+            "review",
+            tier=implementation.route.tier,
+            authors=tuple(implementation.attempted_agents),
+        )
+        reviewer = _RoutedAdapter(route, implementation.store, out, review=True)
+        before = head(repo)
+        changes = review_context(repo)
+        result = reviewer.run(review_prompt(plan, step, raw_step, changes), repo, agent_timeout)
+        if head(repo) != before or review_context(repo) != changes:
+            raise ReviewError("Candidate changed during review; review is stale")
+        if not result.ok:
+            raise ReviewError(result.error)
+        return ReviewResult(reviewer.attempted_agents[-1], parse_review(result.text))
 
     if dry_run:
         try:
@@ -346,5 +474,11 @@ def run_next_command(
             _say(out, f"Error: {exc}")
             return EXIT_FAILED
     return _run_next(
-        repo, select_adapter, out, agent_timeout=agent_timeout, verify_timeout=verify_timeout
+        repo,
+        select_adapter,
+        out,
+        agent_timeout=agent_timeout,
+        verify_timeout=verify_timeout,
+        select_fix=select_fix,
+        review_step=review_step,
     )

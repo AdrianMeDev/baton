@@ -186,7 +186,7 @@ remove a different, newer deadline. Another quota failure refreshes it; other fa
 `baton status` shows local reset times without probing or writing. Login and account changes are
 manual; no scheduled recheck is implemented in M5 (the auto loop belongs to M10).
 
-### Offline recovery evidence and remaining acceptance
+### Offline recovery evidence and M5 acceptance
 
 `uv run pytest -q tests/test_next.py -k cli_limit_recovery` runs fake executables in a real
 temporary git repository. The first edits a tracked file, leaves an untracked note and reports a
@@ -196,9 +196,12 @@ No live provider request is made. `tests/test_adapter.py` replays all available 
 including agy's terminal and non-terminal successes, and keeps their ordinary errors distinct
 from usage limits.
 
-No real quota message has been recorded for any CLI. **M5 acceptance remains open** until a
-redacted capture is added and replayed, or the user explicitly waives that evidence requirement.
-When one occurs, use `baton probe <agent> --record tests/fixtures/<adapter>/limit.json`, review the
+No real quota message has been recorded for any CLI. On 2026-11-18, the user explicitly
+waived this evidence requirement: “I waive the real quota recording requirement for M5.”
+**M5 is accepted** based on this waiver, the passing offline recovery tests and the previously
+recorded green CI for `6b5adcc` (run `44377237276`). The required adapter, limit and next tests
+passed (133 tests). This waiver does not establish real-provider quota compatibility.
+
+For a future genuine quota response, use `baton probe <agent> --record tests/fixtures/<adapter>/limit.json`, review the
 redaction, document CLI/model and reset wording here, and add a parser regression test. Do not
-infer real-provider compatibility from simulated cases. CI for these changes must also pass
-before accepting the milestone.
+infer real-provider compatibility from simulated cases.

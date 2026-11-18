@@ -216,12 +216,40 @@ command="first"
 [agents.second]
 adapter="codex"
 command="second"
+[agents.reviewer]
+adapter="claude"
+command="reviewer"
+provider="independent"
+[routes.review]
+S=["reviewer"]
+M=["reviewer"]
+L=["reviewer"]
 [routes.implement]
 M=["first", "first", "second"]
 """)
-    agents = {"first": FakeAdapter(), "second": FakeAdapter(action=edit)}
+    agents = {
+        "first": FakeAdapter(),
+        "second": FakeAdapter(action=edit),
+        "reviewer": FakeAdapter(AgentResult(ok=True, text='{"findings": []}')),
+    }
     monkeypatch.setattr("baton.next.make_adapter", lambda agent: agents[agent.name])
     return config, agents
+
+
+@pytest.fixture
+def routed_executions(monkeypatch):
+    from baton.next import _RoutedAdapter
+
+    executions = []
+
+    def capture(*args, **kwargs):
+        execution = _RoutedAdapter(*args, **kwargs)
+        if not kwargs.get("review"):
+            executions.append(execution)
+        return execution
+
+    monkeypatch.setattr("baton.next._RoutedAdapter", capture)
+    return executions
 
 
 def invoke_chain(repo, chain, **kw):
@@ -231,7 +259,7 @@ def invoke_chain(repo, chain, **kw):
     return code, out.getvalue()
 
 
-def test_limit_handoff_preserves_partial_work_and_verifies_once(repo, chain):
+def test_limit_handoff_preserves_partial_work_and_verifies_once(repo, chain, routed_executions):
     from baton.limits import LimitStore, UsageLimit
 
     _, agents = chain
@@ -260,6 +288,10 @@ def test_limit_handoff_preserves_partial_work_and_verifies_once(repo, chain):
     assert sum("waiting for commit" in line for line in plan_of(repo).log) == 1
     assert "1h fallback" in out
     assert "first" in LimitStore().active()
+    execution = routed_executions[0]
+    assert execution.route.tier == "M"
+    assert [agent.name for agent in execution.attempted_agents] == ["first", "second"]
+    assert [agent.adapter for agent in execution.attempted_agents] == ["claude", "codex"]
 
 
 @pytest.mark.parametrize("pinned", [False, True])
@@ -307,7 +339,7 @@ def test_ordinary_failure_does_not_handoff(repo, chain):
     assert not agents["second"].prompts
 
 
-def test_cooldown_skips_agent_and_explicit_pin_does_not_fallback(repo, chain):
+def test_cooldown_skips_agent_and_explicit_pin_does_not_fallback(repo, chain, routed_executions):
     from datetime import UTC, datetime, timedelta
 
     from baton.limits import LimitStore
@@ -320,6 +352,8 @@ def test_cooldown_skips_agent_and_explicit_pin_does_not_fallback(repo, chain):
     code, out = invoke_chain(repo, chain)
     assert code == EXIT_OK and "Skipping first" in out
     assert not agents["first"].prompts and len(agents["second"].prompts) == 1
+    assert routed_executions[0].attempted_agents == []
+    assert [agent.name for agent in routed_executions[1].attempted_agents] == ["second"]
 
 
 def test_provider_reset_time_is_persisted(repo, chain):
@@ -334,7 +368,9 @@ def test_provider_reset_time_is_persisted(repo, chain):
     assert LimitStore().read()["first"] == reset
 
 
-def test_dry_run_selects_after_gate_and_skips_cooldown_without_writes(repo, chain):
+def test_dry_run_selects_after_gate_and_skips_cooldown_without_writes(
+    repo, chain, routed_executions
+):
     from datetime import UTC, datetime, timedelta
 
     from baton.adapter import CodexAdapter
@@ -355,9 +391,10 @@ def test_dry_run_selects_after_gate_and_skips_cooldown_without_writes(repo, chai
     assert (repo / ".agent-plan.md").read_bytes() == plan_before
     assert LimitStore().path.read_bytes() == state_before
     assert not (repo / "new.txt").exists()
+    assert routed_executions[0].attempted_agents == []
 
 
-def test_cli_limit_recovery(repo, chain, monkeypatch, capsys):
+def test_cli_limit_recovery(repo, chain, monkeypatch, capsys, routed_executions):
     import json
     import sys
 
@@ -368,6 +405,12 @@ def test_cli_limit_recovery(repo, chain, monkeypatch, capsys):
     config, _ = chain
     first = config.parent / "first"
     second = config.parent / "second"
+    reviewer = config.parent / "reviewer"
+    reviewer.write_text(
+        f"#!{sys.executable}\nimport json\n"
+        "print(json.dumps({'is_error': False, 'result': '{\"findings\": []}'}))\n"
+    )
+    reviewer.chmod(0o755)
     first.write_text(
         f"#!{sys.executable}\n"
         "import json, sys\nfrom pathlib import Path\n"
@@ -395,6 +438,7 @@ def test_cli_limit_recovery(repo, chain, monkeypatch, capsys):
         config.read_text()
         .replace('command="first"', f"command={json.dumps(str(first))}")
         .replace('command="second"', f"command={json.dumps(str(second))}")
+        .replace('command="reviewer"', f"command={json.dumps(str(reviewer))}")
     )
     monkeypatch.setattr("baton.next.make_adapter", make_adapter)
     before = head(repo)
@@ -405,6 +449,10 @@ def test_cli_limit_recovery(repo, chain, monkeypatch, capsys):
     assert head(repo) == before
     assert plan_of(repo).steps[0].status == "pending"
     assert "first" in LimitStore().active()
+    execution = routed_executions[0]
+    assert execution.route.tier == "M"
+    assert [agent.name for agent in execution.attempted_agents] == ["first", "second"]
+    assert [agent.adapter for agent in execution.attempted_agents] == ["claude", "codex"]
     assert main([*args, "status", "--path", str(repo)]) == EXIT_OK
     assert "first: cooldown until" in capsys.readouterr().out
     assert main([*args, "recheck", "first"]) == EXIT_OK
@@ -442,3 +490,581 @@ def test_malformed_state_stops_before_agent(repo, chain):
     assert code == EXIT_FAILED and "Repair or move" in out
     assert not agents["first"].prompts and not agents["second"].prompts
     assert store.path.read_text() == "broken"
+
+
+@pytest.mark.parametrize(
+    ("size", "tier", "agent_name", "expected_tier", "expected_agent"),
+    [
+        (None, None, None, "M", "first"),
+        ("S", None, None, "S", "first"),
+        ("S", "L", None, "L", "first"),
+        ("L", None, "second", "L", "second"),
+        ("L", "S", "second", "S", "second"),
+    ],
+)
+def test_execution_retains_effective_route(
+    repo, chain, routed_executions, size, tier, agent_name, expected_tier, expected_agent
+):
+    config, _ = chain
+    with config.open("a") as stream:
+        stream.write('S=["first", "second"]\nL=["first", "second"]\n')
+    if size:
+        plan = repo / ".agent-plan.md"
+        plan.write_text(plan.read_text().replace("- **Why:** w", f"- **Size:** {size}"))
+    assert invoke_chain(repo, chain, tier=tier, agent_name=agent_name)[0] == EXIT_OK
+    execution = routed_executions[0]
+    assert execution.route.tier == expected_tier
+    assert [agent.name for agent in execution.attempted_agents] == [expected_agent]
+    if agent_name:
+        assert [agent.name for agent in execution.route.agents] == [agent_name]
+
+
+@pytest.fixture
+def repair_chain(repo, chain):
+    config, agents = chain
+    with config.open("a") as stream:
+        stream.write('\n[routes.fix]\nM=["second"]\nL=["second"]\n')
+    write_plan(repo, verify="echo repair-needed; test -s new.txt")
+    return config, agents
+
+
+def test_failed_verify_is_repaired_in_same_tree(repo, repair_chain, routed_executions):
+    _, agents = repair_chain
+    agents["first"].action = lambda r: (r / "partial.txt").write_text("keep me")
+    before = head(repo)
+    code, out = invoke_chain(repo, repair_chain, agent_name="first", tier="L")
+    assert code == EXIT_OK
+    assert "Attempting same-tier repair" in out
+    prompt = agents["second"].prompts[0]
+    assert "repair-needed" in prompt and "Outcome: exit 1" in prompt
+    assert "feat: first" in prompt and "feat: second" not in prompt
+    assert (repo / "partial.txt").read_text() == "keep me"
+    assert (repo / "new.txt").exists()
+    assert plan_of(repo).steps[0].status == "pending"
+    assert head(repo) == before
+    assert [e.route.tier for e in routed_executions] == ["L", "L"]
+    assert [a.name for a in routed_executions[0].attempted_agents] == ["first", "second"]
+    assert "Agent cost: $0.0200" in out
+
+
+@pytest.mark.parametrize("mode", ["failed", "committed", "ineffective", "cooldown", "quota"])
+def test_unsuccessful_fix_leaves_step_open(repo, repair_chain, mode):
+    from datetime import UTC, datetime, timedelta
+
+    from baton.limits import LimitStore, UsageLimit
+
+    _, agents = repair_chain
+    agents["first"].action = lambda r: (r / "partial.txt").write_text("keep me")
+    if mode == "failed":
+        agents["second"] = FakeAdapter(AgentResult(ok=False, error="fix failed"))
+    elif mode == "committed":
+
+        def commit(r):
+            edit(r)
+            git(r, "add", "-A")
+            git(r, "commit", "-m", "unwanted fix commit")
+
+        agents["second"].action = commit
+    elif mode == "ineffective":
+        agents["second"].action = None
+    elif mode == "cooldown":
+        LimitStore().set("second", datetime.now(UTC) + timedelta(hours=2))
+    else:
+        agents["second"] = FakeAdapter(AgentResult(ok=False, error="quota", limit=UsageLimit()))
+    code, out = invoke_chain(repo, repair_chain)
+    assert code == EXIT_FAILED
+    assert plan_of(repo).steps[0].status == "open"
+    assert (repo / "partial.txt").read_text() == "keep me"
+    if mode == "committed":
+        assert "HEAD moved" in out
+    elif mode == "ineffective":
+        assert "Verify failed" in out and "repair-needed" in out
+    else:
+        assert "fix agent failed" in out
+
+
+@pytest.mark.parametrize("verify", ["true", ""])
+def test_passing_or_absent_verify_does_not_resolve_fix(repo, chain, verify):
+    # No fix route exists: resolution must remain lazy.
+    write_plan(repo, verify=verify)
+    assert invoke_chain(repo, chain)[0] == EXIT_OK
+    assert not chain[1]["second"].prompts
+
+
+def test_failed_verify_diagnoses_missing_fix_route(repo, chain):
+    write_plan(repo, verify="false")
+    code, out = invoke_chain(repo, chain)
+    assert code == EXIT_FAILED and "missing route" in out and "[routes.fix] M" in out
+    assert plan_of(repo).steps[0].status == "open"
+
+
+def test_legacy_config_does_not_require_fix_route(repo, chain):
+    config, agents = chain
+    config.write_text('[agents.first]\nadapter="claude"\ncommand="first"\n')
+    write_plan(repo, verify="false")
+    code, out = invoke_chain(repo, chain)
+    assert code == EXIT_FAILED and "Verify failed" in out
+    assert len(agents["first"].prompts) == 1
+    assert "missing route" not in out
+
+
+def test_fix_quota_handoff_keeps_all_participants(repo, repair_chain, routed_executions):
+    from baton.limits import UsageLimit
+
+    config, agents = repair_chain
+    config.write_text(
+        config.read_text()
+        .replace(
+            "[routes.fix]",
+            '[agents.third]\nadapter="pi"\ncommand="third"\nprovider="google"\n[routes.fix]',
+        )
+        .replace('M=["second"]', 'M=["second", "third"]')
+    )
+    agents["second"] = FakeAdapter(AgentResult(ok=False, error="quota", limit=UsageLimit()))
+    agents["third"] = FakeAdapter(action=edit)
+    assert invoke_chain(repo, repair_chain)[0] == EXIT_OK
+    assert [a.name for a in routed_executions[0].attempted_agents] == ["first", "second", "third"]
+    assert "Handoff" in agents["third"].prompts[0]
+    assert "repair-needed" in agents["third"].prompts[0]
+
+
+def test_timed_out_verify_repairs_and_reruns_original_command(repo, repair_chain, monkeypatch):
+    from baton.verify import VerifyResult, run_verify
+
+    calls = []
+
+    def verify(command, cwd, timeout):
+        calls.append((command, cwd, timeout))
+        if len(calls) == 1:
+            return VerifyResult(True, False, None, True, "test hung", command)
+        return run_verify(command, cwd, timeout)
+
+    monkeypatch.setattr("baton.next.run_verify", verify)
+    assert invoke_chain(repo, repair_chain, verify_timeout=3)[0] == EXIT_OK
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert "Outcome: timed out" in repair_chain[1]["second"].prompts[0]
+    assert "test hung" in repair_chain[1]["second"].prompts[0]
+
+
+@pytest.mark.parametrize("tier", ["S", "M", "L"])
+@pytest.mark.parametrize("succeeds", [False, True])
+def test_verification_escalates_once_then_stops(
+    repo, repair_chain, routed_executions, monkeypatch, tier, succeeds
+):
+    config, agents = repair_chain
+    config.write_text(
+        config.read_text()
+        .replace(
+            "[routes.implement]",
+            '[agents.strong]\nadapter="pi"\ncommand="strong"\nprovider="google"\n[routes.implement]',
+        )
+        .replace('L=["second"]', 'L=["strong"]\nS=["second"]')
+    )
+    events = []
+    agents["first"].action = lambda r: events.append("implement")
+    agents["second"].action = lambda r: events.append("same-tier fix")
+
+    def strong(r):
+        events.append("L fix")
+        if succeeds and (tier != "L" or len(agents["strong"].prompts) == 2):
+            edit(r)
+
+    agents["strong"] = FakeAdapter(action=strong)
+    from baton.verify import run_verify
+
+    def verify(command, cwd, timeout):
+        events.append("verify")
+        return run_verify(command, cwd, timeout)
+
+    monkeypatch.setattr("baton.next.run_verify", verify)
+    # Changing diagnostic output makes it observable which failure the fixer receives.
+    write_plan(
+        repo,
+        verify=(
+            "echo failure-$(test -f checked && echo second || echo first); "
+            "touch checked; test -s new.txt"
+        ),
+    )
+    before = head(repo)
+    code, out = invoke_chain(repo, repair_chain, agent_name="first", tier=tier)
+    assert code == (EXIT_OK if succeeds else EXIT_FAILED)
+    assert events == [
+        "implement",
+        "verify",
+        "L fix" if tier == "L" else "same-tier fix",
+        "verify",
+        "L fix",
+        "verify",
+    ]
+    assert [e.route.tier for e in routed_executions] == [tier, tier, "L"]
+    assert "failure-second" in agents["strong"].prompts[-1]
+    if tier == "L":
+        assert len(agents["strong"].prompts) == 2
+    else:
+        assert "failure-first" in agents["second"].prompts[0]
+    assert out.index("Attempting same-tier repair") < out.index("Escalating repair to tier L")
+    assert head(repo) == before
+    assert (repo / "checked").exists()
+    assert plan_of(repo).steps[0].status == ("pending" if succeeds else "open")
+    assert "after 2 repair attempts" in plan_of(repo).log[-1]
+    if not succeeds:
+        assert "failure-second" in out and "step stays open" in out
+
+
+@pytest.mark.parametrize("mode", ["missing", "cooldown", "quota", "failed", "committed"])
+def test_escalation_route_failure_stops_with_partial_work(repo, repair_chain, mode):
+    from datetime import UTC, datetime, timedelta
+
+    from baton.limits import LimitStore, UsageLimit
+
+    config, agents = repair_chain
+    config.write_text(
+        config.read_text()
+        .replace(
+            "[routes.fix]",
+            '[agents.strong]\nadapter="pi"\ncommand="strong"\nprovider="google"\n[routes.fix]',
+        )
+        .replace('L=["second"]', "" if mode == "missing" else 'L=["strong"]')
+    )
+    agents["second"].action = lambda r: (r / "partial-fix").write_text("preserved")
+    agents["strong"] = FakeAdapter(AgentResult(ok=False, error="broken"))
+    if mode == "cooldown":
+        LimitStore().set("strong", datetime.now(UTC) + timedelta(hours=2))
+    elif mode == "quota":
+        agents["strong"].result = AgentResult(ok=False, error="quota", limit=UsageLimit())
+    elif mode == "committed":
+
+        def commit(r):
+            git(r, "add", "-A")
+            git(r, "commit", "-m", "unexpected L commit")
+
+        agents["strong"].action = commit
+    code, out = invoke_chain(repo, repair_chain)
+    assert code == EXIT_FAILED
+    assert plan_of(repo).steps[0].status == "open"
+    assert (repo / "partial-fix").read_text() == "preserved"
+    assert len(agents["second"].prompts) == 1
+    if mode == "missing":
+        assert "[routes.fix] L" in out
+    elif mode == "committed":
+        assert "HEAD moved" in out
+    else:
+        assert "fix agent failed" in out
+
+
+def test_escalation_handoff_keeps_retry_budget_and_participants(
+    repo, repair_chain, routed_executions
+):
+    from baton.limits import UsageLimit
+
+    config, agents = repair_chain
+    config.write_text(
+        config.read_text()
+        .replace(
+            "[routes.fix]",
+            '[agents.limited]\nadapter="claude"\ncommand="limited"\n'
+            '[agents.final]\nadapter="pi"\ncommand="final"\nprovider="google"\n[routes.fix]',
+        )
+        .replace('L=["second"]', 'L=["limited", "final"]')
+    )
+    agents["second"].action = None
+    agents["limited"] = FakeAdapter(
+        AgentResult(ok=False, error="quota", limit=UsageLimit()),
+        lambda r: (r / "partial-L").write_text("preserve L work"),
+    )
+
+    def finish(r):
+        assert (r / "partial-L").read_text() == "preserve L work"
+        edit(r)
+
+    agents["final"] = FakeAdapter(action=finish)
+    write_plan(repo, verify="echo checked >> checks; echo latest-failure; test -s new.txt")
+    code, out = invoke_chain(repo, repair_chain)
+    assert code == EXIT_OK
+    assert (repo / "checks").read_text().splitlines() == ["checked"] * 3
+    assert [a.name for a in routed_executions[0].attempted_agents] == [
+        "first",
+        "second",
+        "limited",
+        "final",
+    ]
+    prompt = agents["final"].prompts[0]
+    assert "Handoff" in prompt and "latest-failure" in prompt and "partial-L" in prompt
+    assert out.count("Escalating repair to tier L") == 1
+    assert plan_of(repo).steps[0].status == "pending"
+
+
+@pytest.mark.parametrize("verify", ["true", ""])
+@pytest.mark.parametrize("critical", [False, True])
+def test_cli_reports_independent_review_before_commit(repo, chain, capsys, verify, critical):
+    import json
+
+    from baton.cli import main
+
+    config, agents = chain
+    write_plan(repo, verify=verify)
+    agents["first"].action = edit
+    findings = (
+        [
+            {"severity": "informational", "message": "context"},
+            {"severity": "warning", "message": "missing edge test"},
+            {"severity": "critical", "message": "data loss", "path": "new.txt", "line": 1},
+        ]
+        if critical
+        else []
+    )
+    agents["reviewer"].result = AgentResult(ok=True, text=json.dumps({"findings": findings}))
+    locations = []
+
+    def inspect(cwd):
+        locations.append(cwd)
+        assert cwd != repo and not (cwd / ".git").exists()
+        assert not (cwd / "new.txt").exists()
+        (cwd / "reviewer-scratch").write_text("disposable")
+
+    agents["reviewer"].action = inspect
+    before = head(repo)
+    assert main(["--config", str(config), "next", "--path", str(repo)]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "Independent reviewer: reviewer (claude)" in out
+    assert out.index("Checks:") < out.index("Independent reviewer:") < out.index("Commit:")
+    if critical:
+        assert out.index("CRITICAL:") < out.index("WARNING:") < out.index("INFORMATIONAL:")
+        assert "new.txt:1: data loss" in out
+    else:
+        assert "No findings." in out
+    if not verify:
+        assert "not verified" in out
+    assert "review reviewer: critical=" in plan_of(repo).log[-1]
+    assert plan_of(repo).steps[0].status == "pending"
+    assert head(repo) == before
+    assert not locations[0].exists()
+    assert not (repo / "reviewer-scratch").exists()
+    assert "hello" in agents["reviewer"].prompts[0]
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "malformed",
+        "failed",
+        "quota",
+        "cooldown",
+        "missing",
+        "same-provider",
+        "unknown-author",
+        "stale",
+    ],
+)
+def test_review_failure_leaves_candidate_open(repo, chain, mode):
+    from datetime import UTC, datetime, timedelta
+
+    from baton.limits import LimitStore, UsageLimit
+
+    config, agents = chain
+    agents["first"].action = edit
+    if mode == "malformed":
+        agents["reviewer"].result = AgentResult(ok=True, text="looks good")
+    elif mode == "failed":
+        agents["reviewer"].result = AgentResult(ok=False, error="review crashed")
+    elif mode == "quota":
+        agents["reviewer"].result = AgentResult(ok=False, error="quota", limit=UsageLimit())
+    elif mode == "cooldown":
+        LimitStore().set("reviewer", datetime.now(UTC) + timedelta(hours=1))
+    elif mode == "missing":
+        config.write_text(config.read_text().replace("[routes.review]", "[routes.fix]"))
+    elif mode == "same-provider":
+        config.write_text(
+            config.read_text().replace('provider="independent"', 'provider="anthropic"')
+        )
+    elif mode == "unknown-author":
+        config.write_text(
+            config.read_text().replace(
+                'adapter="claude"\ncommand="first"', 'adapter="pi"\ncommand="first"'
+            )
+        )
+    else:
+        agents["reviewer"].action = lambda cwd: (repo / "new.txt").write_text(
+            "changed during review"
+        )
+    before = head(repo)
+    code, out = invoke_chain(repo, chain)
+    assert code == EXIT_FAILED
+    assert "Independent review failed" in out and "step stays open" in out
+    assert "Commit:" not in out
+    assert "independent review failed" in plan_of(repo).log[-1]
+    assert plan_of(repo).steps[0].status == "open"
+    assert (repo / "new.txt").exists() and head(repo) == before
+    if mode == "quota":
+        assert "reviewer" in LimitStore().active()
+
+
+def test_reviewer_quota_uses_next_independent_reviewer_in_fresh_directory(repo, chain):
+    from baton.limits import LimitStore, UsageLimit
+
+    config, agents = chain
+    config.write_text(
+        config.read_text()
+        .replace(
+            "[routes.review]",
+            '[agents.backup]\nadapter="pi"\ncommand="backup"\nprovider="another"\n[routes.review]',
+        )
+        .replace('M=["reviewer"]', 'M=["reviewer", "reviewer", "backup"]')
+    )
+    agents["first"].action = edit
+    locations = []
+    agents["reviewer"].result = AgentResult(ok=False, error="quota", limit=UsageLimit())
+    agents["reviewer"].action = lambda cwd: locations.append(cwd)
+    agents["backup"] = FakeAdapter(AgentResult(ok=True, text='{"findings": []}'))
+    agents["backup"].action = lambda cwd: locations.append(cwd)
+    code, out = invoke_chain(repo, chain)
+    assert code == EXIT_OK
+    assert "Independent reviewer: backup" in out
+    assert len(agents["reviewer"].prompts) == len(agents["backup"].prompts) == 1
+    assert locations[0] != locations[1] and all(not p.exists() for p in locations)
+    assert agents["reviewer"].prompts == agents["backup"].prompts
+    assert "reviewer" in LimitStore().active()
+
+
+def test_review_excludes_partial_implementer_and_fixer_providers(repo, repair_chain):
+    from baton.limits import UsageLimit
+
+    config, agents = repair_chain
+    config.write_text(
+        config.read_text()
+        .replace('M=["first", "first", "second"]', 'M=["first", "second"]')
+        .replace('M=["reviewer"]', 'M=["first", "second", "reviewer"]')
+    )
+    agents["first"] = FakeAdapter(AgentResult(ok=False, error="quota", limit=UsageLimit()))
+    agents["second"].action = None
+
+    # The second author implements and then repairs; both providers remain excluded.
+    def repair_after_implementation(cwd):
+        if len(agents["second"].prompts) == 2:
+            edit(cwd)
+
+    agents["second"].action = repair_after_implementation
+    assert invoke_chain(repo, repair_chain)[0] == EXIT_OK
+    assert len(agents["first"].prompts) == 1
+    assert len(agents["second"].prompts) == 2
+    assert len(agents["reviewer"].prompts) == 1
+
+
+def test_dry_run_does_not_start_review_or_require_its_route(repo, chain):
+    from baton.adapter import ClaudeAdapter
+
+    config, agents = chain
+    config.write_text(config.read_text().replace("[routes.review]", "[routes.fix]"))
+    agents["first"] = ClaudeAdapter()
+    assert invoke_chain(repo, chain, dry_run=True)[0] == EXIT_OK
+    assert not agents["reviewer"].prompts
+
+
+def test_cli_quality_loop_with_partial_handoff_and_independent_review(
+    repo, tmp_path_factory, capsys
+):
+    import json
+    import sys
+
+    from baton.cli import main
+    from baton.limits import LimitStore
+
+    support = tmp_path_factory.mktemp("quality-loop")
+    executables = support / "executables"
+    executables.mkdir()
+    events = support / "events"
+
+    def executable(name, action, response):
+        path = executables / name
+        path.write_text(
+            f"#!{sys.executable}\nimport json, sys\nfrom pathlib import Path\n"
+            f'with Path({str(events)!r}).open("a") as log: log.write({name!r} + "\\n")\n'
+            "prompt = sys.argv[sys.argv.index('-p') + 1]\n"
+            + action
+            + "\n"
+            + f"print(json.dumps({response!r}))\n"
+        )
+        path.chmod(0o755)
+        return str(path)
+
+    commands = {}
+    commands["limited"] = executable(
+        "limited",
+        "Path('a.txt').write_text('partial implementation\\n')\n"
+        "Path('notes.txt').write_text('preserved partial notes\\n')",
+        {"is_error": True, "result": "Usage limit reached"},
+    )
+    commands["implementer"] = executable(
+        "implementer",
+        "assert 'partial implementation' in prompt and 'notes.txt' in prompt\n"
+        "assert Path('notes.txt').read_text() == 'preserved partial notes\\n'\n"
+        "Path('a.txt').write_text('implemented but broken\\n')",
+        {"is_error": False, "result": "implemented"},
+    )
+    commands["fixer"] = executable(
+        "fixer",
+        "assert 'Outcome: exit 1' in prompt and 'quality-failure' in prompt\n"
+        "Path('a.txt').write_text('first repair still broken\\n')",
+        {"is_error": False, "result": "first fix"},
+    )
+    commands["strong"] = executable(
+        "strong",
+        "assert 'Outcome: exit 1' in prompt and 'quality-failure' in prompt\n"
+        "assert Path('a.txt').read_text() == 'first repair still broken\\n'\n"
+        "Path('a.txt').write_text('correct\\n')\n"
+        "Path('new.txt').write_text('new implementation content\\n')",
+        {"is_error": False, "result": "L fix"},
+    )
+    commands["reviewer"] = executable(
+        "reviewer",
+        f"assert Path.cwd() != Path({str(repo)!r})\n"
+        "assert not Path('a.txt').exists()\n"
+        "assert 'new implementation content' in prompt and 'preserved partial notes' in prompt\n"
+        "assert 'correct' in prompt\nPath('scratch').write_text('temporary reviewer edit')",
+        {"is_error": False, "result": '{"findings": []}'},
+    )
+    providers = {
+        "limited": "anthropic",
+        "implementer": "openai",
+        "fixer": "anthropic",
+        "strong": "openai",
+        "reviewer": "google",
+    }
+    config = support / "quality.toml"
+    config.write_text(
+        "\n".join(
+            f'[agents.{name}]\nadapter="claude"\ncommand={json.dumps(command)}\n'
+            f"provider={json.dumps(providers[name])}\n"
+            for name, command in commands.items()
+        )
+        + """
+[routes.implement]
+M=["limited", "implementer"]
+[routes.fix]
+M=["fixer"]
+L=["strong"]
+[routes.review]
+M=["limited", "fixer", "implementer", "strong", "reviewer"]
+"""
+    )
+    write_plan(repo, verify="echo checked >> checks; echo quality-failure; grep -qx correct a.txt")
+    before = head(repo)
+    assert main(["--config", str(config), "next", "--path", str(repo)]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert events.read_text().splitlines() == [
+        "limited",
+        "implementer",
+        "fixer",
+        "strong",
+        "reviewer",
+    ]
+    assert (repo / "checks").read_text().splitlines() == ["checked"] * 3
+    assert (repo / "notes.txt").read_text() == "preserved partial notes\n"
+    assert (repo / "new.txt").read_text() == "new implementation content\n"
+    assert not (repo / "scratch").exists()
+    assert "limited" in LimitStore().active()
+    assert out.index("same-tier repair") < out.index("Escalating repair to tier L")
+    assert "Independent reviewer: reviewer" in out and "No findings." in out
+    assert plan_of(repo).steps[0].status == "pending"
+    assert "after 2 repair attempts; review reviewer: critical=0" in plan_of(repo).log[-1]
+    assert head(repo) == before

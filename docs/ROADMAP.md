@@ -90,14 +90,14 @@ Updated: 2026-11-18
 - **Depends on:** M3
 - **Size:** L, ~7 commits
 
-### M5 [~] Limit-Erkennung und Wechsel
+### M5 [x] Limit-Erkennung und Wechsel
 - **Goal:** Am Limit übernimmt automatisch der nächste Agent.
 - **Includes:** Limit-Muster, Cooldowns mit Reset-Zeit, Wechsel mit aktuellem Diff, `baton cooldown`, Verfügbarkeit in `status`, Wiedererkennung nach manuellem Kontowechsel bei jedem Adapter: `baton recheck <agent>` startet eine winzige Probeanfrage und hebt den Cooldown bei Erfolg auf, im Auto-Modus optional mit Hinweis "agy im Cooldown, anmelden mit anderem Konto oder warten bis HH:MM" und alle paar Minuten erneuter Probe; kein Anmelden, keine Token-Dateien anfassen
 - **Done when:** simuliertes Limit löst Wechsel aus; echte Meldungen aus M1 werden erkannt; Fake-Adapter: erst Limit-Fehler, nach `recheck` Erfolg → Cooldown aufgehoben
 - **Depends on:** M4
 - **Size:** M, ~5 commits
 
-### M6 [ ] Qualitätsschleife
+### M6 [x] Qualitätsschleife
 - **Goal:** Fehlschläge selbst reparieren, schwierige Schritte eskalieren, unabhängig reviewen.
 - **Includes:** Fix-Versuch mit Fehlerausgabe, Eskalation zur höheren Stufe (nach 2 Fehlschlägen auf L: Opus/Astra), Review durch anderen Anbieter (Schweregrade), Befunde im Bericht
 - **Done when:** Fake-Adapter-Tests zeigen Fix → Eskalation; Review nie beim selben Anbieter
@@ -161,3 +161,6 @@ Updated: 2026-11-18
 - 2026-11-18: M4 done (S/M/L routing, agent and tier overrides, verified file edits with all four adapters). GitHub Actions passed on `aa6525c`. See [adapter smoke results](adapters.md#m4-smoke-results) for the outstanding Ollama and OpenRouter checks.
 
 - 2026-11-18: M5 implementation delivered: quota-only handoff with partial edits, persistent cooldowns, local reset times in status, manual cooldown and parsed one-shot recheck. Offline fake-executable recovery and all real M1 recordings are covered by tests. Local verification: 390 tests pass on Python 3.12 and 3.14; lint, formatting, build and doctor pass (gh is not installed). M5 remains [~]: no real quota recording exists; acceptance requires a redacted capture or explicit waiver, plus green CI for the final changes. Scheduled rechecks remain in M10.
+- 2026-11-18: M5 accepted: the user explicitly waived the real quota recording requirement. No real quota capture exists; acceptance relies on offline recovery coverage (133 adapter, limit and next tests passed) and previously recorded green CI for `6b5adcc` (run `44377237276`). See [acceptance notes](adapters.md#offline-recovery-evidence-and-m5-acceptance).
+- 2026-11-18: M6 implementation and documentation delivered: same-tier repair then one L repair, independent provider review with severity findings before manual commit, and isolated reviewer working directories. The offline CLI quality-loop test covers partial quota handoff, escalation and exclusion of all contributing providers. Local verification: 483 tests pass on Python 3.12 and 3.14; lint, formatting, package build and doctor pass (gh is not installed). M6 remains [~] until CI is green for the final committed changes on both Python versions.
+- 2026-11-18: M6 accepted: [GitHub Actions run 44385734356](https://github.com/AdrianMeDev/baton/actions/runs/44385734356) passed for `0f8ac1a` on Python 3.12 and 3.14 (lint, formatting, tests and doctor). Local package build and 483 tests on each Python version were already verified. The quality-loop milestone is complete; commits remain manual.
