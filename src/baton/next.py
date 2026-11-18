@@ -1,7 +1,8 @@
 """``baton next``: implement one plan step with an agent, verify it, and stop for the commit.
 
 Mirrors the ``/next`` skill: gate -> agent -> HEAD check -> verify -> ``[~]`` marking -> report.
-baton never commits; the user reviews and commits.
+By default baton never commits; the user reviews and commits. With ``--commit`` a verified
+step without critical review findings is committed with the plan's message and marked ``[x]``.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from typing import TextIO
 from baton.adapter import Adapter, AgentResult, CommandAdapter, make_adapter
 from baton.config import AgentConfig, ConfigError, find_config_path, load_config
 from baton.gate import GateResult, apply_gate, check_gate
-from baton.git import PLAN_FILENAME, GitError, dirty_paths, handoff_context, head
+from baton.git import PLAN_FILENAME, GitError, commit_all, dirty_paths, handoff_context, head
 from baton.limits import LimitStateError, LimitStore
 from baton.plan import (
     Plan,
@@ -110,11 +111,15 @@ def _report_success(
     verify: VerifyResult,
     cost: float | None,
     review: ReviewResult | None = None,
+    *,
+    changed: list[str] | None = None,
+    committed: str | None = None,
+    notice: str | None = None,
 ) -> None:
     _say(out)
     _say(out, f"Step {step.number}/{len(plan.steps)} done: {step.message}")
     _say(out, "Changed:")
-    for path in dirty_paths(repo):
+    for path in dirty_paths(repo) if changed is None else changed:
         _say(out, f"  {path}")
     _say(out, "Checks:")
     if verify.verified:
@@ -136,15 +141,24 @@ def _report_success(
                 if finding.line is not None:
                     location += f":{finding.line}"
                 _say(out, f"    {location + ': ' if location else ''}{finding.message}")
-    _say(out, "Review: `git diff`")
-    _say(out, "Commit:")
-    _commit_hint(out, step.message)
+    if committed is not None:
+        _say(out, f"Committed: {committed} {step.message}")
+    else:
+        if notice:
+            _say(out, notice)
+        _say(out, "Review: `git diff`")
+        _say(out, "Commit:")
+        _commit_hint(out, step.message)
     following = next((s for s in plan.steps if s.number > step.number and s.status == "open"), None)
     if following:
-        _say(out, f"Next: after committing, run `baton next` for step {following.number}:")
+        when = "" if committed is not None else "after committing, "
+        _say(out, f"Next: {when}run `baton next` for step {following.number}:")
         _say(out, f"  {following.message}")
     else:
-        _say(out, "Next: last open step. After committing, run `baton next` once more.")
+        if committed is not None:
+            _say(out, "Next: that was the last step; run `baton next` once more to finish.")
+        else:
+            _say(out, "Next: last open step. After committing, run `baton next` once more.")
 
 
 def _verify_failure(verify: VerifyResult) -> str:
@@ -162,6 +176,7 @@ def run_next(
     verify_timeout: float = DEFAULT_VERIFY_TIMEOUT,
     override: bool = False,
     today: str | None = None,
+    commit: bool = False,
 ) -> int:
     """Implement the first open step of ``repo``'s plan; returns the process exit code."""
     return _run_next(
@@ -172,6 +187,7 @@ def run_next(
         verify_timeout=verify_timeout,
         override=override,
         today=today,
+        commit=commit,
     )
 
 
@@ -186,6 +202,7 @@ def _run_next(
     today: str | None = None,
     select_fix: Callable[[Step, bool], Adapter | None] | None = None,
     review_step: Callable[[Plan, Step, str], ReviewResult | None] | None = None,
+    commit: bool = False,
 ) -> int:
     date = today or datetime.date.today().isoformat()
     plan_path = repo / PLAN_FILENAME
@@ -279,6 +296,21 @@ def _run_next(
                 _log(plan_path, f"step {step.number}: independent review failed ({exc})", date)
                 return EXIT_FAILED
 
+        changed = dirty_paths(repo)
+        committed = None
+        notice = None
+        problem = None
+        if commit:
+            if review is not None and any(f.severity == "critical" for f in review.findings):
+                problem = "critical review findings"
+                notice = "Auto-commit blocked by critical review findings; decide manually."
+            else:
+                try:
+                    committed = commit_all(repo, step.message)
+                except GitError as exc:
+                    problem = f"commit failed ({exc})"
+                    notice = f"Auto-commit failed: {exc}\nChanges stay staged; the step stays [~]."
+
         # Re-read: the agent may have touched the plan file despite the rules.
         text = plan_path.read_text(encoding="utf-8")
         text = set_step_status(text, step.number, "pending", after)
@@ -287,14 +319,31 @@ def _run_next(
             note += f" after {repairs} repair attempts"
         if review is not None:
             note += f"; {review.summary()}"
-        text = append_log(text, f"{date}: step {step.number} {note}, waiting for commit.")
+        if committed is not None:
+            text = set_step_status(text, step.number, "done", committed)
+            text = append_log(text, f"{date}: step {step.number} {note}, committed ({committed}).")
+        elif problem is not None:
+            text = append_log(text, f"{date}: step {step.number} {note}; auto-commit: {problem}.")
+        else:
+            text = append_log(text, f"{date}: step {step.number} {note}, waiting for commit.")
         save_plan(plan_path, text)
     except (ConfigError, GitError, LimitStateError, PlanError, OSError) as exc:
         _say(out, f"Error: {exc}")
         return EXIT_FAILED
 
-    _report_success(out, plan, step, repo, verify, result.cost, review)
-    return EXIT_OK
+    _report_success(
+        out,
+        plan,
+        step,
+        repo,
+        verify,
+        result.cost,
+        review,
+        changed=changed,
+        committed=committed,
+        notice=notice,
+    )
+    return EXIT_FAILED if problem else EXIT_OK
 
 
 def _dry_run(
@@ -420,6 +469,7 @@ def run_next_command(
     agent_timeout: float = DEFAULT_AGENT_TIMEOUT,
     verify_timeout: float = DEFAULT_VERIFY_TIMEOUT,
     dry_run: bool = False,
+    commit: bool = False,
     out: TextIO | None = None,
 ) -> int:
     """CLI entry: select an agent for the step being run or previewed."""
@@ -481,4 +531,5 @@ def run_next_command(
         verify_timeout=verify_timeout,
         select_fix=select_fix,
         review_step=review_step,
+        commit=commit,
     )

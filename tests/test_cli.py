@@ -306,3 +306,10 @@ def test_status_uses_explicit_config_and_shows_agents_without_plan(tmp_path, cap
     assert main(["--config", str(config), "status", "--path", str(tmp_path)]) == 0
     out = capsys.readouterr().out
     assert "fake: available" in out and "No .agent-plan.md" in out
+
+
+def test_next_accepts_commit_flag() -> None:
+    from baton.cli import build_parser
+
+    assert build_parser().parse_args(["next", "--commit"]).commit is True
+    assert build_parser().parse_args(["next"]).commit is False

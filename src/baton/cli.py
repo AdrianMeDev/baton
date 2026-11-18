@@ -88,6 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
     nxt.add_argument(
         "--dry-run", action="store_true", help="print the command and prompt, change nothing"
     )
+    nxt.add_argument(
+        "--commit",
+        action="store_true",
+        help="commit a verified step with the plan's message (blocked by critical findings)",
+    )
     return parser
 
 
@@ -125,6 +130,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             agent_timeout=args.timeout,
             verify_timeout=args.verify_timeout,
             dry_run=args.dry_run,
+            commit=args.commit,
         )
     if args.command == "recheck":
         return run_recheck_command(args.agent, config_path=args.config, timeout=args.timeout)

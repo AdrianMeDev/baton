@@ -1068,3 +1068,116 @@ M=["limited", "fixer", "implementer", "strong", "reviewer"]
     assert plan_of(repo).steps[0].status == "pending"
     assert "after 2 repair attempts; review reviewer: critical=0" in plan_of(repo).log[-1]
     assert head(repo) == before
+
+
+@pytest.fixture
+def git_identity(monkeypatch):
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_NAME", "t")
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", "t@example.com")
+
+
+def _log_subjects(repo: Path) -> list[str]:
+    out = subprocess.run(
+        ["git", "-C", str(repo), "log", "--format=%s"], check=True, capture_output=True, text=True
+    )
+    return out.stdout.splitlines()
+
+
+def test_commit_flag_commits_with_step_message(repo, git_identity) -> None:
+    before = head(repo)
+    code, out = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_OK
+    assert head(repo) != before
+    assert _log_subjects(repo)[:2] == ["feat: first", "init"]
+    step = plan_of(repo).steps[0]
+    assert step.status == "done" and step.commit == head(repo)
+    assert f"Committed: {head(repo)} feat: first" in out
+    assert "git commit" not in out
+    assert "run `baton next` for step 2" in out
+    tracked = subprocess.run(
+        ["git", "-C", str(repo), "ls-files"], check=True, capture_output=True, text=True
+    ).stdout.split()
+    assert "new.txt" in tracked and ".agent-plan.md" not in tracked
+    assert "committed (" in plan_of(repo).log[-1]
+
+
+def test_commit_flag_without_verify_command(repo, git_identity) -> None:
+    write_plan(repo, verify="")
+    code, out = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_OK and "not verified" in out
+    assert plan_of(repo).steps[0].status == "done"
+
+
+def test_without_commit_flag_behaviour_is_unchanged(repo, git_identity) -> None:
+    before = head(repo)
+    code, out = run(repo, FakeAdapter(action=edit))
+    assert code == EXIT_OK and head(repo) == before
+    assert plan_of(repo).steps[0].status == "pending"
+    assert "git commit -m" in out
+
+
+def test_failed_verify_does_not_commit(repo, git_identity) -> None:
+    write_plan(repo, verify="false")
+    before = head(repo)
+    code, _ = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_FAILED and head(repo) == before
+    assert plan_of(repo).steps[0].status == "open"
+
+
+def test_critical_finding_blocks_auto_commit(repo, chain, git_identity, capsys) -> None:
+    import json
+
+    from baton.cli import main
+
+    config, agents = chain
+    agents["first"].action = edit
+    findings = [{"severity": "critical", "message": "data loss"}]
+    agents["reviewer"].result = AgentResult(ok=True, text=json.dumps({"findings": findings}))
+    before = head(repo)
+    argv = ["--config", str(config), "next", "--path", str(repo), "--commit"]
+    assert main(argv) == EXIT_FAILED
+    out = capsys.readouterr().out
+    assert "blocked by critical review findings" in out
+    assert head(repo) == before
+    assert plan_of(repo).steps[0].status == "pending"
+    assert "auto-commit: critical review findings" in plan_of(repo).log[-1]
+
+
+def test_warning_finding_does_not_block_auto_commit(repo, chain, git_identity, capsys) -> None:
+    import json
+
+    from baton.cli import main
+
+    config, agents = chain
+    agents["first"].action = edit
+    findings = [{"severity": "warning", "message": "edge case"}]
+    agents["reviewer"].result = AgentResult(ok=True, text=json.dumps({"findings": findings}))
+    argv = ["--config", str(config), "next", "--path", str(repo), "--commit"]
+    assert main(argv) == EXIT_OK
+    assert "WARNING:" in capsys.readouterr().out
+    assert plan_of(repo).steps[0].status == "done"
+    assert _log_subjects(repo)[0] == "feat: first"
+
+
+def test_failing_pre_commit_hook_leaves_step_pending(repo, git_identity) -> None:
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho nope >&2\nexit 1\n")
+    hook.chmod(0o755)
+    before = head(repo)
+    code, out = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_FAILED and head(repo) == before
+    assert "Auto-commit failed" in out and "nope" in out
+    step = plan_of(repo).steps[0]
+    assert step.status == "pending" and step.pending_on == before
+    assert "auto-commit: commit failed" in plan_of(repo).log[-1]
+
+
+def test_commit_flag_second_run_continues_after_auto_commit(repo, git_identity) -> None:
+    run(repo, FakeAdapter(action=edit), commit=True)
+    code, out = run(
+        repo, FakeAdapter(action=lambda r: (r / "b.txt").write_text("b\n")), commit=True
+    )
+    assert code == EXIT_OK and "Step 2/2" in out
+    assert _log_subjects(repo)[:2] == ["feat: second", "feat: first"]
+    assert [s.status for s in plan_of(repo).steps] == ["done", "done"]
