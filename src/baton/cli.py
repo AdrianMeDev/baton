@@ -2,6 +2,7 @@ import argparse
 from collections.abc import Sequence
 
 from baton import __version__
+from baton.doctor import run_doctor
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -15,7 +16,10 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="config file (default: $BATON_CONFIG, ~/.config/baton/config.toml, bundled example)",
     )
-    parser.add_subparsers(dest="command", metavar="<command>")
+    subparsers = parser.add_subparsers(dest="command", metavar="<command>")
+    subparsers.add_parser(
+        "doctor", help="show configured agents and whether their CLIs are in PATH"
+    )
     return parser
 
 
@@ -25,4 +29,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 0
+    if args.command == "doctor":
+        return run_doctor(args.config)
     return 0
