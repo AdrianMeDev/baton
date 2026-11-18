@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TextIO
 
 from baton.adapter import Adapter, ClaudeAdapter
-from baton.config import AgentConfig, Config, ConfigError, find_config_path, load_config
+from baton.config import ConfigError, find_config_path, load_config
 from baton.gate import GateResult, apply_gate, check_gate
 from baton.git import PLAN_FILENAME, GitError, dirty_paths, head
 from baton.plan import (
@@ -27,6 +27,7 @@ from baton.plan import (
     set_step_status,
 )
 from baton.prompt import implement_prompt, step_text
+from baton.router import pick_claude_agent
 from baton.verify import VerifyResult, run_verify
 
 EXIT_OK = 0
@@ -194,14 +195,6 @@ def run_next(
 
     _report_success(out, plan, step, repo, verify, result.cost)
     return EXIT_OK
-
-
-def pick_claude_agent(config: Config) -> AgentConfig:
-    """M3 uses one fixed agent: the first configured agent with ``adapter = "claude"``."""
-    for agent in config.agents.values():
-        if agent.adapter == "claude":
-            return agent
-    raise ConfigError(f'{config.location.path}: no agent with adapter = "claude" configured')
 
 
 def _dry_run(repo: Path, adapter: ClaudeAdapter, out: TextIO) -> int:
