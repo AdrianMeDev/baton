@@ -8,7 +8,7 @@ from baton.config import ROUTE_TIERS, ConfigError, find_config_path, load_config
 from baton.doctor import run_doctor
 from baton.limits import LimitStateError, LimitStore, parse_duration
 from baton.next import DEFAULT_AGENT_TIMEOUT, DEFAULT_VERIFY_TIMEOUT, run_next_command
-from baton.probe import DEFAULT_PROMPT, DEFAULT_TIMEOUT, run_probe_command
+from baton.probe import DEFAULT_PROMPT, DEFAULT_TIMEOUT, run_probe_command, run_recheck_command
 from baton.status import run_status
 
 
@@ -43,6 +43,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     probe.add_argument("--record", metavar="PATH", help="save a redacted JSON recording")
     probe.add_argument("--dry-run", action="store_true", help="print the command, run nothing")
+    recheck = subparsers.add_parser("recheck", help="probe one agent and update its cooldown")
+    recheck.add_argument("agent", help="agent name from the config (probed even during cooldown)")
+    recheck.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT,
+        metavar="S",
+        help="probe timeout in seconds (default: %(default)s)",
+    )
     cooldown = subparsers.add_parser(
         "cooldown", help="set a shared cooldown for a configured agent"
     )
@@ -106,7 +115,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "doctor":
         return run_doctor(args.config)
     if args.command == "status":
-        return run_status(Path(args.path))
+        return run_status(Path(args.path), config_path=args.config)
     if args.command == "next":
         return run_next_command(
             Path(args.path),
@@ -117,6 +126,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             verify_timeout=args.verify_timeout,
             dry_run=args.dry_run,
         )
+    if args.command == "recheck":
+        return run_recheck_command(args.agent, config_path=args.config, timeout=args.timeout)
     if args.command == "probe":
         return run_probe_command(
             args.agent,

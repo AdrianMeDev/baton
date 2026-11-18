@@ -31,6 +31,8 @@ class Adapter(Protocol):
 
 
 class CommandAdapter(Adapter, Protocol):
+    def parse(self, result: RunResult) -> AgentResult: ...
+
     def argv(self, prompt: str) -> list[str]: ...
 
 

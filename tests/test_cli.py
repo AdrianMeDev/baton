@@ -285,3 +285,11 @@ def test_cli_cooldown_malformed_state_is_not_overwritten(tmp_path, monkeypatch, 
 @pytest.fixture(autouse=True)
 def isolated_limit_state(monkeypatch, tmp_path_factory):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("limits-state")))
+
+
+def test_status_uses_explicit_config_and_shows_agents_without_plan(tmp_path, capsys):
+    config = tmp_path / "config.toml"
+    config.write_text(CONFIG)
+    assert main(["--config", str(config), "status", "--path", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "fake: available" in out and "No .agent-plan.md" in out

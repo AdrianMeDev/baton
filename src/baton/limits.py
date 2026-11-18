@@ -182,13 +182,27 @@ class LimitStore:
         if deadline.tzinfo is None or deadline.utcoffset() is None:
             raise ValueError("cooldown deadline must include a timezone")
         deadline = deadline.astimezone(UTC)
+        self._update(agent, deadline)
+
+    def clear_if(self, agent: str, observed: datetime) -> bool:
+        """Remove only the deadline observed before a probe, under the writer lock."""
+        return self._update(agent, None, observed=observed)
+
+    def _update(
+        self, agent: str, deadline: datetime | None, *, observed: datetime | None = None
+    ) -> bool:
         temp_path = None
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.with_suffix(".lock").open("a") as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 deadlines = self.read()
-                deadlines[agent] = deadline
+                if deadline is None:
+                    if deadlines.get(agent) != observed:
+                        return False
+                    deadlines.pop(agent, None)
+                else:
+                    deadlines[agent] = deadline
                 payload = {name: dt.isoformat() for name, dt in deadlines.items()}
                 with tempfile.NamedTemporaryFile(
                     mode="w",
@@ -204,6 +218,7 @@ class LimitStore:
                     temp.flush()
                     os.fsync(temp.fileno())
                 os.replace(temp_path, self.path)
+                return True
         except OSError as exc:
             raise LimitStateError(
                 f"Cannot update {self.path}: {exc}. "

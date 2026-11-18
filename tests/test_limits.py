@@ -106,3 +106,15 @@ def test_concurrent_updates_preserve_all_agents(tmp_path):
         process.join(15)
         assert process.exitcode == 0
     assert LimitStore(path).read() == {str(i): NOW for i in range(8)}
+
+
+def test_clear_compares_observed_deadline_and_preserves_other_agents(tmp_path):
+    store = LimitStore(tmp_path / "limits.json")
+    store.set("a", NOW)
+    store.set("b", NOW)
+    newer = NOW + timedelta(hours=1)
+    store.set("a", newer)
+    assert not store.clear_if("a", NOW)
+    assert store.read() == {"a": newer, "b": NOW}
+    assert store.clear_if("a", newer)
+    assert store.read() == {"b": NOW}

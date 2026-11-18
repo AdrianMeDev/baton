@@ -6,8 +6,10 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
+from baton.config import ConfigError, find_config_path, load_config
 from baton.gate import GateResult, check_gate
 from baton.git import PLAN_FILENAME, GitError
+from baton.limits import LimitStateError, LimitStore
 from baton.plan import Plan, PlanError, Step, first_open_step, load_plan, pending_step
 from baton.roadmap import RoadmapError, find_roadmap, load_roadmap
 
@@ -63,7 +65,7 @@ def _gate_lines(plan: Plan, root: Path) -> list[str]:
     return [f"Gate: {gate.state}"]
 
 
-def run_status(root: Path, out: TextIO | None = None) -> int:
+def _plan_status(root: Path, out: TextIO | None = None) -> int:
     """Print the status of the plan in ``root``. Exit 0, or 1 for an unreadable plan."""
     out = sys.stdout if out is None else out
     path = root / PLAN_FILENAME
@@ -97,3 +99,27 @@ def run_status(root: Path, out: TextIO | None = None) -> int:
     for line in _gate_lines(plan, root):
         print(line, file=out)
     return 0
+
+
+def run_status(root: Path, out: TextIO | None = None, *, config_path: str | None = None) -> int:
+    """Report plan and configured availability without changing plan or cooldown state."""
+    out = sys.stdout if out is None else out
+    code = _plan_status(root, out)
+    print("\nAgents:", file=out)
+    try:
+        config = load_config(find_config_path(config_path))
+        if not config.agents:
+            print("  (none configured)", file=out)
+            return code
+        active = LimitStore().active()
+        for name in config.agents:
+            deadline = active.get(name)
+            if deadline is None:
+                print(f"  {name}: available (no active cooldown)", file=out)
+            else:
+                local = deadline.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z (%z)")
+                print(f"  {name}: cooldown until {local}", file=out)
+    except (ConfigError, LimitStateError) as exc:
+        print(f"Cannot report agent availability: {exc}", file=out)
+        return 1
+    return code
