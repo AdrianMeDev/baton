@@ -96,6 +96,7 @@ check. `status` never starts an agent or writes state.
 
 ```
 baton next [--path DIR] [--agent NAME] [--tier {S,M,L}] [--timeout S] [--verify-timeout S] [--dry-run]
+          [--commit] [--push] [--worktree]
 ```
 
 Implements exactly one plan step and stops for your commit. The tier comes from `--tier`, the
@@ -142,6 +143,28 @@ before starting an agent because of the gate, a dirty tree, a missing plan or no
 
 The agent can edit your working tree and may use your account quota. Review the diff before
 committing.
+
+### Auto-commit, branches and worktrees
+
+By default baton stops for your commit. Three opt-in flags change that:
+
+- `--commit` commits a step that passed Verify and review with the plan's commit message and
+  marks it `[x] – <hash>`. `.agent-plan.md` is never staged, git hooks run normally, and the
+  commit uses your git identity. Before the first step baton creates (or switches to) the branch
+  `baton/m<n>-<milestone-slug>` from the current HEAD; plans without a milestone use
+  `baton/<plan-title-slug>`. Switching needs a clean tree (exit 2 otherwise). With a tracked
+  roadmap the milestone becomes `[~]` inside the first commit and `[x]` plus a Changelog line
+  inside the last one, so the roadmap changes only in those two commits.
+- `--push` implies `--commit` and runs `git push -u origin <branch>` after each commit. A failed
+  push exits 1, but the commit and the `[x]` status stay.
+- `--worktree` implies `--commit` and works in a dedicated worktree under
+  `$XDG_STATE_HOME/baton/worktrees/`, so your checkout (branch, HEAD, files) stays untouched.
+  The plan is copied in on creation and mirrored back after every run, so `baton status` in your
+  checkout shows the progress.
+
+A `critical` review finding blocks the auto-commit: the step stays `[~]` with the changes in the
+tree and baton exits 1 so you decide. `warning` and `informational` findings are reported and
+logged only. A failing commit hook has the same effect. `--dry-run` prints the target branch.
 
 ### Fix and independent review routes
 

@@ -3,7 +3,20 @@ from pathlib import Path
 
 import pytest
 
-from baton.git import GitError, dirty_paths, head, is_repo
+from baton.git import (
+    GitError,
+    branch_exists,
+    branch_slug,
+    commit_all,
+    current_branch,
+    dirty_paths,
+    head,
+    is_repo,
+    milestone_branch,
+    push,
+    switch_branch,
+)
+from baton.plan import MilestoneRef, Plan
 
 
 def git(repo: Path, *args: str) -> None:
@@ -12,6 +25,14 @@ def git(repo: Path, *args: str) -> None:
         check=True,
         capture_output=True,
     )
+
+
+@pytest.fixture(autouse=True)
+def git_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    # commit_all runs plain `git commit`, which needs an identity on CI runners.
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_NAME", "t")
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", "t@example.com")
 
 
 @pytest.fixture
@@ -84,3 +105,112 @@ def test_handoff_context_includes_both_diffs_and_untracked_paths(repo):
     assert "Unstaged diff:" in context and "+unstaged" in context
     assert repr("new\nfile.txt") in context
     assert sorted(dirty_paths(repo)) == ["a.txt", "new\nfile.txt"]
+
+
+def _plan(milestone: MilestoneRef, title: str = "Some Plan") -> Plan:
+    return Plan(title=title, created=None, branch=None, base=None, milestone=milestone, steps=())
+
+
+@pytest.mark.parametrize(
+    ("text", "slug"),
+    [
+        ("Auto-Commit und Branches", "auto-commit-und-branches"),
+        ("Größe über Äpfel & Öl", "groesse-ueber-aepfel-oel"),
+        ("  --Weiß!!  ", "weiss"),
+    ],
+)
+def test_branch_slug(text: str, slug: str) -> None:
+    assert branch_slug(text) == slug
+
+
+def test_milestone_branch_with_and_without_milestone() -> None:
+    ref = MilestoneRef("M7", "Auto-Commit und Branches", "docs/ROADMAP.md", "tracked")
+    assert milestone_branch(_plan(ref)) == "baton/m7-auto-commit-und-branches"
+    none = MilestoneRef(None, "", None, "none")
+    assert milestone_branch(_plan(none, "Fix the Bug")) == "baton/fix-the-bug"
+
+
+def test_branch_helpers(repo: Path) -> None:
+    first = current_branch(repo)
+    assert first is not None
+    assert not branch_exists(repo, "baton/x")
+    switch_branch(repo, "baton/x", create=True)
+    assert branch_exists(repo, "baton/x")
+    assert current_branch(repo) == "baton/x"
+    switch_branch(repo, first)
+    assert current_branch(repo) == first
+    with pytest.raises(GitError):
+        switch_branch(repo, "missing")
+
+
+def test_current_branch_detached(repo: Path) -> None:
+    git(repo, "checkout", "-q", "--detach")
+    assert current_branch(repo) is None
+
+
+def test_commit_all_skips_plan_file(repo: Path) -> None:
+    (repo / "a.txt").write_text("changed\n")
+    (repo / "new.txt").write_text("n\n")
+    (repo / ".agent-plan.md").write_text("plan\n")
+    git(repo, "add", ".agent-plan.md")  # even a staged plan file stays out
+    before = head(repo)
+    short = commit_all(repo, "feat: thing")
+    assert short == head(repo) != before
+    log = subprocess.run(
+        ["git", "-C", str(repo), "log", "-1", "--format=%s", "--name-only"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    assert "feat:" in log[0] and ".agent-plan.md" not in log
+    assert {"a.txt", "new.txt"} <= set(log)
+    assert dirty_paths(repo, ignore=()) == [".agent-plan.md"]
+
+
+def test_commit_all_nothing_to_commit(repo: Path) -> None:
+    (repo / ".agent-plan.md").write_text("plan\n")
+    with pytest.raises(GitError, match="nothing to commit"):
+        commit_all(repo, "feat: nothing")
+
+
+def test_commit_all_hook_failure(repo: Path) -> None:
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho nope >&2\nexit 1\n")
+    hook.chmod(0o755)
+    (repo / "b.txt").write_text("b\n")
+    before = head(repo)
+    with pytest.raises(GitError):
+        commit_all(repo, "feat: blocked")
+    assert head(repo) == before
+
+
+def test_push_to_bare_remote(repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    remote = tmp_path_factory.mktemp("remote")
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    git(repo, "remote", "add", "origin", str(remote))
+    switch_branch(repo, "baton/m1-x", create=True)
+    push(repo, "baton/m1-x")
+    pushed = subprocess.run(
+        ["git", "-C", str(remote), "rev-parse", "baton/m1-x"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert pushed == head(repo, short=False)
+
+
+def test_push_without_remote(repo: Path) -> None:
+    with pytest.raises(GitError):
+        push(repo, "main")
+
+
+def test_commit_all_with_gitignored_plan_file(repo: Path) -> None:
+    tmp_path = repo
+    (tmp_path / ".gitignore").write_text(".agent-plan.md\n")
+    (tmp_path / ".agent-plan.md").write_text("plan\n")
+    (tmp_path / "f.txt").write_text("x\n")
+    commit_all(tmp_path, "feat: x")
+    tracked = subprocess.run(
+        ["git", "-C", str(tmp_path), "ls-files"], check=True, capture_output=True, text=True
+    ).stdout.split()
+    assert "f.txt" in tracked and ".agent-plan.md" not in tracked

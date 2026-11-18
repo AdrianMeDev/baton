@@ -1,7 +1,9 @@
 """``baton next``: implement one plan step with an agent, verify it, and stop for the commit.
 
 Mirrors the ``/next`` skill: gate -> agent -> HEAD check -> verify -> ``[~]`` marking -> report.
-baton never commits; the user reviews and commits.
+By default baton never commits; the user reviews and commits. With ``--commit`` a verified
+step without critical review findings is committed with the plan's message and marked ``[x]``.
+``--worktree`` runs in a dedicated git worktree of the milestone branch (implies ``--commit``).
 """
 
 from __future__ import annotations
@@ -17,8 +19,22 @@ from typing import TextIO
 from baton.adapter import Adapter, AgentResult, CommandAdapter, make_adapter
 from baton.config import AgentConfig, ConfigError, find_config_path, load_config
 from baton.gate import GateResult, apply_gate, check_gate
-from baton.git import PLAN_FILENAME, GitError, dirty_paths, handoff_context, head
+from baton.git import (
+    PLAN_FILENAME,
+    GitError,
+    branch_exists,
+    commit_all,
+    current_branch,
+    dirty_paths,
+    handoff_context,
+    head,
+    milestone_branch,
+    switch_branch,
+    worktree_path_for,
+)
+from baton.git import push as git_push
 from baton.limits import LimitStateError, LimitStore
+from baton.milestone import sync_milestone
 from baton.plan import (
     Plan,
     PlanError,
@@ -38,8 +54,10 @@ from baton.review import (
     review_context,
     run_isolated_review,
 )
+from baton.roadmap import RoadmapError
 from baton.router import Route, resolve_route
 from baton.verify import VerifyResult, run_verify
+from baton.worktree import ensure_worktree, mirror_plan
 
 EXIT_OK = 0
 EXIT_FAILED = 1  # agent, verify or plan problem; changes stay in the tree
@@ -110,11 +128,16 @@ def _report_success(
     verify: VerifyResult,
     cost: float | None,
     review: ReviewResult | None = None,
+    *,
+    changed: list[str] | None = None,
+    committed: str | None = None,
+    notice: str | None = None,
+    pushed: str | None = None,
 ) -> None:
     _say(out)
     _say(out, f"Step {step.number}/{len(plan.steps)} done: {step.message}")
     _say(out, "Changed:")
-    for path in dirty_paths(repo):
+    for path in dirty_paths(repo) if changed is None else changed:
         _say(out, f"  {path}")
     _say(out, "Checks:")
     if verify.verified:
@@ -136,15 +159,47 @@ def _report_success(
                 if finding.line is not None:
                     location += f":{finding.line}"
                 _say(out, f"    {location + ': ' if location else ''}{finding.message}")
-    _say(out, "Review: `git diff`")
-    _say(out, "Commit:")
-    _commit_hint(out, step.message)
+    if committed is not None:
+        _say(out, f"Committed: {committed} {step.message}")
+        if pushed:
+            _say(out, f"Pushed: {pushed}")
+        if notice:
+            _say(out, notice)
+    else:
+        if notice:
+            _say(out, notice)
+        _say(out, "Review: `git diff`")
+        _say(out, "Commit:")
+        _commit_hint(out, step.message)
     following = next((s for s in plan.steps if s.number > step.number and s.status == "open"), None)
     if following:
-        _say(out, f"Next: after committing, run `baton next` for step {following.number}:")
+        when = "" if committed is not None else "after committing, "
+        _say(out, f"Next: {when}run `baton next` for step {following.number}:")
         _say(out, f"  {following.message}")
     else:
-        _say(out, "Next: last open step. After committing, run `baton next` once more.")
+        if committed is not None:
+            _say(out, "Next: that was the last step; run `baton next` once more to finish.")
+        else:
+            _say(out, "Next: last open step. After committing, run `baton next` once more.")
+
+
+def _enter_branch(repo: Path, plan: Plan, out: TextIO) -> bool:
+    """Make the milestone branch current (creating it from HEAD); False if the tree is dirty."""
+    branch = milestone_branch(plan)
+    if current_branch(repo) == branch:
+        _say(out, f"Branch: {branch}")
+        return True
+    dirty = dirty_paths(repo)
+    if dirty:
+        _say(out, f"Cannot switch to {branch}: the working tree has uncommitted changes.")
+        for path in dirty:
+            _say(out, f"  {path}")
+        _say(out, "Commit or stash them, then run `baton next --commit` again.")
+        return False
+    exists = branch_exists(repo, branch)
+    switch_branch(repo, branch, create=not exists)
+    _say(out, f"Branch: {branch} ({'switched to' if exists else 'created from ' + head(repo)})")
+    return True
 
 
 def _verify_failure(verify: VerifyResult) -> str:
@@ -162,17 +217,50 @@ def run_next(
     verify_timeout: float = DEFAULT_VERIFY_TIMEOUT,
     override: bool = False,
     today: str | None = None,
+    commit: bool = False,
+    push: bool = False,
+    worktree: bool = False,
 ) -> int:
     """Implement the first open step of ``repo``'s plan; returns the process exit code."""
-    return _run_next(
+    return _with_worktree(
         repo,
-        lambda step: adapter,
+        worktree,
         out,
-        agent_timeout=agent_timeout,
-        verify_timeout=verify_timeout,
-        override=override,
-        today=today,
+        lambda work: _run_next(
+            work,
+            lambda step: adapter,
+            out,
+            agent_timeout=agent_timeout,
+            verify_timeout=verify_timeout,
+            override=override,
+            today=today,
+            commit=commit or worktree,
+            push=push,
+        ),
     )
+
+
+def _with_worktree(repo: Path, enabled: bool, out: TextIO, run: Callable[[Path], int]) -> int:
+    """Run ``run`` in the milestone worktree of ``repo`` (if ``enabled``), then mirror the plan."""
+    if not enabled:
+        return run(repo)
+    plan_path = repo / PLAN_FILENAME
+    try:
+        if not plan_path.is_file():
+            _say(out, f"No {PLAN_FILENAME} in {repo}. Create one with `/plan-commits <task>`.")
+            return EXIT_STOPPED
+        work, created = ensure_worktree(repo, parse_plan(plan_path.read_text(encoding="utf-8")))
+    except (GitError, PlanError, OSError) as exc:
+        _say(out, f"Error: {exc}")
+        return EXIT_FAILED
+    _say(out, f"Worktree: {work} ({'created' if created else 'reused'})")
+    try:
+        return run(work)
+    finally:
+        try:
+            mirror_plan(work, repo)
+        except OSError as exc:
+            _say(out, f"Could not mirror {PLAN_FILENAME} back to {repo}: {exc}")
 
 
 def _run_next(
@@ -186,7 +274,10 @@ def _run_next(
     today: str | None = None,
     select_fix: Callable[[Step, bool], Adapter | None] | None = None,
     review_step: Callable[[Plan, Step, str], ReviewResult | None] | None = None,
+    commit: bool = False,
+    push: bool = False,
 ) -> int:
+    commit = commit or push
     date = today or datetime.date.today().isoformat()
     plan_path = repo / PLAN_FILENAME
     try:
@@ -208,6 +299,8 @@ def _run_next(
             return EXIT_STOPPED
 
         _say(out, f"Step {step.number}/{len(plan.steps)}: {step.message}")
+        if commit and not _enter_branch(repo, plan, out):
+            return EXIT_STOPPED
         adapter = select_adapter(step)
         raw_step = step_text(plan_path.read_text("utf-8"), step)
         prompt = implement_prompt(plan, step, raw_step)
@@ -279,6 +372,33 @@ def _run_next(
                 _log(plan_path, f"step {step.number}: independent review failed ({exc})", date)
                 return EXIT_FAILED
 
+        changed = dirty_paths(repo)
+        committed = None
+        notice = None
+        problem = None
+        if commit:
+            if review is not None and any(f.severity == "critical" for f in review.findings):
+                problem = "critical review findings"
+                notice = "Auto-commit blocked by critical review findings; decide manually."
+            else:
+                try:
+                    sync_milestone(repo, plan, step, date)
+                    committed = commit_all(repo, step.message)
+                except (RoadmapError, GitError) as exc:
+                    problem = f"commit failed ({exc})"
+                    notice = f"Auto-commit failed: {exc}\nChanges stay staged; the step stays [~]."
+
+        push_problem = None
+        pushed = None
+        if push and committed is not None:
+            try:
+                branch = current_branch(repo)
+                git_push(repo, branch)
+                pushed = f"origin/{branch}"
+            except GitError as exc:
+                push_problem = " ".join(str(exc).split())
+                notice = f"Push failed: {push_problem}\nThe commit stays; push manually when ready."
+
         # Re-read: the agent may have touched the plan file despite the rules.
         text = plan_path.read_text(encoding="utf-8")
         text = set_step_status(text, step.number, "pending", after)
@@ -287,18 +407,44 @@ def _run_next(
             note += f" after {repairs} repair attempts"
         if review is not None:
             note += f"; {review.summary()}"
-        text = append_log(text, f"{date}: step {step.number} {note}, waiting for commit.")
+        if committed is not None:
+            text = set_step_status(text, step.number, "done", committed)
+            text = append_log(text, f"{date}: step {step.number} {note}, committed ({committed}).")
+            if push_problem is not None:
+                text = append_log(text, f"{date}: step {step.number} push failed: {push_problem}.")
+        elif problem is not None:
+            text = append_log(text, f"{date}: step {step.number} {note}; auto-commit: {problem}.")
+        else:
+            text = append_log(text, f"{date}: step {step.number} {note}, waiting for commit.")
         save_plan(plan_path, text)
     except (ConfigError, GitError, LimitStateError, PlanError, OSError) as exc:
         _say(out, f"Error: {exc}")
         return EXIT_FAILED
 
-    _report_success(out, plan, step, repo, verify, result.cost, review)
-    return EXIT_OK
+    _report_success(
+        out,
+        plan,
+        step,
+        repo,
+        verify,
+        result.cost,
+        review,
+        changed=changed,
+        committed=committed,
+        notice=notice,
+        pushed=pushed,
+    )
+    return EXIT_FAILED if problem or push_problem else EXIT_OK
 
 
 def _dry_run(
-    repo: Path, select_adapter: Callable[[Step], CommandAdapter | _RoutedAdapter], out: TextIO
+    repo: Path,
+    select_adapter: Callable[[Step], CommandAdapter | _RoutedAdapter],
+    out: TextIO,
+    *,
+    commit: bool = False,
+    push: bool = False,
+    worktree: bool = False,
 ) -> int:
     """Print the prompt and argv for the first open step; change nothing."""
     plan_path = repo / PLAN_FILENAME
@@ -320,6 +466,18 @@ def _dry_run(
         return EXIT_STOPPED
     prompt = implement_prompt(plan, step, step_text(text, step))
     _say(out, f"Step {step.number}/{len(plan.steps)}: {step.message}")
+    if commit:
+        branch = milestone_branch(plan)
+        if current_branch(repo) == branch:
+            state = "current"
+        else:
+            state = "exists, would switch" if branch_exists(repo, branch) else "would be created"
+        _say(out, f"Branch: {branch} ({state})")
+        if worktree:
+            path = worktree_path_for(repo, branch)
+            _say(out, f"Worktree: {path} ({'exists' if path.is_dir() else 'would be created'})")
+        if push:
+            _say(out, f"Would push: origin {branch}")
     adapter = select_adapter(step)
     _say(out, "Command (cwd = repo root):")
     _say(out, "  " + " ".join(shlex.quote(a) for a in adapter.argv("<prompt>")))
@@ -420,6 +578,9 @@ def run_next_command(
     agent_timeout: float = DEFAULT_AGENT_TIMEOUT,
     verify_timeout: float = DEFAULT_VERIFY_TIMEOUT,
     dry_run: bool = False,
+    commit: bool = False,
+    push: bool = False,
+    worktree: bool = False,
     out: TextIO | None = None,
 ) -> int:
     """CLI entry: select an agent for the step being run or previewed."""
@@ -427,6 +588,7 @@ def run_next_command(
 
     config = None
     implementation = None
+    active = repo  # the checkout the agent works in: ``repo`` or its milestone worktree
 
     def select_adapter(step: Step) -> _RoutedAdapter:
         nonlocal config, implementation
@@ -458,10 +620,10 @@ def run_next_command(
             authors=tuple(implementation.attempted_agents),
         )
         reviewer = _RoutedAdapter(route, implementation.store, out, review=True)
-        before = head(repo)
-        changes = review_context(repo)
-        result = reviewer.run(review_prompt(plan, step, raw_step, changes), repo, agent_timeout)
-        if head(repo) != before or review_context(repo) != changes:
+        before = head(active)
+        changes = review_context(active)
+        result = reviewer.run(review_prompt(plan, step, raw_step, changes), active, agent_timeout)
+        if head(active) != before or review_context(active) != changes:
             raise ReviewError("Candidate changed during review; review is stale")
         if not result.ok:
             raise ReviewError(result.error)
@@ -469,16 +631,31 @@ def run_next_command(
 
     if dry_run:
         try:
-            return _dry_run(repo, select_adapter, out)
+            return _dry_run(
+                repo,
+                select_adapter,
+                out,
+                commit=commit or push or worktree,
+                push=push,
+                worktree=worktree,
+            )
         except (ConfigError, GitError, LimitStateError, PlanError, OSError) as exc:
             _say(out, f"Error: {exc}")
             return EXIT_FAILED
-    return _run_next(
-        repo,
-        select_adapter,
-        out,
-        agent_timeout=agent_timeout,
-        verify_timeout=verify_timeout,
-        select_fix=select_fix,
-        review_step=review_step,
-    )
+
+    def run_in(work: Path) -> int:
+        nonlocal active
+        active = work
+        return _run_next(
+            work,
+            select_adapter,
+            out,
+            agent_timeout=agent_timeout,
+            verify_timeout=verify_timeout,
+            select_fix=select_fix,
+            review_step=review_step,
+            commit=commit or worktree,
+            push=push,
+        )
+
+    return _with_worktree(repo, worktree, out, run_in)

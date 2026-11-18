@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from baton.adapter import AgentResult
-from baton.git import head
+from baton.git import head, worktree_path_for
 from baton.next import EXIT_FAILED, EXIT_OK, EXIT_STOPPED, run_next, run_next_command
 from baton.plan import parse_plan
 
@@ -1068,3 +1068,363 @@ M=["limited", "fixer", "implementer", "strong", "reviewer"]
     assert plan_of(repo).steps[0].status == "pending"
     assert "after 2 repair attempts; review reviewer: critical=0" in plan_of(repo).log[-1]
     assert head(repo) == before
+
+
+@pytest.fixture
+def git_identity(monkeypatch):
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_NAME", "t")
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", "t@example.com")
+
+
+def _log_subjects(repo: Path) -> list[str]:
+    out = subprocess.run(
+        ["git", "-C", str(repo), "log", "--format=%s"], check=True, capture_output=True, text=True
+    )
+    return out.stdout.splitlines()
+
+
+def test_commit_flag_commits_with_step_message(repo, git_identity) -> None:
+    before = head(repo)
+    code, out = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_OK
+    assert head(repo) != before
+    assert _log_subjects(repo)[:2] == ["feat: first", "init"]
+    step = plan_of(repo).steps[0]
+    assert step.status == "done" and step.commit == head(repo)
+    assert f"Committed: {head(repo)} feat: first" in out
+    assert "git commit" not in out
+    assert "run `baton next` for step 2" in out
+    tracked = subprocess.run(
+        ["git", "-C", str(repo), "ls-files"], check=True, capture_output=True, text=True
+    ).stdout.split()
+    assert "new.txt" in tracked and ".agent-plan.md" not in tracked
+    assert "committed (" in plan_of(repo).log[-1]
+
+
+def test_commit_flag_without_verify_command(repo, git_identity) -> None:
+    write_plan(repo, verify="")
+    code, out = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_OK and "not verified" in out
+    assert plan_of(repo).steps[0].status == "done"
+
+
+def test_without_commit_flag_behaviour_is_unchanged(repo, git_identity) -> None:
+    before = head(repo)
+    code, out = run(repo, FakeAdapter(action=edit))
+    assert code == EXIT_OK and head(repo) == before
+    assert plan_of(repo).steps[0].status == "pending"
+    assert "git commit -m" in out
+
+
+def test_failed_verify_does_not_commit(repo, git_identity) -> None:
+    write_plan(repo, verify="false")
+    before = head(repo)
+    code, _ = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_FAILED and head(repo) == before
+    assert plan_of(repo).steps[0].status == "open"
+
+
+def test_critical_finding_blocks_auto_commit(repo, chain, git_identity, capsys) -> None:
+    import json
+
+    from baton.cli import main
+
+    config, agents = chain
+    agents["first"].action = edit
+    findings = [{"severity": "critical", "message": "data loss"}]
+    agents["reviewer"].result = AgentResult(ok=True, text=json.dumps({"findings": findings}))
+    before = head(repo)
+    argv = ["--config", str(config), "next", "--path", str(repo), "--commit"]
+    assert main(argv) == EXIT_FAILED
+    out = capsys.readouterr().out
+    assert "blocked by critical review findings" in out
+    assert head(repo) == before
+    assert plan_of(repo).steps[0].status == "pending"
+    assert "auto-commit: critical review findings" in plan_of(repo).log[-1]
+
+
+def test_warning_finding_does_not_block_auto_commit(repo, chain, git_identity, capsys) -> None:
+    import json
+
+    from baton.cli import main
+
+    config, agents = chain
+    agents["first"].action = edit
+    findings = [{"severity": "warning", "message": "edge case"}]
+    agents["reviewer"].result = AgentResult(ok=True, text=json.dumps({"findings": findings}))
+    argv = ["--config", str(config), "next", "--path", str(repo), "--commit"]
+    assert main(argv) == EXIT_OK
+    assert "WARNING:" in capsys.readouterr().out
+    assert plan_of(repo).steps[0].status == "done"
+    assert _log_subjects(repo)[0] == "feat: first"
+
+
+def test_failing_pre_commit_hook_leaves_step_pending(repo, git_identity) -> None:
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\necho nope >&2\nexit 1\n")
+    hook.chmod(0o755)
+    before = head(repo)
+    code, out = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_FAILED and head(repo) == before
+    assert "Auto-commit failed" in out and "nope" in out
+    step = plan_of(repo).steps[0]
+    assert step.status == "pending" and step.pending_on == before
+    assert "auto-commit: commit failed" in plan_of(repo).log[-1]
+
+
+def test_commit_flag_second_run_continues_after_auto_commit(repo, git_identity) -> None:
+    run(repo, FakeAdapter(action=edit), commit=True)
+    code, out = run(
+        repo, FakeAdapter(action=lambda r: (r / "b.txt").write_text("b\n")), commit=True
+    )
+    assert code == EXIT_OK and "Step 2/2" in out
+    assert _log_subjects(repo)[:2] == ["feat: second", "feat: first"]
+    assert [s.status for s in plan_of(repo).steps] == ["done", "done"]
+
+
+def _files_of(repo: Path, rev: str) -> list[str]:
+    out = subprocess.run(
+        ["git", "-C", str(repo), "show", "--name-only", "--format=", rev],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.split()
+
+
+def test_roadmap_changes_only_in_first_and_last_commit(repo, git_identity) -> None:
+    (repo / ".git" / "info" / "exclude").write_text(".agent-plan.md\n")
+    (repo / "docs").mkdir()
+    roadmap = repo / "docs" / "ROADMAP.md"
+    roadmap.write_text("# Roadmap: Demo\n\n## Milestones\n\n### M1 [ ] First\n- **Goal:** g\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "roadmap")
+    plan = (repo / ".agent-plan.md").read_text()
+    tracked = "Milestone: M1 – First (docs/ROADMAP.md, tracked)"
+    (repo / ".agent-plan.md").write_text(plan.replace("Milestone: none", tracked))
+
+    code, out = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_OK, out
+    assert "docs/ROADMAP.md" in _files_of(repo, "HEAD")
+    assert "### M1 [~] First" in roadmap.read_text()
+
+    code, _ = run(repo, FakeAdapter(action=lambda r: (r / "b.txt").write_text("b\n")), commit=True)
+    assert code == EXIT_OK
+    assert "docs/ROADMAP.md" in _files_of(repo, "HEAD")
+    assert "### M1 [x] First" in roadmap.read_text()
+    assert "M1 done (Demo)" in roadmap.read_text()
+    dirty = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True
+    ).stdout
+    assert dirty == ""
+
+
+def test_missing_tracked_roadmap_blocks_commit(repo, git_identity) -> None:
+    plan = (repo / ".agent-plan.md").read_text()
+    tracked = "Milestone: M1 – First (docs/ROADMAP.md, tracked)"
+    (repo / ".agent-plan.md").write_text(plan.replace("Milestone: none", tracked))
+    before = head(repo)
+    code, out = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_FAILED and head(repo) == before
+    assert "roadmap docs/ROADMAP.md not found" in out
+    assert plan_of(repo).steps[0].status == "pending"
+
+
+def _branch(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "branch", "--show-current"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _commit_count(repo: Path, ref: str) -> int:
+    return int(
+        subprocess.run(
+            ["git", "-C", str(repo), "rev-list", "--count", ref],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+
+
+def test_commit_creates_milestone_branch_and_leaves_base_untouched(repo, git_identity) -> None:
+    base = _branch(repo)
+    base_head = head(repo)
+    code, out = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_OK
+    assert _branch(repo) == "baton/demo"
+    assert f"Branch: baton/demo (created from {base_head})" in out
+    code, out = run(
+        repo, FakeAdapter(action=lambda r: (r / "b.txt").write_text("b\n")), commit=True
+    )
+    assert code == EXIT_OK and "Branch: baton/demo\n" in out
+    assert _commit_count(repo, "baton/demo") == _commit_count(repo, base) + 2
+    base_now = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--short", base], capture_output=True, text=True
+    ).stdout.strip()
+    assert base_now == base_head
+
+
+def test_commit_switches_to_existing_milestone_branch(repo, git_identity) -> None:
+    base = _branch(repo)
+    git(repo, "branch", "baton/demo")
+    code, out = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_OK and "Branch: baton/demo (switched to)" in out
+    assert _branch(repo) == "baton/demo" and _commit_count(repo, base) == 1
+
+
+def test_dirty_tree_never_leads_to_a_branch_switch(repo, git_identity) -> None:
+    base = _branch(repo)
+    (repo / "wip.txt").write_text("wip\n")
+    adapter = FakeAdapter(action=edit)
+    code, _ = run(repo, adapter, commit=True)
+    assert code == EXIT_STOPPED and _branch(repo) == base and not adapter.prompts
+
+
+def test_enter_branch_refuses_dirty_tree(repo) -> None:
+    from baton.next import _enter_branch
+
+    (repo / "wip.txt").write_text("wip\n")
+    base = _branch(repo)
+    out = io.StringIO()
+    assert _enter_branch(repo, plan_of(repo), out) is False
+    assert "wip.txt" in out.getvalue() and "Cannot switch to baton/demo" in out.getvalue()
+    assert _branch(repo) == base
+
+
+def test_dirty_tree_is_fine_when_already_on_milestone_branch(repo, git_identity) -> None:
+    git(repo, "switch", "-c", "baton/demo")
+    code, _ = run(repo, FakeAdapter(action=edit), commit=True)
+    assert code == EXIT_OK and _branch(repo) == "baton/demo"
+
+
+def test_without_commit_flag_no_branch_is_created(repo, git_identity) -> None:
+    base = _branch(repo)
+    run(repo, FakeAdapter(action=edit))
+    assert _branch(repo) == base
+
+
+def test_dry_run_with_commit_shows_target_branch_without_creating_it(
+    repo, chain, git_identity
+) -> None:
+    from baton.adapter import ClaudeAdapter
+
+    chain[1]["first"] = ClaudeAdapter()
+    base = _branch(repo)
+    code, out = invoke_chain(repo, chain, dry_run=True, commit=True)
+    assert code == EXIT_OK and "Branch: baton/demo (would be created)" in out
+    assert _branch(repo) == base
+
+
+def _remote(repo: Path, tmp_path: Path) -> Path:
+    bare = tmp_path.parent / f"{tmp_path.name}-remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True)
+    git(repo, "remote", "add", "origin", str(bare))
+    return bare
+
+
+def _rev(repo: Path, ref: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", ref], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def test_push_implies_commit_and_updates_remote(repo, tmp_path, git_identity) -> None:
+    bare = _remote(repo, tmp_path)
+    code, out = run(repo, FakeAdapter(action=edit), push=True)
+    assert code == EXIT_OK
+    assert _log_subjects(repo)[0] == "feat: first"
+    assert _rev(bare, "baton/demo") == _rev(repo, "HEAD")
+    assert "Pushed: origin/baton/demo" in out
+
+
+def test_push_after_each_run_keeps_remote_equal_to_head(repo, tmp_path, git_identity) -> None:
+    bare = _remote(repo, tmp_path)
+    run(repo, FakeAdapter(action=edit), push=True)
+    run(repo, FakeAdapter(action=lambda r: (r / "two.txt").write_text("2\n")), push=True)
+    assert _rev(bare, "baton/demo") == _rev(repo, "HEAD")
+    assert _log_subjects(repo)[:2] == ["feat: second", "feat: first"]
+
+
+def test_push_failure_keeps_commit_and_done_status(repo, git_identity) -> None:
+    code, out = run(repo, FakeAdapter(action=edit), push=True)
+    assert code == EXIT_FAILED
+    assert _log_subjects(repo)[0] == "feat: first"
+    step = plan_of(repo).steps[0]
+    assert step.status == "done" and step.commit == head(repo)
+    assert "Push failed" in out and "Committed:" in out
+    assert "push failed" in plan_of(repo).log[-1]
+
+
+def test_blocked_commit_is_not_pushed(repo, tmp_path, git_identity) -> None:
+    bare = _remote(repo, tmp_path)
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    code, _ = run(repo, FakeAdapter(action=edit), push=True)
+    assert code == EXIT_FAILED
+    assert subprocess.run(["git", "-C", str(bare), "branch"], capture_output=True).stdout == b""
+
+
+def test_dry_run_with_push_shows_remote_branch(repo, chain, git_identity) -> None:
+    from baton.adapter import ClaudeAdapter
+
+    chain[1]["first"] = ClaudeAdapter()
+    code, out = invoke_chain(repo, chain, dry_run=True, push=True)
+    assert code == EXIT_OK and "Would push: origin baton/demo" in out
+
+
+def test_worktree_run_commits_on_branch_and_leaves_main_checkout_alone(repo, git_identity) -> None:
+    base = _branch(repo)
+    base_head = head(repo)
+    code, out = run(repo, FakeAdapter(action=edit), worktree=True)
+    assert code == EXIT_OK and "Worktree:" in out and "(created)" in out
+    work = worktree_path_for(repo, "baton/demo")
+    assert _branch(repo) == base and head(repo) == base_head
+    assert not (repo / "new.txt").exists()
+    assert _branch(work) == "baton/demo" and _log_subjects(work)[0] == "feat: first"
+    assert plan_of(repo).steps[0].status == "done"  # mirrored back for `baton status`
+    assert plan_of(repo).steps[0].commit == head(work)
+
+
+def test_worktree_is_reused_by_the_next_run(repo, git_identity) -> None:
+    run(repo, FakeAdapter(action=edit), worktree=True)
+    code, out = run(
+        repo, FakeAdapter(action=lambda r: (r / "b.txt").write_text("b\n")), worktree=True
+    )
+    work = worktree_path_for(repo, "baton/demo")
+    assert code == EXIT_OK and "(reused)" in out
+    assert _log_subjects(work)[:2] == ["feat: second", "feat: first"]
+    assert plan_of(repo).steps[1].status == "done"
+
+
+def test_worktree_dirty_main_checkout_is_not_a_problem(repo, git_identity) -> None:
+    (repo / "wip.txt").write_text("wip\n")
+    code, _ = run(repo, FakeAdapter(action=edit), worktree=True)
+    assert code == EXIT_OK and (repo / "wip.txt").read_text() == "wip\n"
+
+
+def test_worktree_refuses_branch_checked_out_in_main(repo, git_identity) -> None:
+    git(repo, "switch", "-c", "baton/demo")
+    adapter = FakeAdapter(action=edit)
+    code, out = run(repo, adapter, worktree=True)
+    assert code == EXIT_FAILED and "Error:" in out and not adapter.prompts
+
+
+def test_worktree_without_plan(tmp_path, git_identity) -> None:
+    code, out = run(tmp_path, FakeAdapter(), worktree=True)
+    assert code == EXIT_STOPPED and ".agent-plan.md" in out
+
+
+def test_dry_run_with_worktree_shows_path_without_creating_it(repo, chain, git_identity) -> None:
+    from baton.adapter import ClaudeAdapter
+
+    chain[1]["first"] = ClaudeAdapter()
+    code, out = invoke_chain(repo, chain, dry_run=True, worktree=True)
+    work = worktree_path_for(repo, "baton/demo")
+    assert code == EXIT_OK and f"Worktree: {work} (would be created)" in out
+    assert not work.exists()

@@ -88,6 +88,21 @@ def build_parser() -> argparse.ArgumentParser:
     nxt.add_argument(
         "--dry-run", action="store_true", help="print the command and prompt, change nothing"
     )
+    nxt.add_argument(
+        "--commit",
+        action="store_true",
+        help="commit a verified step with the plan's message (blocked by critical findings)",
+    )
+    nxt.add_argument(
+        "--push",
+        action="store_true",
+        help="implies --commit; push the milestone branch to origin after each commit",
+    )
+    nxt.add_argument(
+        "--worktree",
+        action="store_true",
+        help="implies --commit; work in a dedicated git worktree of the milestone branch",
+    )
     return parser
 
 
@@ -125,6 +140,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             agent_timeout=args.timeout,
             verify_timeout=args.verify_timeout,
             dry_run=args.dry_run,
+            commit=args.commit,
+            push=args.push,
+            worktree=args.worktree,
         )
     if args.command == "recheck":
         return run_recheck_command(args.agent, config_path=args.config, timeout=args.timeout)
