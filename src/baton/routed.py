@@ -66,6 +66,10 @@ class RoutedAdapter:
             "tree for an open step."
         )
 
+    def _handoff(self, prompt: str, previous: str, repo: Path) -> str:
+        """The prompt for the successor of a limited agent."""
+        return handoff_prompt(prompt, previous, handoff_context(repo))
+
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
         before = None if self.review else head(repo)
         previous = None
@@ -73,7 +77,7 @@ class RoutedAdapter:
             self._announce(agent)
             current_prompt = prompt
             if previous is not None and not self.review:
-                current_prompt = handoff_prompt(prompt, previous, handoff_context(repo))
+                current_prompt = self._handoff(prompt, previous, repo)
             adapter = make_adapter(agent)
             self.attempted_agents.append(agent)
             result = (

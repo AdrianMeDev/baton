@@ -10,8 +10,10 @@ from baton.git import (
     commit_all,
     current_branch,
     dirty_paths,
+    ensure_excluded,
     head,
     is_repo,
+    is_tracked,
     milestone_branch,
     push,
     switch_branch,
@@ -214,3 +216,18 @@ def test_commit_all_with_gitignored_plan_file(repo: Path) -> None:
         ["git", "-C", str(tmp_path), "ls-files"], check=True, capture_output=True, text=True
     ).stdout.split()
     assert "f.txt" in tracked and ".agent-plan.md" not in tracked
+
+
+def test_is_tracked(repo: Path) -> None:
+    (repo / "new.txt").write_text("n\n")
+    assert is_tracked(repo, "a.txt")
+    assert not is_tracked(repo, "new.txt")
+    assert not is_tracked(repo, "missing.txt")
+
+
+def test_ensure_excluded_appends_once(repo: Path) -> None:
+    exclude = repo / ".git" / "info" / "exclude"
+    exclude.write_text("# comment", encoding="utf-8")
+    assert ensure_excluded(repo) is True
+    assert ensure_excluded(repo) is False
+    assert exclude.read_text(encoding="utf-8") == "# comment\n.agent-plan.md\n"
