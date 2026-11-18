@@ -96,7 +96,7 @@ class MilestoneHooks:
     next: Callable[[bool], int]  # argument: resume from a partial diff
     pr: Callable[[bool], tuple[int, str]]  # argument: merge; returns (exit code, output)
     # Blocks while every agent of the role's route is in cooldown; arguments: role, size S/M/L.
-    wait: Callable[[str, str | None], Literal["ready", "stopped"]]
+    wait: Callable[[str, str | None], str]  # ready, stopped, or budget reset diagnostic
     now: Callable[[], datetime]
     after_merge: Callable[[Path, Plan], str | None] | None = None
 
@@ -186,7 +186,9 @@ def run_milestone(
             say(out, f"Step {step.number}/{len(plan.steps)}: {step.message}")
             code = hooks.next(resume)
             if code == EXIT_EXHAUSTED:
-                if hooks.wait("implement", step.size) == "stopped":
+                if (waiting := hooks.wait("implement", step.size)) != "ready":
+                    if waiting != "stopped":
+                        return stop(waiting, milestone)
                     return stop("stop requested while waiting for a cooldown", milestone)
                 continue
             if code == EXIT_ROADMAP_PROBLEM:
@@ -287,7 +289,9 @@ def _plan_next(
         if code == EXIT_OK:
             break
         if code == EXIT_EXHAUSTED:
-            if hooks.wait("plan_commits", milestone.size) == "stopped":
+            if (waiting := hooks.wait("plan_commits", milestone.size)) != "ready":
+                if waiting != "stopped":
+                    return MilestoneResult("stopped", milestone.id, waiting)
                 return MilestoneResult(
                     "stopped", milestone.id, "stop requested while waiting for a cooldown"
                 )
@@ -329,8 +333,20 @@ def default_hooks(
         buffer = io.StringIO()
         return run_pr(repo, merge=merge, out=buffer), buffer.getvalue()
 
-    def wait(role: str, size: str | None) -> Literal["ready", "stopped"]:
-        names = [a.name for a in resolve_route(config, role, step_size=size).agents]
+    def wait(role: str, size: str | None) -> str:
+        from baton.runs import RunStore, budget_reset_message, daily_counts
+
+        agents = resolve_route(config, role, step_size=size).agents
+        counts = daily_counts(RunStore().read(), now())
+        capped = [
+            a
+            for a in agents
+            if a.daily_run_budget is not None and counts.get(a.name, 0) >= a.daily_run_budget
+        ]
+        cooling = LimitStore().active(now=now())
+        if capped and all(a in capped or a.name in cooling for a in agents):
+            return budget_reset_message()
+        names = [a.name for a in agents if a not in capped]
         return wait_for_reset(
             names,
             LimitStore(),

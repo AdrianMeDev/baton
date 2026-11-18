@@ -509,3 +509,53 @@ def test_resume_after_merge_before_fast_forward(loop):
     loop.pr_result = (EXIT_OK, "Already merged: https://example.test/pr/1\n")
     assert loop.auto() == 0
     assert loop.merged[0] == "M1"
+
+
+@pytest.mark.parametrize("planning", [False, True])
+def test_daily_budget_stops_auto_with_resume_diagnostic(world, planning):
+    diagnostic = (
+        "Daily run budget exhausted; resets at 2026-11-19T00:00:00+00:00 (UTC). Resume after reset."
+    )
+    world.wait_result = diagnostic
+    if planning:
+        world.plan_codes = [EXIT_EXHAUSTED]
+    else:
+        world.write_plan()
+        world.next_codes = [EXIT_EXHAUSTED]
+    result = world.run()
+    assert result.outcome == "stopped"
+    assert result.reason == diagnostic
+    assert not world.pr_calls
+
+
+def test_real_wait_detects_mixed_budget_and_cooldown(world):
+    from baton.auto import default_hooks
+    from baton.config import AgentConfig, Config, ConfigLocation
+    from baton.limits import LimitStore
+    from baton.runs import RunStore
+
+    a = AgentConfig("a", "claude", "fake", daily_run_budget=1)
+    b = AgentConfig("b", "codex", "fake")
+    config = Config(
+        ConfigLocation(world.repo / "config.toml", "flag"),
+        agents={"a": a, "b": b},
+        routes={"implement": {"M": ["a", "b"]}},
+    )
+    RunStore().dispatch("a", now=NOW)
+    LimitStore().set("b", NOW + timedelta(hours=1))
+
+    def no_sleep(_):
+        pytest.fail("budget exhaustion should stop without waiting")
+
+    hooks = default_hooks(
+        world.repo,
+        config,
+        None,
+        agent_timeout=10,
+        verify_timeout=10,
+        now=lambda: NOW,
+        sleep=no_sleep,
+        store=world.store,
+        out=world.out,
+    )
+    assert "Daily run budget exhausted" in hooks.wait("implement", "M")

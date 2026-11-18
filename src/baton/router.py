@@ -85,3 +85,14 @@ def _eligible_reviewers(
             f"select a reviewer with a known provider other than {', '.join(sorted(providers))}"
         )
     return eligible
+
+
+def select_by_weight(agents, counts, *, weighted):
+    """Stable route-order ties and exact ratios, without floating point rounding."""
+    from fractions import Fraction
+
+    if not agents:
+        return None
+    if not weighted:
+        return agents[0]
+    return min(agents, key=lambda a: Fraction(counts.get(a.name, 0), a.weight or 1))

@@ -200,3 +200,14 @@ def test_unknown_reviewer_cannot_be_selected(config, provider):
     changed = Config(config.location, {**config.agents, "unknown": unknown}, config.routes)
     with pytest.raises(ConfigError, match="no eligible reviewer"):
         resolve_route(changed, "review", agent_name="unknown", authors=(CLAUDE,))
+
+
+def test_weight_selection_and_stable_ties():
+    from baton.config import AgentConfig
+    from baton.router import select_by_weight
+
+    a = AgentConfig("a", "claude", "claude", weight=2)
+    b = AgentConfig("b", "codex", "codex")
+    assert select_by_weight([a, b], {"a": 2, "b": 1}, weighted=True) == a
+    assert select_by_weight([a, b], {"a": 3, "b": 1}, weighted=True) == b
+    assert select_by_weight([a, b], {"a": 3, "b": 1}, weighted=False) == a

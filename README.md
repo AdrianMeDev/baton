@@ -411,3 +411,44 @@ Live acceptance (use a designated disposable GitHub test repository):
 
 Offline CLI acceptance runs with `uv run pytest -q tests/test_pr_acceptance.py`;
 it uses temporary repositories, a bare push destination and a stateful fake `gh`.
+
+### Usage statistics
+
+`baton stats` reads the shared XDG state journal across repositories, grouped by
+configured agent name (including removed agents). It counts routed planning,
+implementation, fix and review attempts, including failures, retries and handoffs.
+Probes, rechecks, previews and cooldown skips do not count.
+
+```text
+Agent  Attempts  Seconds  Tokens
+claude  3  45.100  12000 (partial; 1 unknown)
+```
+
+Seconds are summed process durations; tokens are provider-reported totals. Cache
+and reasoning breakdowns are counted once. Unknown measurements are explicit;
+partial totals sum the known values. Interrupted attempts still count. The journal
+contains usage metadata only, without prompts, output or diffs.
+
+Configure allowances and distribution inside each `[agents.NAME]` table:
+
+```toml
+[agents.fast]
+adapter = "claude"
+command = "claude"
+daily_run_budget = 100
+weight = 2
+```
+
+`daily_run_budget` is an optional positive integer; omission means unlimited.
+Each dispatch reserves a slot, even if interrupted. A pinned agent also obeys its
+cap. Budgets and distribution counts reset at midnight UTC. Exhaustion reports
+the next reset; auto stops so it can be resumed later.
+
+`weight` is an optional positive integer. If any route member has an explicit
+weight, baton chooses the eligible agent with the lowest daily attempt count
+divided by its weight. Other members use weight 1; ties follow route order.
+Weights 2 and 1 give four and two starts over six eligible attempts. Daily counts
+include all routed roles and repositories for the same agent name. Without any
+explicit weights, routes retain their configured order. Cooldowns, budget caps
+and reviewer provider exclusions still apply. Selection and slot reservation
+share a lock across baton processes.
