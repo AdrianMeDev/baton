@@ -93,6 +93,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="commit a verified step with the plan's message (blocked by critical findings)",
     )
+    nxt.add_argument(
+        "--push",
+        action="store_true",
+        help="implies --commit; push the milestone branch to origin after each commit",
+    )
     return parser
 
 
@@ -131,6 +136,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             verify_timeout=args.verify_timeout,
             dry_run=args.dry_run,
             commit=args.commit,
+            push=args.push,
         )
     if args.command == "recheck":
         return run_recheck_command(args.agent, config_path=args.config, timeout=args.timeout)

@@ -1318,3 +1318,61 @@ def test_dry_run_with_commit_shows_target_branch_without_creating_it(
     code, out = invoke_chain(repo, chain, dry_run=True, commit=True)
     assert code == EXIT_OK and "Branch: baton/demo (would be created)" in out
     assert _branch(repo) == base
+
+
+def _remote(repo: Path, tmp_path: Path) -> Path:
+    bare = tmp_path.parent / f"{tmp_path.name}-remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True)
+    git(repo, "remote", "add", "origin", str(bare))
+    return bare
+
+
+def _rev(repo: Path, ref: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", ref], check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
+def test_push_implies_commit_and_updates_remote(repo, tmp_path, git_identity) -> None:
+    bare = _remote(repo, tmp_path)
+    code, out = run(repo, FakeAdapter(action=edit), push=True)
+    assert code == EXIT_OK
+    assert _log_subjects(repo)[0] == "feat: first"
+    assert _rev(bare, "baton/demo") == _rev(repo, "HEAD")
+    assert "Pushed: origin/baton/demo" in out
+
+
+def test_push_after_each_run_keeps_remote_equal_to_head(repo, tmp_path, git_identity) -> None:
+    bare = _remote(repo, tmp_path)
+    run(repo, FakeAdapter(action=edit), push=True)
+    run(repo, FakeAdapter(action=lambda r: (r / "two.txt").write_text("2\n")), push=True)
+    assert _rev(bare, "baton/demo") == _rev(repo, "HEAD")
+    assert _log_subjects(repo)[:2] == ["feat: second", "feat: first"]
+
+
+def test_push_failure_keeps_commit_and_done_status(repo, git_identity) -> None:
+    code, out = run(repo, FakeAdapter(action=edit), push=True)
+    assert code == EXIT_FAILED
+    assert _log_subjects(repo)[0] == "feat: first"
+    step = plan_of(repo).steps[0]
+    assert step.status == "done" and step.commit == head(repo)
+    assert "Push failed" in out and "Committed:" in out
+    assert "push failed" in plan_of(repo).log[-1]
+
+
+def test_blocked_commit_is_not_pushed(repo, tmp_path, git_identity) -> None:
+    bare = _remote(repo, tmp_path)
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    code, _ = run(repo, FakeAdapter(action=edit), push=True)
+    assert code == EXIT_FAILED
+    assert subprocess.run(["git", "-C", str(bare), "branch"], capture_output=True).stdout == b""
+
+
+def test_dry_run_with_push_shows_remote_branch(repo, chain, git_identity) -> None:
+    from baton.adapter import ClaudeAdapter
+
+    chain[1]["first"] = ClaudeAdapter()
+    code, out = invoke_chain(repo, chain, dry_run=True, push=True)
+    assert code == EXIT_OK and "Would push: origin baton/demo" in out

@@ -30,6 +30,7 @@ from baton.git import (
     milestone_branch,
     switch_branch,
 )
+from baton.git import push as git_push
 from baton.limits import LimitStateError, LimitStore
 from baton.milestone import sync_milestone
 from baton.plan import (
@@ -128,6 +129,7 @@ def _report_success(
     changed: list[str] | None = None,
     committed: str | None = None,
     notice: str | None = None,
+    pushed: str | None = None,
 ) -> None:
     _say(out)
     _say(out, f"Step {step.number}/{len(plan.steps)} done: {step.message}")
@@ -156,6 +158,10 @@ def _report_success(
                 _say(out, f"    {location + ': ' if location else ''}{finding.message}")
     if committed is not None:
         _say(out, f"Committed: {committed} {step.message}")
+        if pushed:
+            _say(out, f"Pushed: {pushed}")
+        if notice:
+            _say(out, notice)
     else:
         if notice:
             _say(out, notice)
@@ -209,6 +215,7 @@ def run_next(
     override: bool = False,
     today: str | None = None,
     commit: bool = False,
+    push: bool = False,
 ) -> int:
     """Implement the first open step of ``repo``'s plan; returns the process exit code."""
     return _run_next(
@@ -220,6 +227,7 @@ def run_next(
         override=override,
         today=today,
         commit=commit,
+        push=push,
     )
 
 
@@ -235,7 +243,9 @@ def _run_next(
     select_fix: Callable[[Step, bool], Adapter | None] | None = None,
     review_step: Callable[[Plan, Step, str], ReviewResult | None] | None = None,
     commit: bool = False,
+    push: bool = False,
 ) -> int:
+    commit = commit or push
     date = today or datetime.date.today().isoformat()
     plan_path = repo / PLAN_FILENAME
     try:
@@ -346,6 +356,17 @@ def _run_next(
                     problem = f"commit failed ({exc})"
                     notice = f"Auto-commit failed: {exc}\nChanges stay staged; the step stays [~]."
 
+        push_problem = None
+        pushed = None
+        if push and committed is not None:
+            try:
+                branch = current_branch(repo)
+                git_push(repo, branch)
+                pushed = f"origin/{branch}"
+            except GitError as exc:
+                push_problem = " ".join(str(exc).split())
+                notice = f"Push failed: {push_problem}\nThe commit stays; push manually when ready."
+
         # Re-read: the agent may have touched the plan file despite the rules.
         text = plan_path.read_text(encoding="utf-8")
         text = set_step_status(text, step.number, "pending", after)
@@ -357,6 +378,8 @@ def _run_next(
         if committed is not None:
             text = set_step_status(text, step.number, "done", committed)
             text = append_log(text, f"{date}: step {step.number} {note}, committed ({committed}).")
+            if push_problem is not None:
+                text = append_log(text, f"{date}: step {step.number} push failed: {push_problem}.")
         elif problem is not None:
             text = append_log(text, f"{date}: step {step.number} {note}; auto-commit: {problem}.")
         else:
@@ -377,8 +400,9 @@ def _run_next(
         changed=changed,
         committed=committed,
         notice=notice,
+        pushed=pushed,
     )
-    return EXIT_FAILED if problem else EXIT_OK
+    return EXIT_FAILED if problem or push_problem else EXIT_OK
 
 
 def _dry_run(
@@ -387,6 +411,7 @@ def _dry_run(
     out: TextIO,
     *,
     commit: bool = False,
+    push: bool = False,
 ) -> int:
     """Print the prompt and argv for the first open step; change nothing."""
     plan_path = repo / PLAN_FILENAME
@@ -415,6 +440,8 @@ def _dry_run(
         else:
             state = "exists, would switch" if branch_exists(repo, branch) else "would be created"
         _say(out, f"Branch: {branch} ({state})")
+        if push:
+            _say(out, f"Would push: origin {branch}")
     adapter = select_adapter(step)
     _say(out, "Command (cwd = repo root):")
     _say(out, "  " + " ".join(shlex.quote(a) for a in adapter.argv("<prompt>")))
@@ -516,6 +543,7 @@ def run_next_command(
     verify_timeout: float = DEFAULT_VERIFY_TIMEOUT,
     dry_run: bool = False,
     commit: bool = False,
+    push: bool = False,
     out: TextIO | None = None,
 ) -> int:
     """CLI entry: select an agent for the step being run or previewed."""
@@ -565,7 +593,7 @@ def run_next_command(
 
     if dry_run:
         try:
-            return _dry_run(repo, select_adapter, out, commit=commit)
+            return _dry_run(repo, select_adapter, out, commit=commit or push, push=push)
         except (ConfigError, GitError, LimitStateError, PlanError, OSError) as exc:
             _say(out, f"Error: {exc}")
             return EXIT_FAILED
@@ -578,4 +606,5 @@ def run_next_command(
         select_fix=select_fix,
         review_step=review_step,
         commit=commit,
+        push=push,
     )

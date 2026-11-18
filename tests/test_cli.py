@@ -313,3 +313,10 @@ def test_next_accepts_commit_flag() -> None:
 
     assert build_parser().parse_args(["next", "--commit"]).commit is True
     assert build_parser().parse_args(["next"]).commit is False
+
+
+def test_next_accepts_push_flag() -> None:
+    from baton.cli import build_parser
+
+    assert build_parser().parse_args(["next", "--push"]).push is True
+    assert build_parser().parse_args(["next"]).push is False
