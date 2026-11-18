@@ -3,6 +3,7 @@
 Mirrors the ``/next`` skill: gate -> agent -> HEAD check -> verify -> ``[~]`` marking -> report.
 By default baton never commits; the user reviews and commits. With ``--commit`` a verified
 step without critical review findings is committed with the plan's message and marked ``[x]``.
+``--worktree`` runs in a dedicated git worktree of the milestone branch (implies ``--commit``).
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from baton.git import (
     head,
     milestone_branch,
     switch_branch,
+    worktree_path_for,
 )
 from baton.git import push as git_push
 from baton.limits import LimitStateError, LimitStore
@@ -55,6 +57,7 @@ from baton.review import (
 from baton.roadmap import RoadmapError
 from baton.router import Route, resolve_route
 from baton.verify import VerifyResult, run_verify
+from baton.worktree import ensure_worktree, mirror_plan
 
 EXIT_OK = 0
 EXIT_FAILED = 1  # agent, verify or plan problem; changes stay in the tree
@@ -216,19 +219,48 @@ def run_next(
     today: str | None = None,
     commit: bool = False,
     push: bool = False,
+    worktree: bool = False,
 ) -> int:
     """Implement the first open step of ``repo``'s plan; returns the process exit code."""
-    return _run_next(
+    return _with_worktree(
         repo,
-        lambda step: adapter,
+        worktree,
         out,
-        agent_timeout=agent_timeout,
-        verify_timeout=verify_timeout,
-        override=override,
-        today=today,
-        commit=commit,
-        push=push,
+        lambda work: _run_next(
+            work,
+            lambda step: adapter,
+            out,
+            agent_timeout=agent_timeout,
+            verify_timeout=verify_timeout,
+            override=override,
+            today=today,
+            commit=commit or worktree,
+            push=push,
+        ),
     )
+
+
+def _with_worktree(repo: Path, enabled: bool, out: TextIO, run: Callable[[Path], int]) -> int:
+    """Run ``run`` in the milestone worktree of ``repo`` (if ``enabled``), then mirror the plan."""
+    if not enabled:
+        return run(repo)
+    plan_path = repo / PLAN_FILENAME
+    try:
+        if not plan_path.is_file():
+            _say(out, f"No {PLAN_FILENAME} in {repo}. Create one with `/plan-commits <task>`.")
+            return EXIT_STOPPED
+        work, created = ensure_worktree(repo, parse_plan(plan_path.read_text(encoding="utf-8")))
+    except (GitError, PlanError, OSError) as exc:
+        _say(out, f"Error: {exc}")
+        return EXIT_FAILED
+    _say(out, f"Worktree: {work} ({'created' if created else 'reused'})")
+    try:
+        return run(work)
+    finally:
+        try:
+            mirror_plan(work, repo)
+        except OSError as exc:
+            _say(out, f"Could not mirror {PLAN_FILENAME} back to {repo}: {exc}")
 
 
 def _run_next(
@@ -412,6 +444,7 @@ def _dry_run(
     *,
     commit: bool = False,
     push: bool = False,
+    worktree: bool = False,
 ) -> int:
     """Print the prompt and argv for the first open step; change nothing."""
     plan_path = repo / PLAN_FILENAME
@@ -440,6 +473,9 @@ def _dry_run(
         else:
             state = "exists, would switch" if branch_exists(repo, branch) else "would be created"
         _say(out, f"Branch: {branch} ({state})")
+        if worktree:
+            path = worktree_path_for(repo, branch)
+            _say(out, f"Worktree: {path} ({'exists' if path.is_dir() else 'would be created'})")
         if push:
             _say(out, f"Would push: origin {branch}")
     adapter = select_adapter(step)
@@ -544,6 +580,7 @@ def run_next_command(
     dry_run: bool = False,
     commit: bool = False,
     push: bool = False,
+    worktree: bool = False,
     out: TextIO | None = None,
 ) -> int:
     """CLI entry: select an agent for the step being run or previewed."""
@@ -551,6 +588,7 @@ def run_next_command(
 
     config = None
     implementation = None
+    active = repo  # the checkout the agent works in: ``repo`` or its milestone worktree
 
     def select_adapter(step: Step) -> _RoutedAdapter:
         nonlocal config, implementation
@@ -582,10 +620,10 @@ def run_next_command(
             authors=tuple(implementation.attempted_agents),
         )
         reviewer = _RoutedAdapter(route, implementation.store, out, review=True)
-        before = head(repo)
-        changes = review_context(repo)
-        result = reviewer.run(review_prompt(plan, step, raw_step, changes), repo, agent_timeout)
-        if head(repo) != before or review_context(repo) != changes:
+        before = head(active)
+        changes = review_context(active)
+        result = reviewer.run(review_prompt(plan, step, raw_step, changes), active, agent_timeout)
+        if head(active) != before or review_context(active) != changes:
             raise ReviewError("Candidate changed during review; review is stale")
         if not result.ok:
             raise ReviewError(result.error)
@@ -593,18 +631,31 @@ def run_next_command(
 
     if dry_run:
         try:
-            return _dry_run(repo, select_adapter, out, commit=commit or push, push=push)
+            return _dry_run(
+                repo,
+                select_adapter,
+                out,
+                commit=commit or push or worktree,
+                push=push,
+                worktree=worktree,
+            )
         except (ConfigError, GitError, LimitStateError, PlanError, OSError) as exc:
             _say(out, f"Error: {exc}")
             return EXIT_FAILED
-    return _run_next(
-        repo,
-        select_adapter,
-        out,
-        agent_timeout=agent_timeout,
-        verify_timeout=verify_timeout,
-        select_fix=select_fix,
-        review_step=review_step,
-        commit=commit,
-        push=push,
-    )
+
+    def run_in(work: Path) -> int:
+        nonlocal active
+        active = work
+        return _run_next(
+            work,
+            select_adapter,
+            out,
+            agent_timeout=agent_timeout,
+            verify_timeout=verify_timeout,
+            select_fix=select_fix,
+            review_step=review_step,
+            commit=commit or worktree,
+            push=push,
+        )
+
+    return _with_worktree(repo, worktree, out, run_in)

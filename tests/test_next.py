@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from baton.adapter import AgentResult
-from baton.git import head
+from baton.git import head, worktree_path_for
 from baton.next import EXIT_FAILED, EXIT_OK, EXIT_STOPPED, run_next, run_next_command
 from baton.plan import parse_plan
 
@@ -1376,3 +1376,55 @@ def test_dry_run_with_push_shows_remote_branch(repo, chain, git_identity) -> Non
     chain[1]["first"] = ClaudeAdapter()
     code, out = invoke_chain(repo, chain, dry_run=True, push=True)
     assert code == EXIT_OK and "Would push: origin baton/demo" in out
+
+
+def test_worktree_run_commits_on_branch_and_leaves_main_checkout_alone(repo, git_identity) -> None:
+    base = _branch(repo)
+    base_head = head(repo)
+    code, out = run(repo, FakeAdapter(action=edit), worktree=True)
+    assert code == EXIT_OK and "Worktree:" in out and "(created)" in out
+    work = worktree_path_for(repo, "baton/demo")
+    assert _branch(repo) == base and head(repo) == base_head
+    assert not (repo / "new.txt").exists()
+    assert _branch(work) == "baton/demo" and _log_subjects(work)[0] == "feat: first"
+    assert plan_of(repo).steps[0].status == "done"  # mirrored back for `baton status`
+    assert plan_of(repo).steps[0].commit == head(work)
+
+
+def test_worktree_is_reused_by_the_next_run(repo, git_identity) -> None:
+    run(repo, FakeAdapter(action=edit), worktree=True)
+    code, out = run(
+        repo, FakeAdapter(action=lambda r: (r / "b.txt").write_text("b\n")), worktree=True
+    )
+    work = worktree_path_for(repo, "baton/demo")
+    assert code == EXIT_OK and "(reused)" in out
+    assert _log_subjects(work)[:2] == ["feat: second", "feat: first"]
+    assert plan_of(repo).steps[1].status == "done"
+
+
+def test_worktree_dirty_main_checkout_is_not_a_problem(repo, git_identity) -> None:
+    (repo / "wip.txt").write_text("wip\n")
+    code, _ = run(repo, FakeAdapter(action=edit), worktree=True)
+    assert code == EXIT_OK and (repo / "wip.txt").read_text() == "wip\n"
+
+
+def test_worktree_refuses_branch_checked_out_in_main(repo, git_identity) -> None:
+    git(repo, "switch", "-c", "baton/demo")
+    adapter = FakeAdapter(action=edit)
+    code, out = run(repo, adapter, worktree=True)
+    assert code == EXIT_FAILED and "Error:" in out and not adapter.prompts
+
+
+def test_worktree_without_plan(tmp_path, git_identity) -> None:
+    code, out = run(tmp_path, FakeAdapter(), worktree=True)
+    assert code == EXIT_STOPPED and ".agent-plan.md" in out
+
+
+def test_dry_run_with_worktree_shows_path_without_creating_it(repo, chain, git_identity) -> None:
+    from baton.adapter import ClaudeAdapter
+
+    chain[1]["first"] = ClaudeAdapter()
+    code, out = invoke_chain(repo, chain, dry_run=True, worktree=True)
+    work = worktree_path_for(repo, "baton/demo")
+    assert code == EXIT_OK and f"Worktree: {work} (would be created)" in out
+    assert not work.exists()

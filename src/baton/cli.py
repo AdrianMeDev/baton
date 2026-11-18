@@ -98,6 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="implies --commit; push the milestone branch to origin after each commit",
     )
+    nxt.add_argument(
+        "--worktree",
+        action="store_true",
+        help="implies --commit; work in a dedicated git worktree of the milestone branch",
+    )
     return parser
 
 
@@ -137,6 +142,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             dry_run=args.dry_run,
             commit=args.commit,
             push=args.push,
+            worktree=args.worktree,
         )
     if args.command == "recheck":
         return run_recheck_command(args.agent, config_path=args.config, timeout=args.timeout)

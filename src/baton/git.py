@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -152,3 +154,26 @@ def commit_all(repo: Path, message: str, ignore: tuple[str, ...] = (PLAN_FILENAM
 def push(repo: Path, branch: str, remote: str = "origin") -> None:
     """``git push -u <remote> <branch>``."""
     _git(repo, "push", "-q", "-u", remote, branch)
+
+
+def worktree_path_for(repo: Path, branch: str) -> Path:
+    """``$XDG_STATE_HOME/baton/worktrees/<repo>-<hash>/<branch-slug>`` for ``repo``'s ``branch``."""
+    base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    resolved = repo.resolve()
+    digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:8]
+    return base / "baton" / "worktrees" / f"{resolved.name}-{digest}" / branch_slug(branch)
+
+
+def worktree_add(repo: Path, path: Path, branch: str, *, create: bool = False) -> None:
+    """``git worktree add`` ``path`` on ``branch``; ``create`` branches it off the current HEAD."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if create:
+        _git(repo, "worktree", "add", "-q", "-b", branch, str(path))
+    else:
+        _git(repo, "worktree", "add", "-q", str(path), branch)
+
+
+def worktree_paths(repo: Path) -> list[Path]:
+    """Paths of all worktrees registered for ``repo`` (including the main one)."""
+    out = _git(repo, "worktree", "list", "--porcelain", "-z")
+    return [Path(f[len("worktree ") :]) for f in out.split("\0") if f.startswith("worktree ")]
