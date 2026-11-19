@@ -48,3 +48,62 @@ def test_atomic_budget_and_utc_rollover(tmp_path):
     assert store.select([agent], now=now) == (None, None)
     assert store.select([agent], now=now + timedelta(days=1))[0] == agent
     assert len(store.read()) == 1
+
+
+def _journal(tmp_path, count=2):
+    store = RunStore(tmp_path / "runs.jsonl")
+    ids = [store.dispatch("agent") for _ in range(count)]
+    return store, ids
+
+
+def test_torn_tail_is_ignored_on_read(tmp_path):
+    store, _ = _journal(tmp_path)
+    with store.path.open("a") as stream:
+        stream.write('{"event": "dispatch", "id": "x", "ag')
+    assert len(store.read()) == 2
+
+
+def test_append_after_torn_tail_repairs_the_journal(tmp_path):
+    store, ids = _journal(tmp_path)
+    with store.path.open("a") as stream:
+        stream.write('{"event": "dispatch", "id": "x", "ag')
+    agent, ident = store.select([_agent("agent")], claim=True)
+    assert agent is not None and ident
+    store.complete(ident, AgentResult(ok=True, tokens=1, duration_s=1.0))
+    rows = store.read()
+    assert [r["id"] for r in rows][:2] == ids and len(rows) == 4
+    text = store.path.read_text()
+    assert text.endswith("\n") and "ag\n" not in text
+    assert all(line.startswith("{") and line.endswith("}") for line in text.splitlines())
+
+
+def test_valid_last_line_without_newline_is_kept(tmp_path):
+    store, ids = _journal(tmp_path)
+    store.path.write_text(store.path.read_text().rstrip("\n"))
+    assert len(store.read()) == 2
+    store.dispatch("agent")
+    assert len(store.read()) == 3 and store.path.read_text().count("\n") == 3
+
+
+def test_corrupt_middle_line_still_fails_with_line_number(tmp_path):
+    store, _ = _journal(tmp_path)
+    lines = store.path.read_text().splitlines()
+    store.path.write_text("\n".join([lines[0], "{broken", lines[1]]) + "\n")
+    with pytest.raises(LimitStateError, match=r"runs.jsonl:2"):
+        store.read()
+    with pytest.raises(LimitStateError):
+        store.dispatch("agent")
+
+
+def test_corrupt_terminated_last_line_still_fails(tmp_path):
+    store, _ = _journal(tmp_path)
+    with store.path.open("a") as stream:
+        stream.write("{broken\n")
+    with pytest.raises(LimitStateError, match=r"runs.jsonl:3"):
+        store.read()
+
+
+def _agent(name):
+    from baton.config import AgentConfig
+
+    return AgentConfig(name, "claude", "claude")
