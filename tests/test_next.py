@@ -96,7 +96,7 @@ def test_success_marks_pending_and_keeps_head(repo: Path) -> None:
     assert head(repo) == before
     assert "Step 1/2: feat: first" in out
     assert "new.txt" in out
-    assert 'git commit -m "feat: first"' in out
+    assert "git commit -m 'feat: first'" in out
     assert "feat: second" in out
     assert "step 1 implemented" in plan_of(repo).log[-1]
     assert "feat: first" in adapter.prompts[0] and "feat: second" not in adapter.prompts[0]
@@ -148,7 +148,7 @@ def test_gate_dirty_blocks(repo: Path) -> None:
     code, out = run(repo, adapter)
     assert code == EXIT_STOPPED
     assert adapter.prompts == []
-    assert "new.txt" in out and 'git commit -m "feat: first"' in out
+    assert "new.txt" in out and "git commit -m 'feat: first'" in out
 
 
 def test_command_checks_gate_before_resolving_agent(repo: Path) -> None:
@@ -1605,3 +1605,15 @@ def test_plan_restored_on_failed_external_phase(repo, phase):
     assert restored.startswith(trusted.decode().split("## Log")[0])
     assert plan_of(repo).steps[0].status == "open"
     assert (repo / "new.txt").read_text() == "hello\n"
+
+
+def test_commit_hint_is_shell_safe() -> None:
+    import shlex
+
+    from baton.next import _commit_hint
+
+    message = 'docs: explain `rm -rf build` $HOME "q" it\'s done!'
+    buf = io.StringIO()
+    _commit_hint(buf, message)
+    line = buf.getvalue().splitlines()[-1].strip()
+    assert shlex.split(line) == ["git", "commit", "-m", message]

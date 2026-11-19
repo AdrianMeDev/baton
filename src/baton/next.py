@@ -82,11 +82,7 @@ DEFAULT_VERIFY_TIMEOUT = 900.0
 
 def _commit_hint(out: TextIO, message: str) -> None:
     say(out, "  git add -A")
-    say(out, f"  git commit -m {_quote(message)}")
-
-
-def _quote(text: str) -> str:
-    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
+    say(out, f"  git commit -m {shlex.quote(message)}")
 
 
 def _log(plan_path: Path, line: str, date: str) -> None:

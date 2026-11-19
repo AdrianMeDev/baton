@@ -79,7 +79,7 @@ def test_blocked_gate_shows_files_and_commit_hint(repo: Path) -> None:
     assert "Current: step 2/3" in out
     assert "BLOCKED" in out
     assert "  a.txt" in out
-    assert 'git commit -m "feat: second"' in out
+    assert "git commit -m 'feat: second'" in out
 
 
 def test_committed_but_unmarked_step(repo: Path) -> None:

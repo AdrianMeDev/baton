@@ -116,7 +116,7 @@ def test_next_implements_verifies_and_marks_step(
     plan = (repo / ".agent-plan.md").read_text(encoding="utf-8")
     assert f"### 1. [~] (on {before[:7]})" in plan
     assert "Step 1/2 done: feat: first" in out
-    assert 'git commit -m "feat: first"' in out
+    assert "git commit -m 'feat: first'" in out
 
 
 def test_next_dry_run_changes_nothing(
