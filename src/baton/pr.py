@@ -10,6 +10,7 @@ from pathlib import Path
 
 from baton.git import _git
 from baton.plan import Plan, PlanError, parse_plan
+from baton.repair import parse_repair_log
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,15 @@ def milestone_report(repo: Path, text: str) -> Report:
             lines.append("No findings.")
     if len(covered) != len(set(covered)) or set(covered) != set(commits):
         blockers.append("Milestone contains commits without distinct step reviews")
+    repairs = [r for r in map(parse_repair_log, plan.log) if r is not None]
+    if repairs:
+        lines += ["", "## Plan repairs"]
+        for repair in repairs:
+            lines += [
+                f"- Step {repair.step}: {repair.reason}",
+                f"  - was: {repair.old}",
+                f"  - now: {repair.new}",
+            ]
     lines += ["", "## Automatic merge", "\n".join(f"- {b}" for b in blockers) or "Eligible"]
     return Report(plan.title, "\n".join(lines) + "\n", tuple(blockers))
 

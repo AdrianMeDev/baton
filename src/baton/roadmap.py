@@ -203,3 +203,99 @@ def milestone_text(text: str, milestone: Milestone) -> str:
     """The raw lines of ``milestone`` (heading to last body line) from the roadmap text."""
     lines = text.splitlines()
     return "\n".join(lines[milestone.start_line - 1 : milestone.end_line]).strip()
+
+
+QUESTION_MARKER = "BATON-QUESTION:"
+MAX_QUESTIONS = 6
+DEFAULT_ANSWER = "decide yourself and list it as a decision"
+MAX_MILESTONE_COMMITS = 8
+MIN_MILESTONE_COMMITS = 3
+
+_QUESTION_RE = re.compile(rf"^[ \t]*{re.escape(QUESTION_MARKER)}[ \t]*(.+?)[ \t]*$", re.M)
+_DEFAULT_SPLIT_RE = re.compile(r"\s*\|\s*default:\s*", re.I)
+_COMMITS_HINT_RE = re.compile(r"~\s*(\d+)")
+
+
+@dataclass(frozen=True)
+class Question:
+    text: str
+    default: str
+
+
+def parse_questions(reply: str) -> list[Question]:
+    """The ``BATON-QUESTION: <question> | default: <answer>`` lines of a reply, at most six.
+
+    A question without a default gets ``DEFAULT_ANSWER``.
+    """
+    questions: list[Question] = []
+    for match in _QUESTION_RE.finditer(reply):
+        text, _, default = _DEFAULT_SPLIT_RE.sub("\0", match[1], count=1).partition("\0")
+        questions.append(Question(text.strip(), default.strip() or DEFAULT_ANSWER))
+    return [q for q in questions if q.text][:MAX_QUESTIONS]
+
+
+def assemble_roadmap(reply: str, date: str) -> str:
+    """Turn the agent's reply into roadmap text with baton's ``Updated:`` date.
+
+    Prose or a Markdown fence before ``# Roadmap:`` and everything from a closing fence on are
+    dropped. Without a ``# Roadmap:`` heading the reply is returned stripped, so that validation
+    reports it.
+    """
+    lines = reply.strip().splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith("# Roadmap:")), None)
+    if start is None:
+        return reply.strip() + "\n"
+    body = lines[start:]
+    end = next((i for i, ln in enumerate(body) if ln.strip().startswith("```")), len(body))
+    body = body[:end]
+    while body and not body[-1].strip():
+        body.pop()
+    rest = body[1:]
+    if rest and rest[0].startswith("Updated:"):
+        rest = rest[1:]
+    return "\n".join([body[0].rstrip(), f"Updated: {date}", *rest]) + "\n"
+
+
+def validate_roadmap(text: str) -> list[str]:
+    """Readable reasons why ``text`` is not an acceptable fresh roadmap; empty means valid."""
+    try:
+        roadmap = parse_roadmap(text)
+    except RoadmapError as exc:
+        return [f"roadmap does not parse: {exc}"]
+
+    errors: list[str] = []
+    if not any(ln.startswith("# Roadmap:") and ln[10:].strip() for ln in text.splitlines()):
+        errors.append("missing '# Roadmap: <name>' heading")
+    numbers = [int(m.id[1:]) for m in roadmap.milestones]
+    first = numbers[0]
+    if first not in (0, 1) or numbers != list(range(first, first + len(numbers))):
+        errors.append(f"milestones must be numbered M0.. or M1.. in order, found {numbers}")
+    for milestone in roadmap.milestones:
+        where = milestone.id
+        if milestone.status != "open":
+            errors.append(f"{where}: must be open '[ ]', found {milestone.status}")
+        if not milestone.name:
+            errors.append(f"{where}: missing name")
+        if not milestone.goal.strip():
+            errors.append(f"{where}: missing '**Goal:**'")
+        if not milestone.done_when.strip():
+            errors.append(f"{where}: missing '**Done when:**'")
+        if milestone.size is None:
+            errors.append(f"{where}: '**Size:**' must start with S, M or L")
+        hint = _COMMITS_HINT_RE.search(_size_line(text, milestone))
+        if hint and not MIN_MILESTONE_COMMITS <= int(hint[1]) <= MAX_MILESTONE_COMMITS:
+            errors.append(
+                f"{where}: a milestone is {MIN_MILESTONE_COMMITS}-{MAX_MILESTONE_COMMITS} "
+                f"commits, found ~{hint[1]}; split or merge it"
+            )
+    if section_text(text, "Definition of done") is None:
+        errors.append("missing '## Definition of done' section")
+    return errors
+
+
+def _size_line(text: str, milestone: Milestone) -> str:
+    for line in milestone_text(text, milestone).splitlines():
+        match = _BULLET_RE.match(line)
+        if match and match[1].strip().lower() == "size":
+            return match[2]
+    return ""

@@ -9,6 +9,7 @@ step without critical review findings is committed with the plan's message and m
 from __future__ import annotations
 
 import datetime
+import difflib
 import shlex
 import sys
 import tempfile
@@ -55,6 +56,7 @@ from baton.prompt import (
     roadmap_problem,
     step_text,
 )
+from baton.repair import repair_from_reply, repair_prompt, repaired_before
 from baton.review import (
     SEVERITIES,
     ReviewError,
@@ -65,7 +67,7 @@ from baton.review import (
     review_context,
 )
 from baton.roadmap import RoadmapError
-from baton.routed import RoutedAdapter, say
+from baton.routed import RoutedAdapter, RoutedPlanner, say
 from baton.router import resolve_route
 from baton.verify import VerifyResult, _clean, run_verify
 from baton.worktree import ensure_worktree, mirror_plan
@@ -234,6 +236,72 @@ def _enter_branch(repo: Path, plan: Plan, out: TextIO) -> bool:
     return True
 
 
+RepairPlan = Callable[[Plan, str, Step, str, str], str | None]
+"""``(plan, plan_text, step, reason, diff)`` -> the repair agent's reply, ``None`` if it failed."""
+
+
+def _plan_diff(old: str, new: str) -> str:
+    diff = difflib.unified_diff(
+        old.splitlines(),
+        new.splitlines(),
+        ".agent-plan.md (old)",
+        ".agent-plan.md (new)",
+        lineterm="",
+    )
+    return "\n".join(diff)
+
+
+def _try_repair(
+    repo: Path,
+    plan_path: Path,
+    plan: Plan,
+    step: Step,
+    reason: str,
+    repair_plan: RepairPlan,
+    commit: bool,
+    out: TextIO,
+    date: str,
+) -> int | None:
+    """Repair the plan after a reported problem; ``None`` means: repaired, continue the step."""
+    plan_text = plan_path.read_text(encoding="utf-8")
+    say(out, f"Asking the plan repair agent to fix steps {step.number}..{len(plan.steps)}.")
+    try:
+        with _protect_plan(plan_path):
+            reply = repair_plan(plan, plan_text, step, reason, handoff_context(repo))
+    except (ConfigError, GitError, LimitStateError, OSError) as exc:
+        reply = None
+        say(out, f"The plan repair agent could not run: {exc}")
+    if reply is None:
+        _log(plan_path, f"step {step.number}: plan repair failed", date)
+        return EXIT_ROADMAP_PROBLEM
+    result = repair_from_reply(plan_text, step.number, reply, reason)
+    if result.needs_decision is not None:
+        say(out, f"The plan repair needs your decision: {result.needs_decision}")
+        _log(
+            plan_path,
+            f"step {step.number}: plan repair needs a decision ({result.needs_decision})",
+            date,
+        )
+        return EXIT_ROADMAP_PROBLEM
+    if result.errors:
+        say(out, "The proposed plan repair was rejected:")
+        for error in result.errors:
+            say(out, f"  {error}")
+        _log(
+            plan_path,
+            f"step {step.number}: plan repair rejected ({'; '.join(result.errors)})",
+            date,
+        )
+        return EXIT_ROADMAP_PROBLEM
+    save_plan(plan_path, result.text)
+    say(out, f"Plan repaired at step {step.number}. Changes to {PLAN_FILENAME}:")
+    say(out, _plan_diff(plan_text, result.text))
+    if not commit:
+        say(out, "Review the plan change, then run `baton next --resume` to continue the step.")
+        return EXIT_STOPPED
+    return None
+
+
 def _verify_failure(verify: VerifyResult) -> str:
     if verify.timed_out:
         return "timed out"
@@ -253,6 +321,7 @@ def run_next(
     push: bool = False,
     worktree: bool = False,
     resume: bool = False,
+    repair_plan: RepairPlan | None = None,
 ) -> int:
     """Implement the first open step of ``repo``'s plan; returns the process exit code."""
     return _with_worktree(
@@ -270,6 +339,7 @@ def run_next(
             commit=commit or worktree,
             push=push,
             resume=resume,
+            repair_plan=repair_plan,
         ),
     )
 
@@ -311,8 +381,13 @@ def _run_next(
     commit: bool = False,
     push: bool = False,
     resume: bool = False,
+    repair_plan: RepairPlan | None = None,
 ) -> int:
-    """``resume`` continues the first open step from the partial diff a limited agent left."""
+    """``resume`` continues the first open step from the partial diff a limited agent left.
+
+    ``repair_plan`` is asked once per step to replace the plan's remaining steps when the agent
+    reports a roadmap problem; without it (or when it fails) the run stops as before.
+    """
     commit = commit or push
     date = today or datetime.date.today().isoformat()
     plan_path = repo / PLAN_FILENAME
@@ -360,6 +435,28 @@ def _run_next(
         if problem_reason is not None:
             say(out, f"The agent reported a roadmap problem: {problem_reason}")
             say(out, "Changes (if any) stay in the working tree; the step stays open.")
+            if repair_plan is not None and not repaired_before(plan, step.number):
+                _log(plan_path, f"step {step.number}: roadmap problem ({problem_reason})", date)
+                stop = _try_repair(
+                    repo, plan_path, plan, step, problem_reason, repair_plan, commit, out, date
+                )
+                if stop is not None:
+                    return stop
+                return _run_next(
+                    repo,
+                    select_adapter,
+                    out,
+                    agent_timeout=agent_timeout,
+                    verify_timeout=verify_timeout,
+                    override=override,
+                    today=today,
+                    select_fix=select_fix,
+                    review_step=review_step,
+                    commit=commit,
+                    push=push,
+                    resume=True,
+                    repair_plan=repair_plan,
+                )
             _log(plan_path, f"step {step.number}: roadmap problem ({problem_reason})", date)
             return EXIT_ROADMAP_PROBLEM
         if not result.ok:
@@ -608,6 +705,20 @@ def run_next_command(
             raise ReviewError(result.error)
         return ReviewResult(reviewer.attempted_agents[-1], parse_review(result.text))
 
+    def repair_plan(plan: Plan, plan_text: str, step: Step, reason: str, diff: str) -> str | None:
+        assert config is not None and implementation is not None
+        if not config.routes:
+            return None
+        route = resolve_route(config, "plan_commits", tier="L")
+        planner = RoutedPlanner(route, implementation.store, out)
+        reply = planner.run(
+            repair_prompt(plan, plan_text, step, reason, diff), active, agent_timeout
+        )
+        if not reply.ok:
+            say(out, f"The plan repair agent failed: {reply.error}")
+            return None
+        return reply.text
+
     if dry_run:
         try:
             return _dry_run(
@@ -636,6 +747,7 @@ def run_next_command(
             commit=commit or worktree,
             push=push,
             resume=resume,
+            repair_plan=repair_plan,
         )
 
     return _with_worktree(repo, worktree, out, run_in)

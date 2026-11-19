@@ -3,7 +3,37 @@
 Command-line tool that distributes the steps of a commit plan (`.agent-plan.md`) across several
 coding agent CLIs (Claude Code, Codex, Antigravity, pi). See `docs/ROADMAP.md` for the plan.
 
+## Quick start
+
+Short path from zero to a finished roadmap. The [first run](#first-run-on-linux-or-wsl) below
+walks through the same flow in detail, with a disposable repository and a minimal config.
+
+1. **Install** Git, [uv](https://docs.astral.sh/uv/) and the GitHub CLI (`gh`), then baton:
+   `uv tool install --python 3.12 .` from a checkout of this repository.
+2. **Sign in** to at least one agent CLI with its own login (`claude auth login`, `codex login`,
+   ...) and to GitHub (`gh auth login`). baton never handles your credentials.
+3. **Configure.** Copy the bundled example and keep the agents you use in `[agents.*]` and in
+   every `[routes.*]` list (`plan_roadmap`, `plan_commits`, `implement`, `fix`, `review`):
+   `mkdir -p ~/.config/baton && cp src/baton/config.example.toml ~/.config/baton/config.toml`.
+4. **Check.** `baton doctor` shows whether each configured CLI is on your `PATH`;
+   `baton probe <agent>` confirms a login works headless (uses quota).
+5. **Roadmap.** In a clean git repository with an `origin` remote on its base branch, run
+   `baton roadmap "<what you want to build>" --commit` (or `--from idea.md`). The planner asks up
+   to six questions with a suggested default each; press Enter to accept, or pass `--yes` to
+   accept all. It writes and commits `docs/ROADMAP.md`. Review it and edit it if needed.
+6. **Run.** `baton auto` plans each milestone, implements every step, opens a pull request per
+   milestone, merges it when checks are green and moves on until the roadmap is done.
+
+When an agent hits its usage limit, `baton auto` switches to the next agent of the route; when
+every agent is in cooldown it waits for the earliest reset and continues the same step. It stops
+at `--max-steps N` or `--max-hours H`, with `baton stop`, or on a stop rule (see
+[`baton auto`](#baton-auto)). To set a cooldown by hand or to re-check an agent after signing in
+again, use `baton cooldown` and `baton recheck` (see [Cooldowns and recovery](#cooldowns-and-recovery)).
+
 ## First run on Linux or WSL
+
+The detailed variant of the [quick start](#quick-start): a disposable repository, a minimal
+config and a hand-written roadmap.
 
 ### 1. Install baton and sign in
 
@@ -270,6 +300,34 @@ even without a plan: each has either an active cooldown with a local reset time 
 and UTC offset), or no active cooldown. This is local eligibility information, not a live account
 check. `status` never starts an agent or writes state.
 
+### `baton roadmap`
+
+```
+baton roadmap [idea] [--from FILE] [--path DIR] [--agent NAME] [--tier {S,M,L}] [--yes] [--commit] [--timeout S] [--dry-run]
+```
+
+Turns an idea into `docs/ROADMAP.md` headless, like `/plan-roadmap`. Pass the idea as text or
+with `--from FILE`.
+
+1. **Check.** An existing `docs/ROADMAP.md` or `ROADMAP.md` is never overwritten. With `--commit`
+   the working tree must be clean, because the roadmap is committed with `git add -A`.
+2. **Questions.** The `plan_roadmap` route (tier `L` unless `--tier` is given) reads the idea and
+   a read-only project summary (README, docs, manifests, file list, `git log`) and may ask up to
+   six questions, each with a suggested default. baton asks them in the terminal; Enter takes the
+   default. `--yes` and a non-interactive stdin take all defaults.
+3. **Roadmap.** A second call writes the roadmap in the `/plan-roadmap` format. baton validates
+   it (milestones numbered from M0 or M1, all open, Goal, Done when, Size S/M/L, 3–8 commits per
+   milestone, Definition of done) and gives the planner the errors once. A second failure writes
+   nothing.
+4. **Write.** baton writes `docs/ROADMAP.md`. `--commit` commits it as `docs: add roadmap`;
+   without it baton prints the commands, because `baton plan` needs a clean working tree.
+
+The planner must not change anything: a moved HEAD or a changed working tree rejects the run.
+A usage limit moves on to the next agent of the route. Exit code 0 means a roadmap was written,
+1 an agent, validation or config error, 2 nothing was started (no idea, existing roadmap, dirty
+tree), 3 every agent is in cooldown. `--dry-run` prints the command and the question prompt and
+changes nothing.
+
 ### `baton plan`
 
 ```
@@ -309,13 +367,14 @@ unfinished plan or a dirty tree. `--timeout` (default 1800 s) limits each planne
 
 ```
 baton next [--path DIR] [--agent NAME] [--tier {S,M,L}] [--timeout S] [--verify-timeout S] [--dry-run]
-          [--commit] [--push] [--worktree]
+          [--commit] [--push] [--worktree] [--resume]
 ```
 
 Implements exactly one plan step and stops for your commit. The tier comes from `--tier`, the
 step’s `Size` field, or `M` in that order. `--agent` selects a named agent directly. For example,
 `baton next --agent codex --dry-run` previews Codex, and `baton next --tier L` uses the large
-implementation route.
+implementation route. `--resume` continues the open step from the partial diff a limited agent
+or a plan repair left in the working tree; without it a dirty tree with an open step is refused.
 
 1. **Gate.** If a step is `[~]` and committed (HEAD is newer than the noted hash), it is marked
    `[x]` and the run continues. If it is not committed yet, baton prints the changed files and the
@@ -377,7 +436,8 @@ branch (e.g. `main`) with an `origin` remote; a dirty or diverged base is a stop
   roadmap, git and `~/.local/state/baton/auto.json`; a step recorded as in progress continues from
   its partial diff. Plain `baton next` still refuses a dirty tree with an open step.
 - **Stop rules:** a step failed after escalation, merge refused (CI red, critical finding, PR not
-  mergeable), a `BATON-ROADMAP-PROBLEM: <reason>` line from the planner or implementer, budget
+  mergeable), a `BATON-ROADMAP-PROBLEM: <reason>` line from the planner or from an implementer
+  whose plan repair failed or was not allowed ([Plan repair](#plan-repair)), budget
   reached (`--max-steps`, `--max-hours`; per run, across milestones), `baton stop`, or a base
   checkout that cannot be fast-forwarded. `--no-merge` stops after the PR is published.
 - **`baton stop`** sets a stop request that `baton auto` honors before the next step or while
@@ -534,6 +594,35 @@ tests. No real quota response has been captured. To reproduce the offline recove
 uv run pytest -q tests/test_next.py -k cli_limit_recovery
 ```
 
+### Plan repair
+
+When an implementing agent replies `BATON-ROADMAP-PROBLEM: <reason>` because the plan itself has a
+gap (a missing prerequisite, a step that is too big), `baton next` and `baton auto` try to repair
+the plan once instead of stopping the run.
+
+- **Who.** The `plan_commits` route at tier `L`, read-only like `baton plan`; a limited agent
+  hands over to the next one, which starts afresh. It gets the reason, the whole plan, the problem
+  step and the partial diff. Configs without `[routes.*]` skip repair. A problem reported by the
+  roadmap planner (`baton plan`) is not repaired.
+- **What may change.** Only the problem step and the steps after it: extend, insert or split.
+  baton, not the agent, writes `.agent-plan.md`, and only after validating the reply. Steps
+  before the problem step, the header and all `baton-evidence` log lines stay byte-identical.
+  Replaced steps are open, numbered without gaps, have a Conventional Commits message and
+  non-empty Why, Changes, Done when and Verify, and the plan has at most 12 steps (the 3–8 limit
+  of fresh plans does not apply).
+- **Once per step.** baton logs `plan repaired: step N: <reason> | old: <titles> | new: <titles>`;
+  a second problem on the same step stops the run.
+- **Continuing.** The partial diff stays in the tree and the step continues from it, like
+  `baton next --resume`. With `--commit`, `--worktree` and `baton auto` that happens at once.
+  Without `--commit`, baton writes the repair, prints the plan diff and stops (exit code 2) so you
+  can review it; then run `baton next --resume`.
+- **When it stops anyway** (exit code 4, plan unchanged, reason in the Log): the repair agent
+  failed or every agent is in cooldown, its reply did not validate, it answered
+  `BATON-NEEDS-DECISION: <reason>` because the fix needs your decision (product behavior,
+  destructive change, new dependency, architecture), or the step was already repaired.
+- **Review.** The pull request body of a milestone lists every repair under "Plan repairs" with
+  the reason and the old and new step titles.
+
 ### Plan format
 
 baton reads and writes `.agent-plan.md` and `docs/ROADMAP.md` in the format of the `/plan-commits`,
@@ -541,7 +630,8 @@ baton reads and writes `.agent-plan.md` and `docs/ROADMAP.md` in the format of t
 waiting for the commit, `[x] – <hash>` committed, `[-]` skipped. Writes are in place (markers, hash
 suffixes, Log and Changelog lines only), so hand edits survive. Each step may carry an optional
 `- **Size:** S|M|L` bullet; unknown bullets are ignored. Structural errors (no `## Steps`, unknown
-marker, duplicate step numbers) are reported with the line number.
+marker, duplicate step numbers) are reported with the line number. A repair appends a
+`plan repaired:` line to the `## Log` and rewrites the open steps; see [Plan repair](#plan-repair).
 
 ## Security
 
@@ -557,6 +647,11 @@ baton automates coding agents; it is not a sandbox.
   mistakes; they do not stop an agent from reading or changing files elsewhere on your machine.
 - **Read-only roles.** Planning and review run with the read-only mode of Claude, Codex and agy
   (agy also gets deny rules for commands and file writes; see `docs/adapters.md`). pi has no read-only flag, so a pi planner or reviewer is unrestricted.
+- **Plan repair.** The repair agent uses the read-only planning mode (not for pi, see above) and
+  cannot write `.agent-plan.md`: baton restores the file if it changes and applies only a
+  validated reply. It can still rewrite the open steps that your implementing agents then follow,
+  so repairs are bounded (open steps from the problem step on, at most 12 steps, one repair per
+  step), written to the plan Log and listed in the pull request. Review them there.
 - **Everything is committed and pushed.** `baton next --commit` and `baton auto` stage with
   `git add -A`, and auto pushes and opens a PR. Secrets or generated files that are not in
   `.gitignore` will be committed and pushed.

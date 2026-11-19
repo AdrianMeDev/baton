@@ -47,26 +47,10 @@ from baton.roadmap import (
     save_roadmap,
     set_milestone_status,
 )
-from baton.routed import RoutedAdapter, say
+from baton.routed import RoutedPlanner, say
 from baton.router import resolve_route
 
 ATTEMPTS = 2  # the first plan plus one retry with the validation errors
-
-
-class RoutedPlanner(RoutedAdapter):
-    """A route for planning: a successor after a usage limit simply starts the plan afresh."""
-
-    read_only = True
-
-    def _handoff(self, prompt: str, previous: str, repo: Path) -> str:
-        return prompt
-
-    @staticmethod
-    def _exhausted() -> str:
-        return (
-            "No available agents remain in this route. No plan was written. "
-            "Wait for a cooldown to expire or sign in manually, then run `baton plan` again."
-        )
 
 
 class _Stop(Exception):

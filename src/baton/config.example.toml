@@ -67,6 +67,7 @@ command = "pi"
 model = "openrouter/deepseek/deepseek-chat"
 provider = "deepseek"
 
+# `baton roadmap`: question phase and roadmap; the tier is L unless --tier is given.
 [routes.plan_roadmap]
 S = ["claude-opus", "codex-astra", "agy"]
 M = ["claude-opus", "codex-astra", "agy"]

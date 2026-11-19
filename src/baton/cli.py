@@ -12,6 +12,7 @@ from baton.limits import LimitStateError, LimitStore, parse_duration
 from baton.next import DEFAULT_AGENT_TIMEOUT, DEFAULT_VERIFY_TIMEOUT, run_next_command
 from baton.planner import run_plan_command
 from baton.probe import DEFAULT_PROMPT, DEFAULT_TIMEOUT, run_probe_command, run_recheck_command
+from baton.roadmapper import run_roadmap_command
 from baton.status import run_status
 
 
@@ -93,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="print the command and prompt, change nothing"
     )
     nxt.add_argument(
+        "--resume",
+        action="store_true",
+        help="continue the open step from the partial diff in the working tree",
+    )
+    nxt.add_argument(
         "--commit",
         action="store_true",
         help="commit a verified step with the plan's message (blocked by critical findings)",
@@ -162,6 +168,34 @@ def build_parser() -> argparse.ArgumentParser:
     plan.add_argument(
         "--dry-run", action="store_true", help="print the command and prompt, change nothing"
     )
+    roadmap = subparsers.add_parser(
+        "roadmap", help="turn an idea into docs/ROADMAP.md with a headless planner"
+    )
+    roadmap.add_argument("idea", nargs="?", help="what to build (or use --from FILE)")
+    roadmap.add_argument("--from", dest="from_file", metavar="FILE", help="read the idea from FILE")
+    roadmap.add_argument(
+        "--path", default=".", metavar="DIR", help="repository root (default: current directory)"
+    )
+    roadmap.add_argument("--agent", metavar="NAME", help="use a named agent from the config")
+    roadmap.add_argument(
+        "--tier", choices=ROUTE_TIERS, help="route tier of plan_roadmap (default: L)"
+    )
+    roadmap.add_argument(
+        "--yes", action="store_true", help="take the suggested answers instead of asking"
+    )
+    roadmap.add_argument(
+        "--commit", action="store_true", help="commit docs/ROADMAP.md as 'docs: add roadmap'"
+    )
+    roadmap.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_AGENT_TIMEOUT,
+        metavar="S",
+        help="seconds before the agent is killed (default: %(default)s)",
+    )
+    roadmap.add_argument(
+        "--dry-run", action="store_true", help="print the command and prompt, change nothing"
+    )
     return parser
 
 
@@ -211,6 +245,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             commit=args.commit,
             push=args.push,
             worktree=args.worktree,
+            resume=args.resume,
         )
     if args.command == "pr":
         from baton.pr import run_pr
@@ -238,6 +273,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             agent_name=args.agent,
             tier=args.tier,
             timeout=args.timeout,
+            dry_run=args.dry_run,
+        )
+    if args.command == "roadmap":
+        return run_roadmap_command(
+            Path(args.path),
+            idea=args.idea,
+            from_file=args.from_file,
+            config_path=args.config,
+            agent_name=args.agent,
+            tier=args.tier,
+            timeout=args.timeout,
+            yes=args.yes,
+            commit=args.commit,
             dry_run=args.dry_run,
         )
     if args.command == "recheck":
