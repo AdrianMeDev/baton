@@ -2028,3 +2028,82 @@ def test_review_fix_costs_are_added(repo, git_identity):
 
     assert code == EXIT_OK
     assert "Agent cost: $0.0600" in out
+
+
+CRITICAL_JSON = (
+    '{"findings": [{"severity": "critical", "message": "week_start missing", '
+    '"path": "new.txt", "line": 1}]}'
+)
+CLEAN_JSON = '{"findings": []}'
+
+
+@pytest.fixture
+def review_fix_chain(repo, repair_chain):
+    config, agents = repair_chain
+    with config.open("a") as stream:
+        stream.write('\n[agents.third]\nadapter="pi"\ncommand="third"\nprovider="deepseek"\n')
+    config.write_text(
+        config.read_text().replace('M=["second"]\nL=["second"]', 'M=["second"]\nL=["third"]')
+    )
+    agents["first"].action = edit
+    agents["third"] = FakeAdapter(action=lambda r: (r / "fixed-l.txt").write_text("L"))
+    agents["second"].action = lambda r: (r / "fixed-m.txt").write_text("M")
+    write_plan(repo, verify="true")
+    return config, agents
+
+
+def _review_results(*replies):
+    return SequenceAdapter(*(AgentResult(ok=True, text=r) for r in replies))
+
+
+def test_review_fix_uses_the_tier_route_then_escalates_to_l(
+    repo, review_fix_chain, routed_executions, git_identity
+):
+    config, agents = review_fix_chain
+    agents["reviewer"] = _review_results(CRITICAL_JSON, CRITICAL_JSON, CLEAN_JSON)
+
+    code, out = invoke_chain(repo, review_fix_chain, commit=True)
+
+    assert code == EXIT_OK, out
+    assert (
+        len(agents["second"].prompts) == 1 and "week_start missing" in agents["second"].prompts[0]
+    )
+    assert len(agents["third"].prompts) == 1
+    assert len(agents["reviewer"].prompts) == 3
+    assert [e.route.tier for e in routed_executions][:3] == ["M", "M", "L"]
+    assert (repo / "fixed-m.txt").exists() and (repo / "fixed-l.txt").exists()
+    assert plan_of(repo).steps[0].status == "done"
+    assert "Critical review findings (1): fixing with tier L" in out
+
+
+def test_reviewer_never_shares_a_provider_with_a_fixer(repo, review_fix_chain, git_identity):
+    config, agents = review_fix_chain
+    # The only reviewer is OpenAI, like the fixer `second` (codex).
+    config.write_text(config.read_text().replace('provider="independent"', 'provider="openai"'))
+    agents["reviewer"] = _review_results(CRITICAL_JSON, CLEAN_JSON)
+
+    code, out = invoke_chain(repo, review_fix_chain, commit=True)
+
+    assert code == EXIT_FAILED
+    assert len(agents["reviewer"].prompts) == 1  # the first review ran, the second never did
+    assert "no eligible reviewer" in out
+    assert plan_of(repo).steps[0].status == "open"
+
+
+def test_worktree_run_ends_committed_with_the_final_review_as_evidence(
+    repo, review_fix_chain, git_identity
+):
+    import json
+
+    config, agents = review_fix_chain
+    agents["reviewer"] = _review_results(CRITICAL_JSON, CLEAN_JSON)
+
+    code, out = invoke_chain(repo, review_fix_chain, worktree=True)
+
+    assert code == EXIT_OK, out
+    plan = plan_of(repo)
+    assert plan.steps[0].status == "done"
+    entry = next(x for x in plan.log if x.startswith("baton-evidence: "))
+    assert json.loads(entry.removeprefix("baton-evidence: "))["findings"] == []
+    assert sum(x.startswith("baton-evidence: ") for x in plan.log) == 1
+    assert any("review fix round 1" in line for line in plan.log)
