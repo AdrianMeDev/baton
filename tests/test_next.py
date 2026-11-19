@@ -240,7 +240,9 @@ M=["first", "first", "second"]
         "second": FakeAdapter(action=edit),
         "reviewer": FakeAdapter(AgentResult(ok=True, text='{"findings": []}')),
     }
-    monkeypatch.setattr("baton.routed.make_adapter", lambda agent: agents[agent.name])
+    monkeypatch.setattr(
+        "baton.routed.make_adapter", lambda agent, read_only=False: agents[agent.name]
+    )
     return config, agents
 
 

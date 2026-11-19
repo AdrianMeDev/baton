@@ -47,7 +47,7 @@ def test_weighted_cli_sequence(tmp_path, monkeypatch, capsys):
         def run(self, *args):
             return AgentResult(ok=True, duration_s=2, tokens=10)
 
-    monkeypatch.setattr("baton.routed.make_adapter", lambda _: Fake())
+    monkeypatch.setattr("baton.routed.make_adapter", lambda _, read_only=False: Fake())
     a = AgentConfig("a", "claude", "fake", daily_run_budget=4, weight=2)
     b = AgentConfig("b", "codex", "fake", weight=1)
     route = Route("M", (a, a, b))

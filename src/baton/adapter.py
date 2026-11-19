@@ -110,16 +110,20 @@ class ClaudeAdapter:
         command: str = "claude",
         model: str | None = None,
         limit_patterns: tuple[str, ...] | None = None,
+        read_only: bool = False,
     ) -> None:
         self.command = command
         self.model = model
         self.limit_patterns = limit_patterns
+        self.read_only = read_only
 
     def argv(self, prompt: str) -> list[str]:
         """Argv without the prompt: ``claude -p`` reads it from stdin."""
         argv = [self.command, "-p", "--output-format", "json"]
         if self.model:
             argv += ["--model", self.model]
+        if self.read_only:
+            return [*argv, "--permission-mode", "plan"]
         argv += [
             "--permission-mode",
             "acceptEdits",
@@ -173,10 +177,12 @@ class CodexAdapter:
         command: str = "codex",
         model: str | None = None,
         limit_patterns: tuple[str, ...] | None = None,
+        read_only: bool = False,
     ) -> None:
         self.command = command
         self.model = model
         self.limit_patterns = limit_patterns
+        self.read_only = read_only
 
     def argv(self, prompt: str) -> list[str]:
         """Argv without the prompt: ``codex exec -`` reads it from stdin."""
@@ -186,7 +192,7 @@ class CodexAdapter:
             "--json",
             "--skip-git-repo-check",
             "--sandbox",
-            "workspace-write",
+            "read-only" if self.read_only else "workspace-write",
         ]
         if self.model:
             argv += ["-m", self.model]
@@ -259,13 +265,16 @@ class AgyAdapter:
         command: str = "agy",
         model: str | None = None,
         limit_patterns: tuple[str, ...] | None = None,
+        read_only: bool = False,
     ) -> None:
         self.command = command
         self.model = model
         self.limit_patterns = limit_patterns
+        self.read_only = read_only
 
     def argv(self, prompt: str) -> list[str]:
-        argv = [self.command, "-p", prompt, "--output-format", "json", "--mode", "accept-edits"]
+        mode = "plan" if self.read_only else "accept-edits"
+        argv = [self.command, "-p", prompt, "--output-format", "json", "--mode", mode]
         if self.model:
             argv += ["--model", self.model]
         return argv
@@ -313,10 +322,12 @@ class PiAdapter:
         command: str = "pi",
         model: str | None = None,
         limit_patterns: tuple[str, ...] | None = None,
+        read_only: bool = False,
     ) -> None:
         self.command = command
         self.model = model
         self.limit_patterns = limit_patterns
+        self.read_only = read_only
 
     def argv(self, prompt: str) -> list[str]:
         argv = [self.command, "-p", prompt, "--mode", "json"]
@@ -402,9 +413,13 @@ def _pi_message_cost(message: dict[str, Any]) -> float | None:
     return None
 
 
-def make_adapter(agent: AgentConfig) -> CommandAdapter:
+def make_adapter(agent: AgentConfig, read_only: bool = False) -> CommandAdapter:
+    """Build the adapter for ``agent``; ``read_only`` is for planning and review roles.
+
+    pi has no read-only flag, so it ignores ``read_only`` (see docs/adapters.md).
+    """
     adapters = {"claude": ClaudeAdapter, "codex": CodexAdapter, "agy": AgyAdapter, "pi": PiAdapter}
-    return adapters[agent.adapter](agent.command, agent.model, agent.limit_patterns)
+    return adapters[agent.adapter](agent.command, agent.model, agent.limit_patterns, read_only)
 
 
 def _reported_tokens(adapter: str, raw: str) -> int | None:

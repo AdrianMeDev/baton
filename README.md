@@ -151,6 +151,10 @@ context is bounded: a diff above 200,000 characters is truncated with a marker, 
 above 64 KB (or beyond 400,000 characters in total) are sent only as path, size and sha256, and
 the reviewer is told which parts were not seen.
 
+Planning and review run with the agent's read-only mode (Claude `--permission-mode plan`, Codex
+`--sandbox read-only`, agy `--mode plan`); implementation and fixes may edit files. pi has no
+read-only flag, so a pi planner or reviewer is not restricted; see `docs/adapters.md`.
+
 ```bash
 baton doctor
 baton auto

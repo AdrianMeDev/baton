@@ -213,3 +213,15 @@ passed (133 tests). This waiver does not establish real-provider quota compatibi
 For a future genuine quota response, use `baton probe <agent> --record tests/fixtures/<adapter>/limit.json`, review the
 redaction, document CLI/model and reset wording here, and add a parser regression test. Do not
 infer real-provider compatibility from simulated cases.
+
+## Role permissions
+
+baton builds adapters per role (`make_adapter(agent, read_only=...)`):
+
+| Role | claude | codex | agy | pi |
+|---|---|---|---|---|
+| plan (`baton plan`, `plan-roadmap`), review | `--permission-mode plan` | `--sandbox read-only` | `--mode plan` | no flag: unrestricted |
+| implement, fix | `--permission-mode acceptEdits`, Bash without git | `--sandbox workspace-write` | `--mode accept-edits` | no flag: unrestricted |
+
+pi has no read-only flag, so for pi in a planning or review role baton's HEAD, working-tree and
+plan-file checks are the only guard. Review additionally runs in an empty temporary directory.

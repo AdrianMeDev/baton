@@ -613,3 +613,31 @@ def test_prompt_file_is_removed_after_timeout(tmp_path):
     res = AgyAdapter(str(script)).run("x" * 200_000, tmp_path, 1)
     assert not res.ok and "timed out" in res.error
     assert set(Path(tempfile.gettempdir()).glob("baton-prompt-*")) == before
+
+
+def test_read_only_argv_per_adapter():
+    claude = ClaudeAdapter(read_only=True).argv("x")
+    assert claude[claude.index("--permission-mode") + 1] == "plan"
+    assert not {"acceptEdits", "--allowedTools", "--disallowedTools"} & set(claude)
+    codex = CodexAdapter(read_only=True).argv("x")
+    assert codex[codex.index("--sandbox") + 1] == "read-only"
+    assert "workspace-write" not in codex
+    agy = AgyAdapter(read_only=True).argv("x")
+    assert agy[agy.index("--mode") + 1] == "plan"
+    assert "accept-edits" not in agy
+    assert PiAdapter(read_only=True).argv("x") == PiAdapter().argv("x")
+
+
+def test_write_argv_is_unchanged_by_default():
+    assert "acceptEdits" in ClaudeAdapter().argv("x")
+    assert "workspace-write" in CodexAdapter().argv("x")
+    assert "accept-edits" in AgyAdapter().argv("x")
+
+
+def test_make_adapter_passes_read_only():
+    from baton.adapter import make_adapter
+    from baton.config import AgentConfig
+
+    agent = AgentConfig("c", "claude", "claude")
+    assert "plan" in make_adapter(agent, read_only=True).argv("x")
+    assert "acceptEdits" in make_adapter(agent).argv("x")

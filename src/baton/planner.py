@@ -56,6 +56,8 @@ ATTEMPTS = 2  # the first plan plus one retry with the validation errors
 class RoutedPlanner(RoutedAdapter):
     """A route for planning: a successor after a usage limit simply starts the plan afresh."""
 
+    read_only = True
+
     def _handoff(self, prompt: str, previous: str, repo: Path) -> str:
         return prompt
 

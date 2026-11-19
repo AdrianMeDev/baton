@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from baton.adapter import AgentResult
+from baton.adapter import AgentResult, ClaudeAdapter
 from baton.config import AgentConfig
 from baton.git import head
 from baton.limits import LimitStore, UsageLimit
@@ -252,7 +252,9 @@ def routed(names: tuple[str, ...], out: io.StringIO, store: LimitStore) -> Route
 
 def test_limit_handoff_restarts_the_plan_on_the_next_agent(repo: Path, monkeypatch):
     agents = {"first": Limited(), "second": FakePlanner(VALID)}
-    monkeypatch.setattr("baton.routed.make_adapter", lambda agent: agents[agent.name])
+    monkeypatch.setattr(
+        "baton.routed.make_adapter", lambda agent, read_only=False: agents[agent.name]
+    )
     store = LimitStore()
     out = io.StringIO()
     code = run_plan(repo, routed(("first", "second"), out, store), out, today="2026-11-19")
@@ -263,7 +265,7 @@ def test_limit_handoff_restarts_the_plan_on_the_next_agent(repo: Path, monkeypat
 
 
 def test_exhausted_route_writes_nothing(repo: Path, monkeypatch):
-    monkeypatch.setattr("baton.routed.make_adapter", lambda agent: Limited())
+    monkeypatch.setattr("baton.routed.make_adapter", lambda agent, read_only=False: Limited())
     out = io.StringIO()
     code = run_plan(repo, routed(("only",), out, LimitStore()), out, today="2026-11-19")
     assert code == EXIT_EXHAUSTED
@@ -334,7 +336,7 @@ def test_unknown_agent_exits_with_clear_message(repo: Path, config: Path):
 
 def test_command_routes_and_writes_the_plan(repo: Path, config: Path, monkeypatch):
     planner = FakePlanner(VALID)
-    monkeypatch.setattr("baton.routed.make_adapter", lambda agent: planner)
+    monkeypatch.setattr("baton.routed.make_adapter", lambda agent, read_only=False: planner)
     code, out = plan_command(repo, config)
     assert code == EXIT_OK, out
     assert "Tier M, agent small (claude)" in out
@@ -348,3 +350,21 @@ def test_planner_roadmap_problem_stops_and_writes_nothing(repo: Path):
     assert "M1 depends on a missing API" in out
     assert len(planner.prompts) == 1  # no retry
     assert not (repo / ".agent-plan.md").exists()
+
+
+def test_roles_request_read_only_adapters(repo: Path, monkeypatch):
+    from baton.routed import RoutedAdapter
+
+    seen: list[bool] = []
+
+    def fake_make(agent, read_only=False):
+        seen.append(read_only)
+        return ClaudeAdapter(read_only=read_only)
+
+    monkeypatch.setattr("baton.routed.make_adapter", fake_make)
+    route = Route("M", (AgentConfig("a", "claude", "a"),))
+    out = io.StringIO()
+    RoutedPlanner(route, LimitStore(), out).argv("p")
+    RoutedAdapter(route, LimitStore(), out, review=True).argv("p")
+    RoutedAdapter(route, LimitStore(), out).argv("p")
+    assert seen == [True, True, False]
