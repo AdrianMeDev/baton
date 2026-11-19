@@ -1616,3 +1616,144 @@ def test_commit_hint_is_shell_safe() -> None:
     _commit_hint(buf, message)
     line = buf.getvalue().splitlines()[-1].strip()
     assert shlex.split(line) == ["git", "commit", "-m", message]
+
+
+REPAIRED_STEPS = """### 1. [ ] feat: first
+- **Why:** w
+- **Changes:** `new.txt`
+- **Done when:** d
+- **Verify:** `true`
+
+### 2. [ ] feat: first part two
+- **Why:** w2
+- **Changes:** `b.txt`
+- **Done when:** d2
+- **Verify:** `true`
+
+### 3. [ ] feat: second
+- **Why:** w
+- **Changes:** `c.txt`
+- **Done when:** d3
+- **Verify:** `true`
+"""
+
+PROBLEM = AgentResult(ok=True, text="BATON-ROADMAP-PROBLEM: step is too big")
+
+
+class SequenceAdapter(FakeAdapter):
+    """Replies with each result in turn, then with the last one."""
+
+    def __init__(self, *results: AgentResult, action=None) -> None:
+        super().__init__(results[-1], action)
+        self.results = list(results)
+
+    def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
+        super().run(prompt, repo, timeout)
+        return self.results.pop(0) if len(self.results) > 1 else self.results[0]
+
+
+def repairer(reply: str | None, calls: list | None = None):
+    def hook(plan, plan_text, step, reason, diff):
+        if calls is not None:
+            calls.append((step.number, reason, diff))
+        return reply
+
+    return hook
+
+
+def repair_repo(repo: Path) -> None:
+    write_plan(repo, verify="true")
+    text = (repo / ".agent-plan.md").read_text(encoding="utf-8")
+    (repo / ".agent-plan.md").write_text(
+        text.replace("- **Why:** w\n", "- **Why:** w\n- **Changes:** c\n- **Done when:** d\n")
+    )
+
+
+def test_repair_then_success_continues_the_step(repo, git_identity):
+    repair_repo(repo)
+    calls: list = []
+    adapter = SequenceAdapter(PROBLEM, AgentResult(ok=True, text="done"), action=edit)
+
+    code, out = run(repo, adapter, commit=True, repair_plan=repairer(REPAIRED_STEPS, calls))
+
+    assert code == EXIT_OK
+    assert calls == [(1, "step is too big", calls[0][2])]
+    assert "new.txt" in calls[0][2]
+    plan = plan_of(repo)
+    assert [s.message for s in plan.steps] == [
+        "feat: first",
+        "feat: first part two",
+        "feat: second",
+    ]
+    assert plan.steps[0].status == "done"
+    assert sum(1 for line in plan.log if line.startswith("plan repaired:")) == 1
+    assert "Plan repaired at step 1" in out
+    assert "Resuming from the partial diff" in out
+
+
+def test_repair_without_commit_shows_diff_and_stops(repo):
+    repair_repo(repo)
+
+    code, out = run(repo, FakeAdapter(PROBLEM, action=edit), repair_plan=repairer(REPAIRED_STEPS))
+
+    assert code == EXIT_STOPPED
+    assert "+### 2. [ ] feat: first part two" in out
+    assert len(plan_of(repo).steps) == 3
+    assert plan_of(repo).steps[0].status == "open"
+
+
+def test_rejected_repair_keeps_the_plan_and_stops(repo):
+    repair_repo(repo)
+    code, out = run(repo, FakeAdapter(PROBLEM), repair_plan=repairer("no steps here"))
+
+    assert code == EXIT_ROADMAP_PROBLEM
+    assert "rejected" in out
+    after = plan_of(repo)
+    assert len(after.steps) == 2
+    assert any("plan repair rejected" in line for line in after.log)
+
+
+def test_failed_repair_agent_stops(repo):
+    repair_repo(repo)
+
+    code, _ = run(repo, FakeAdapter(PROBLEM), repair_plan=repairer(None))
+
+    assert code == EXIT_ROADMAP_PROBLEM
+    assert any("plan repair failed" in line for line in plan_of(repo).log)
+
+
+def test_needs_decision_stops_the_run(repo):
+    repair_repo(repo)
+
+    code, out = run(
+        repo,
+        FakeAdapter(PROBLEM),
+        repair_plan=repairer("BATON-NEEDS-DECISION: pick a database"),
+    )
+
+    assert code == EXIT_ROADMAP_PROBLEM
+    assert "pick a database" in out
+    assert len(plan_of(repo).steps) == 2
+
+
+def test_second_problem_on_the_same_step_stops(repo, git_identity):
+    repair_repo(repo)
+    calls: list = []
+
+    code, _ = run(
+        repo,
+        FakeAdapter(PROBLEM, action=edit),
+        commit=True,
+        repair_plan=repairer(REPAIRED_STEPS, calls),
+    )
+
+    assert code == EXIT_ROADMAP_PROBLEM
+    assert len(calls) == 1
+    assert sum(1 for line in plan_of(repo).log if line.startswith("plan repaired:")) == 1
+
+
+def test_without_repair_hook_behaviour_is_unchanged(repo):
+    code, _ = run(repo, FakeAdapter(PROBLEM))
+
+    assert code == EXIT_ROADMAP_PROBLEM
+    assert len(plan_of(repo).steps) == 2
