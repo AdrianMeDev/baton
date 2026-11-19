@@ -1849,3 +1849,261 @@ def test_repair_in_a_worktree_is_mirrored_back(repo, plan_repair_chain, git_iden
     assert code == EXIT_OK, out
     assert [s.message for s in plan_of(repo).steps][1] == "feat: first part two"
     assert any(line.startswith("plan repaired:") for line in plan_of(repo).log)
+
+
+def _reviewer_returning(*finding_lists):
+    """A review hook that answers with one list of findings per call, then with the last list."""
+    from baton.config import AgentConfig
+    from baton.review import Finding, ReviewResult
+
+    calls: list[int] = []
+    agent = AgentConfig(name="reviewer", adapter="claude", command="claude")
+
+    def review(plan, step, raw_step):
+        calls.append(1)
+        findings = finding_lists[min(len(calls), len(finding_lists)) - 1]
+        return ReviewResult(agent, tuple(Finding(*f) for f in findings))
+
+    review.calls = calls
+    return review
+
+
+CRITICAL = ("critical", "week_start missing", "new.txt", 1)
+
+
+def run_review_loop(repo, implementation, fixers, review, **kw):
+    from baton.next import _run_next
+
+    asked: list[bool] = []
+
+    def select_fix(step, escalated):
+        asked.append(escalated)
+        return fixers[min(len(asked), len(fixers)) - 1]
+
+    out = io.StringIO()
+    code = _run_next(
+        repo,
+        lambda step: implementation,
+        out,
+        agent_timeout=10,
+        verify_timeout=10,
+        today="2026-11-19",
+        select_fix=select_fix,
+        review_step=review,
+        **kw,
+    )
+    return code, out.getvalue(), asked
+
+
+def test_critical_finding_is_fixed_and_reviewed_again(repo, git_identity):
+    fixer = FakeAdapter(action=lambda r: (r / "fixed.txt").write_text("ok"))
+    review = _reviewer_returning([CRITICAL], [("warning", "style", None, None)])
+
+    code, out, asked = run_review_loop(repo, FakeAdapter(action=edit), [fixer], review, commit=True)
+
+    assert code == EXIT_OK, out
+    assert asked == [False] and len(review.calls) == 2
+    assert "week_start missing" in fixer.prompts[0] and "new.txt:1" in fixer.prompts[0]
+    assert (repo / "fixed.txt").exists()
+    plan = plan_of(repo)
+    assert plan.steps[0].status == "done"
+    assert any("review fix round 1 (1 critical findings)" in line for line in plan.log)
+    assert any("after 1 review fix rounds" in line for line in plan.log)
+    import json
+
+    evidence = json.loads(
+        next(x for x in plan.log if x.startswith("baton-evidence: ")).removeprefix(
+            "baton-evidence: "
+        )
+    )
+    assert [f["severity"] for f in evidence["findings"]] == ["warning"]
+
+
+def test_second_round_escalates(repo, git_identity):
+    fixer = FakeAdapter(action=lambda r: (r / "fixed.txt").write_text("ok"))
+    review = _reviewer_returning([CRITICAL], [CRITICAL], [])
+
+    code, out, asked = run_review_loop(
+        repo, FakeAdapter(action=edit), [fixer, fixer], review, commit=True
+    )
+
+    assert code == EXIT_OK, out
+    assert asked == [False, True] and len(review.calls) == 3
+    assert plan_of(repo).steps[0].status == "done"
+
+
+def test_critical_after_two_rounds_stops_without_commit(repo, git_identity):
+    fixer = FakeAdapter(action=edit)
+    review = _reviewer_returning([CRITICAL])
+
+    code, out, asked = run_review_loop(
+        repo, FakeAdapter(action=edit), [fixer, fixer], review, commit=True
+    )
+
+    assert code == EXIT_FAILED
+    assert asked == [False, True] and len(review.calls) == 3
+    assert "Auto-commit blocked by critical review findings" in out
+    assert plan_of(repo).steps[0].status == "pending"
+
+
+def test_fixer_failure_stops_and_keeps_the_step_open(repo):
+    fixer = FakeAdapter(AgentResult(ok=False, error="fix broke"))
+
+    code, out, _ = run_review_loop(
+        repo, FakeAdapter(action=edit), [fixer], _reviewer_returning([CRITICAL]), commit=True
+    )
+
+    assert code == EXIT_FAILED
+    assert "The fix agent failed: fix broke" in out
+    assert plan_of(repo).steps[0].status == "open"
+
+
+def test_verify_failure_after_the_review_fix_stops(repo):
+    write_plan(repo, verify="test ! -e broken.txt")
+    fixer = FakeAdapter(action=lambda r: (r / "broken.txt").write_text("x"))
+
+    code, out, _ = run_review_loop(
+        repo, FakeAdapter(action=edit), [fixer], _reviewer_returning([CRITICAL]), commit=True
+    )
+
+    assert code == EXIT_FAILED
+    assert "Verify failed after the review fix" in out
+    assert any("after review fix round 1" in line for line in plan_of(repo).log)
+    assert plan_of(repo).steps[0].status == "open"
+
+
+def test_fixer_that_commits_stops(repo):
+    def commit(r: Path) -> None:
+        (r / "x.txt").write_text("x")
+        git(r, "add", "-A")
+        git(r, "commit", "-q", "-m", "sneaky")
+
+    code, out, _ = run_review_loop(
+        repo,
+        FakeAdapter(action=edit),
+        [FakeAdapter(action=commit)],
+        _reviewer_returning([CRITICAL]),
+        commit=True,
+    )
+
+    assert code == EXIT_FAILED
+    assert "fixer committed" in out
+
+
+def test_no_fix_route_keeps_todays_behaviour(repo):
+    review = _reviewer_returning([CRITICAL])
+
+    code, out, asked = run_review_loop(repo, FakeAdapter(action=edit), [None], review, commit=True)
+
+    assert code == EXIT_FAILED
+    assert asked == [False] and len(review.calls) == 1
+    assert "Auto-commit blocked by critical review findings" in out
+
+
+def test_finding_without_a_path_is_not_sent_to_a_fixer(repo):
+    review = _reviewer_returning([("critical", "vague", None, None)])
+    fixer = FakeAdapter()
+
+    code, out, asked = run_review_loop(repo, FakeAdapter(action=edit), [fixer], review, commit=True)
+
+    assert code == EXIT_FAILED
+    assert asked == [] and fixer.prompts == []
+
+
+def test_warnings_do_not_start_a_fix_round(repo, git_identity):
+    review = _reviewer_returning([("warning", "meh", "new.txt", 1)])
+    fixer = FakeAdapter()
+
+    code, _, asked = run_review_loop(repo, FakeAdapter(action=edit), [fixer], review, commit=True)
+
+    assert code == EXIT_OK
+    assert asked == [] and fixer.prompts == []
+
+
+def test_review_fix_costs_are_added(repo, git_identity):
+    fixer = FakeAdapter(AgentResult(ok=True, text="fixed", cost=0.05))
+    review = _reviewer_returning([CRITICAL], [])
+
+    code, out, _ = run_review_loop(repo, FakeAdapter(action=edit), [fixer], review, commit=True)
+
+    assert code == EXIT_OK
+    assert "Agent cost: $0.0600" in out
+
+
+CRITICAL_JSON = (
+    '{"findings": [{"severity": "critical", "message": "week_start missing", '
+    '"path": "new.txt", "line": 1}]}'
+)
+CLEAN_JSON = '{"findings": []}'
+
+
+@pytest.fixture
+def review_fix_chain(repo, repair_chain):
+    config, agents = repair_chain
+    with config.open("a") as stream:
+        stream.write('\n[agents.third]\nadapter="pi"\ncommand="third"\nprovider="deepseek"\n')
+    config.write_text(
+        config.read_text().replace('M=["second"]\nL=["second"]', 'M=["second"]\nL=["third"]')
+    )
+    agents["first"].action = edit
+    agents["third"] = FakeAdapter(action=lambda r: (r / "fixed-l.txt").write_text("L"))
+    agents["second"].action = lambda r: (r / "fixed-m.txt").write_text("M")
+    write_plan(repo, verify="true")
+    return config, agents
+
+
+def _review_results(*replies):
+    return SequenceAdapter(*(AgentResult(ok=True, text=r) for r in replies))
+
+
+def test_review_fix_uses_the_tier_route_then_escalates_to_l(
+    repo, review_fix_chain, routed_executions, git_identity
+):
+    config, agents = review_fix_chain
+    agents["reviewer"] = _review_results(CRITICAL_JSON, CRITICAL_JSON, CLEAN_JSON)
+
+    code, out = invoke_chain(repo, review_fix_chain, commit=True)
+
+    assert code == EXIT_OK, out
+    assert (
+        len(agents["second"].prompts) == 1 and "week_start missing" in agents["second"].prompts[0]
+    )
+    assert len(agents["third"].prompts) == 1
+    assert len(agents["reviewer"].prompts) == 3
+    assert [e.route.tier for e in routed_executions][:3] == ["M", "M", "L"]
+    assert (repo / "fixed-m.txt").exists() and (repo / "fixed-l.txt").exists()
+    assert plan_of(repo).steps[0].status == "done"
+    assert "Critical review findings (1): fixing with tier L" in out
+
+
+def test_reviewer_never_shares_a_provider_with_a_fixer(repo, review_fix_chain, git_identity):
+    config, agents = review_fix_chain
+    # The only reviewer is OpenAI, like the fixer `second` (codex).
+    config.write_text(config.read_text().replace('provider="independent"', 'provider="openai"'))
+    agents["reviewer"] = _review_results(CRITICAL_JSON, CLEAN_JSON)
+
+    code, out = invoke_chain(repo, review_fix_chain, commit=True)
+
+    assert code == EXIT_FAILED
+    assert len(agents["reviewer"].prompts) == 1  # the first review ran, the second never did
+    assert "no eligible reviewer" in out
+    assert plan_of(repo).steps[0].status == "open"
+
+
+def test_worktree_run_ends_committed_with_the_final_review_as_evidence(
+    repo, review_fix_chain, git_identity
+):
+    import json
+
+    config, agents = review_fix_chain
+    agents["reviewer"] = _review_results(CRITICAL_JSON, CLEAN_JSON)
+
+    code, out = invoke_chain(repo, review_fix_chain, worktree=True)
+
+    assert code == EXIT_OK, out
+    plan = plan_of(repo)
+    assert plan.steps[0].status == "done"
+    entry = next(x for x in plan.log if x.startswith("baton-evidence: "))
+    assert json.loads(entry.removeprefix("baton-evidence: "))["findings"] == []
+    assert sum(x.startswith("baton-evidence: ") for x in plan.log) == 1
+    assert any("review fix round 1" in line for line in plan.log)
