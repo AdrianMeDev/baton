@@ -19,6 +19,15 @@ ERROR_TAIL_CHARS = 500
 # Linux caps a single argv string at 128 KiB (MAX_ARG_STRLEN); stay well below it.
 ARGV_PROMPT_LIMIT = 100_000
 
+# agy auto-denies every tool call without a matching rule in headless mode and ends its turn with
+# an empty answer, so each role passes explicit rules. `--settings` applies to one session only.
+AGY_READ_ONLY_SETTINGS = json.dumps(
+    {"permissions": {"deny": ["command(*)", "write_file(*)"]}}, separators=(",", ":")
+)
+AGY_EDIT_SETTINGS = json.dumps(
+    {"permissions": {"allow": ["command(*)"], "deny": ["command(git)"]}}, separators=(",", ":")
+)
+
 
 @dataclass(frozen=True)
 class AgentResult:
@@ -291,7 +300,9 @@ class AgyAdapter:
 
     def argv(self, prompt: str) -> list[str]:
         mode = "plan" if self.read_only else "accept-edits"
+        settings = AGY_READ_ONLY_SETTINGS if self.read_only else AGY_EDIT_SETTINGS
         argv = [self.command, "-p", prompt, "--output-format", "json", "--mode", mode]
+        argv += ["--settings", settings]
         if self.model:
             argv += ["--model", self.model]
         return argv

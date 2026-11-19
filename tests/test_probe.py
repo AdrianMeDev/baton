@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from baton.adapter import AGY_READ_ONLY_SETTINGS
 from baton.cli import main
 from baton.config import AgentConfig
 from baton.probe import DEFAULT_PROMPT, probe_argv
@@ -34,6 +35,7 @@ def test_probe_argv_per_adapter() -> None:
     ]  # fmt: skip
     assert probe_argv(agent("agy"), "hi") == [
         "tool", "-p", "hi", "--output-format", "json", "--mode", "plan",
+        "--settings", AGY_READ_ONLY_SETTINGS,
     ]  # fmt: skip
     assert probe_argv(agent("pi", "ollama/q"), "hi") == [
         "tool", "-p", "hi", "--mode", "json", "--model", "ollama/q",

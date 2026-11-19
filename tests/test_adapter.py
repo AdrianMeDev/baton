@@ -5,7 +5,13 @@ from unittest.mock import Mock
 
 import pytest
 
-from baton.adapter import AgyAdapter, ClaudeAdapter, CodexAdapter, PiAdapter
+from baton.adapter import (
+    AGY_EDIT_SETTINGS,
+    AgyAdapter,
+    ClaudeAdapter,
+    CodexAdapter,
+    PiAdapter,
+)
 from baton.recording import load
 from baton.runner import RunResult
 
@@ -194,10 +200,31 @@ def test_agy_argv_requests_headless_edits():
         "json",
         "--mode",
         "accept-edits",
+        "--settings",
+        AGY_EDIT_SETTINGS,
     ]
     argv = AgyAdapter("my-agy", "Gemini 4 Argon").argv("do it")
     assert argv[0] == "my-agy"
     assert argv[-2:] == ["--model", "Gemini 4 Argon"]
+
+
+def _agy_rules(argv):
+    return json.loads(argv[argv.index("--settings") + 1])["permissions"]
+
+
+def test_agy_edit_role_allows_commands_but_not_git():
+    assert _agy_rules(AgyAdapter().argv("x")) == {"allow": ["command(*)"], "deny": ["command(git)"]}
+
+
+def test_agy_read_only_role_denies_commands_and_writes():
+    rules = _agy_rules(AgyAdapter(read_only=True).argv("x"))
+    assert rules == {"deny": ["command(*)", "write_file(*)"]}
+
+
+def test_agy_settings_precede_model():
+    argv = AgyAdapter(model="m", read_only=True).argv("x")
+    assert argv.index("--settings") < argv.index("--model")
+    assert argv[-2:] == ["--model", "m"]
 
 
 def test_agy_empty_output_runs_once(monkeypatch, tmp_path):
