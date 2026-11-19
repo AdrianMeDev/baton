@@ -462,7 +462,7 @@ def test_cli_limit_recovery(repo, chain, monkeypatch, capsys, routed_executions)
     second.write_text(
         f"#!{sys.executable}\n"
         "import json, sys\nfrom pathlib import Path\n"
-        "prompt = sys.argv[-1]\n"
+        "prompt = sys.stdin.read()\n"
         "assert 'partial implementation' in prompt and 'notes.txt' in prompt\n"
         "assert Path('notes.txt').read_text() == 'partial notes\\n'\n"
         "Path('a.txt').write_text('finished implementation\\n')\n"
@@ -1017,10 +1017,7 @@ def test_cli_quality_loop_with_partial_handoff_and_independent_review(
         path.write_text(
             f"#!{sys.executable}\nimport json, sys\nfrom pathlib import Path\n"
             f'with Path({str(events)!r}).open("a") as log: log.write({name!r} + "\\n")\n'
-            "prompt = sys.argv[sys.argv.index('-p') + 1]\n"
-            + action
-            + "\n"
-            + f"print(json.dumps({response!r}))\n"
+            "prompt = sys.stdin.read()\n" + action + "\n" + f"print(json.dumps({response!r}))\n"
         )
         path.chmod(0o755)
         return str(path)

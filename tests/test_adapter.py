@@ -19,7 +19,8 @@ def _run_result(name: str, adapter: str = "claude") -> RunResult:
 
 def test_argv_without_model():
     argv = ClaudeAdapter("claude").argv("do it")
-    assert argv[:4] == ["claude", "-p", "do it", "--output-format"]
+    assert argv[:4] == ["claude", "-p", "--output-format", "json"]
+    assert "do it" not in argv
     assert "--model" not in argv
     assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
 
@@ -88,8 +89,7 @@ def test_codex_argv():
         "--skip-git-repo-check",
         "--sandbox",
         "workspace-write",
-        "--",
-        "do it",
+        "-",
     ]
     assert CodexAdapter("my-codex", "my-model").argv("--literal prompt") == [
         "my-codex",
@@ -100,16 +100,17 @@ def test_codex_argv():
         "workspace-write",
         "-m",
         "my-model",
-        "--",
-        "--literal prompt",
+        "-",
     ]
+    assert "--literal prompt" not in CodexAdapter().argv("--literal prompt")
 
 
 def test_codex_run_passes_cwd_and_timeout(monkeypatch, tmp_path):
     adapter = CodexAdapter()
 
-    def fake_run(argv, cwd, timeout):
+    def fake_run(argv, cwd, timeout, input=None):
         assert argv == adapter.argv("do it")
+        assert input == "do it"
         assert cwd == tmp_path
         assert timeout == 17
         return _run_result("ok.json", "codex")
@@ -517,3 +518,32 @@ def test_optional_usage(usage, expected):
     assert _reported_tokens("CodexAdapter", event) == expected
     if expected is not None:
         assert _reported_tokens("CodexAdapter", event + "\n" + event) == expected * 2
+
+
+def _fake_agent(tmp_path, name):
+    """A fake CLI that records its argv and stdin, then prints a valid result."""
+    script = tmp_path / name
+    out = tmp_path / f"{name}.stdin"
+    if name == "claude":
+        reply = '{"is_error": false, "result": "OK"}'
+    else:
+        reply = (
+            '{"type":"turn.started"}\\n{"type":"item.completed","item":'
+            '{"type":"agent_message","text":"OK"}}\\n{"type":"turn.completed"}'
+        )
+    script.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$@" > "{out}.argv"\ncat > "{out}"\nprintf \'{reply}\\n\'\n'
+    )
+    script.chmod(0o755)
+    return script, out
+
+
+@pytest.mark.parametrize(("name", "cls"), [("claude", ClaudeAdapter), ("codex", CodexAdapter)])
+def test_large_prompt_reaches_the_child_via_stdin(tmp_path, name, cls):
+    script, out = _fake_agent(tmp_path, name)
+    prompt = "x" * 300_000 + "\nend"
+    res = cls(str(script)).run(prompt, tmp_path, 30)
+    assert res.ok, res.error
+    assert out.read_text() == prompt
+    argv_text = Path(f"{out}.argv").read_text()
+    assert len(argv_text) < 1000 and "xxxx" not in argv_text

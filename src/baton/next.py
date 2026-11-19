@@ -540,6 +540,8 @@ def _dry_run(
     adapter = select_adapter(step)
     say(out, "Command (cwd = repo root):")
     say(out, "  " + " ".join(shlex.quote(a) for a in adapter.argv("<prompt>")))
+    if getattr(adapter, "transport", "argv") == "stdin":
+        say(out, "  (prompt via stdin)")
     say(out, "Prompt:")
     say(out, prompt)
     return EXIT_OK

@@ -37,10 +37,12 @@ Probes never read tokens or auth files; the CLIs use the login the user already 
 `baton next` uses a write-enabled call, built by `ClaudeAdapter.argv()` in `src/baton/adapter.py`:
 
 ```
-claude -p <prompt> --output-format json [--model M] \
+claude -p --output-format json [--model M] \
   --permission-mode acceptEdits --allowedTools Bash --disallowedTools "Bash(git:*)"
 ```
 
+- The prompt is written to the child's stdin, not passed in argv, so it is not limited by the
+  kernel's 128 KiB per-argument limit (`baton next --dry-run` prints "(prompt via stdin)").
 - `acceptEdits` lets the agent change files without prompting; there is no plan mode here.
 - `Bash` is allowed so the agent can run tests; `Bash(git:*)` is disallowed, so the agent cannot
   commit, stash or reset. This is a guard, not a sandbox: baton additionally compares HEAD before
@@ -63,7 +65,8 @@ claude -p <prompt> --output-format json [--model M] \
 
 ### Implement call
 
-`codex exec --json --sandbox workspace-write [-m M] -- <prompt>` runs in the repository.
+`codex exec --json --sandbox workspace-write [-m M] -` runs in the repository; the trailing `-`
+makes codex read the prompt from stdin.
 Success requires exit 0, a `turn.completed` event and a final agent message.
 
 ## agy (Antigravity)

@@ -35,6 +35,8 @@ class Adapter(Protocol):
 class CommandAdapter(Adapter, Protocol):
     def parse(self, result: RunResult) -> AgentResult: ...
 
+    transport: str
+
     def argv(self, prompt: str) -> list[str]: ...
 
 
@@ -78,6 +80,8 @@ def _classify_failure(parse):
 class ClaudeAdapter:
     """``claude -p`` with edits allowed and git blocked (see docs/adapters.md)."""
 
+    transport = "stdin"
+
     def __init__(
         self,
         command: str = "claude",
@@ -89,7 +93,8 @@ class ClaudeAdapter:
         self.limit_patterns = limit_patterns
 
     def argv(self, prompt: str) -> list[str]:
-        argv = [self.command, "-p", prompt, "--output-format", "json"]
+        """Argv without the prompt: ``claude -p`` reads it from stdin."""
+        argv = [self.command, "-p", "--output-format", "json"]
         if self.model:
             argv += ["--model", self.model]
         argv += [
@@ -132,11 +137,13 @@ class ClaudeAdapter:
         return AgentResult(ok=True, text=text, cost=cost, raw=raw)
 
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
-        return self.parse(run_command(self.argv(prompt), repo, timeout))
+        return self.parse(run_command(self.argv(prompt), repo, timeout, input=prompt))
 
 
 class CodexAdapter:
     """Run ``codex exec`` with workspace edits and JSONL events."""
+
+    transport = "stdin"
 
     def __init__(
         self,
@@ -149,6 +156,7 @@ class CodexAdapter:
         self.limit_patterns = limit_patterns
 
     def argv(self, prompt: str) -> list[str]:
+        """Argv without the prompt: ``codex exec -`` reads it from stdin."""
         argv = [
             self.command,
             "exec",
@@ -159,7 +167,7 @@ class CodexAdapter:
         ]
         if self.model:
             argv += ["-m", self.model]
-        return [*argv, "--", prompt]
+        return [*argv, "-"]
 
     @_classify_failure
     def parse(self, result: RunResult) -> AgentResult:
@@ -215,11 +223,13 @@ class CodexAdapter:
         return AgentResult(ok=True, text=text, raw=raw)
 
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
-        return self.parse(run_command(self.argv(prompt), repo, timeout))
+        return self.parse(run_command(self.argv(prompt), repo, timeout, input=prompt))
 
 
 class AgyAdapter:
     """Run Antigravity in headless accept-edits mode over ordinary pipes."""
+
+    transport = "argv"
 
     def __init__(
         self,
@@ -272,6 +282,8 @@ class AgyAdapter:
 
 class PiAdapter:
     """Run pi with JSONL events and pass its provider-qualified model through."""
+
+    transport = "argv"
 
     def __init__(
         self,

@@ -291,6 +291,8 @@ def run_plan_command(
         adapter = select_adapter(milestone)
         say(out, "Command (cwd = repo root):")
         say(out, "  " + " ".join(shlex.quote(a) for a in adapter.argv("<prompt>")))
+        if getattr(adapter, "transport", "argv") == "stdin":
+            say(out, "  (prompt via stdin)")
         say(out, "Prompt:")
         say(out, target.prompt())
         return EXIT_OK

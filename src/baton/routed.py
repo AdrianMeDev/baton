@@ -60,7 +60,9 @@ class RoutedAdapter:
         )
         if agent is not None:
             self._announce(agent)
-            return make_adapter(agent).argv(prompt)
+            adapter = make_adapter(agent)
+            self.transport = adapter.transport
+            return adapter.argv(prompt)
         raise ConfigError(self._exhaustion_message())
 
     def _exhaustion_message(self):
