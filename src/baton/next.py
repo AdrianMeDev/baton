@@ -52,6 +52,7 @@ from baton.prompt import (
     fix_prompt,
     handoff_prompt,
     implement_prompt,
+    review_fix_prompt,
     review_prompt,
     roadmap_problem,
     step_text,
@@ -59,6 +60,7 @@ from baton.prompt import (
 from baton.repair import repair_from_reply, repair_prompt, repaired_before
 from baton.review import (
     SEVERITIES,
+    Finding,
     ReviewError,
     ReviewResult,
     candidate_tree,
@@ -302,6 +304,10 @@ def _try_repair(
     return None
 
 
+def _critical(review: ReviewResult | None) -> list[Finding]:
+    return [] if review is None else [f for f in review.findings if f.severity == "critical"]
+
+
 def _verify_failure(verify: VerifyResult) -> str:
     if verify.timed_out:
         return "timed out"
@@ -514,15 +520,79 @@ def _run_next(
             return EXIT_FAILED
 
         review = None
+        review_fixes = 0
         if review_step is not None:
-            try:
-                with _protect_plan(plan_path):
-                    review = review_step(plan, step, raw_step)
-            except (ReviewError, ConfigError, GitError, LimitStateError, OSError) as exc:
-                say(out, f"Independent review failed: {exc}")
-                say(out, "Changes stay in the working tree; the step stays open.")
-                _log(plan_path, f"step {step.number}: independent review failed ({exc})", date)
+
+            def review_once() -> bool:
+                nonlocal review
+                try:
+                    with _protect_plan(plan_path):
+                        review = review_step(plan, step, raw_step)
+                except (ReviewError, ConfigError, GitError, LimitStateError, OSError) as exc:
+                    say(out, f"Independent review failed: {exc}")
+                    say(out, "Changes stay in the working tree; the step stays open.")
+                    _log(plan_path, f"step {step.number}: independent review failed ({exc})", date)
+                    return False
+                return True
+
+            if not review_once():
                 return EXIT_FAILED
+            for escalated in (False, True):
+                critical = _critical(review)
+                # A finding without a location cannot be handed to a fixer: stop as before.
+                if not critical or any(f.path is None for f in critical) or select_fix is None:
+                    break
+                try:
+                    fixer = select_fix(step, escalated)
+                except ConfigError:
+                    fixer = None  # no fix route configured: the review only reports, as before
+                if fixer is None:
+                    break
+                review_fixes += 1
+                label = "tier L" if escalated else "the step's tier"
+                say(out, f"Critical review findings ({len(critical)}): fixing with {label}.")
+                _log(
+                    plan_path,
+                    f"step {step.number}: review fix round {review_fixes} "
+                    f"({len(critical)} critical findings)",
+                    date,
+                )
+                with _protect_plan(plan_path):
+                    repair = fixer.run(review_fix_prompt(prompt, critical), repo, agent_timeout)
+                after = head(repo)
+                if after != before:
+                    say(
+                        out,
+                        f"HEAD moved from {before} to {after}: fixer committed. Step not marked.",
+                    )
+                    _log(
+                        plan_path, f"step {step.number}: fixer moved HEAD {before} -> {after}", date
+                    )
+                    return EXIT_FAILED
+                if not repair.ok:
+                    say(out, f"The fix agent failed: {repair.error}")
+                    say(out, "Changes stay in the working tree; the step stays open.")
+                    _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
+                    return EXIT_FAILED
+                with _protect_plan(plan_path):
+                    verify = run_verify(step.verify, repo, verify_timeout)
+                if verify.verified and not verify.passed:
+                    say(out, f"Verify failed after the review fix ({_verify_failure(verify)}).")
+                    say(out, verify.output_tail)
+                    say(out, "Changes stay in the working tree; the step stays open.")
+                    _log(
+                        plan_path,
+                        f"step {step.number}: verify failed ({_verify_failure(verify)}) "
+                        f"after review fix round {review_fixes}",
+                        date,
+                    )
+                    return EXIT_FAILED
+                if result.cost is not None and repair.cost is not None:
+                    result = replace(result, cost=result.cost + repair.cost)
+                else:
+                    result = replace(result, cost=None)
+                if not review_once():
+                    return EXIT_FAILED
 
         evidence = evidence_entry(
             step.number, candidate_tree(repo), head(repo, short=False), verify, review
@@ -561,6 +631,8 @@ def _run_next(
         note = "implemented" if verify.verified else "implemented (no Verify command)"
         if repairs:
             note += f" after {repairs} repair attempts"
+        if review_fixes:
+            note += f" after {review_fixes} review fix rounds"
         if review is not None:
             note += f"; {review.summary()}"
         if committed is not None:
