@@ -436,7 +436,8 @@ branch (e.g. `main`) with an `origin` remote; a dirty or diverged base is a stop
   roadmap, git and `~/.local/state/baton/auto.json`; a step recorded as in progress continues from
   its partial diff. Plain `baton next` still refuses a dirty tree with an open step.
 - **Stop rules:** a step failed after escalation, merge refused (CI red, critical finding, PR not
-  mergeable), a `BATON-ROADMAP-PROBLEM: <reason>` line from the planner or implementer, budget
+  mergeable), a `BATON-ROADMAP-PROBLEM: <reason>` line from the planner or from an implementer
+  whose plan repair failed or was not allowed ([Plan repair](#plan-repair)), budget
   reached (`--max-steps`, `--max-hours`; per run, across milestones), `baton stop`, or a base
   checkout that cannot be fast-forwarded. `--no-merge` stops after the PR is published.
 - **`baton stop`** sets a stop request that `baton auto` honors before the next step or while
@@ -593,6 +594,35 @@ tests. No real quota response has been captured. To reproduce the offline recove
 uv run pytest -q tests/test_next.py -k cli_limit_recovery
 ```
 
+### Plan repair
+
+When an implementing agent replies `BATON-ROADMAP-PROBLEM: <reason>` because the plan itself has a
+gap (a missing prerequisite, a step that is too big), `baton next` and `baton auto` try to repair
+the plan once instead of stopping the run.
+
+- **Who.** The `plan_commits` route at tier `L`, read-only like `baton plan`; a limited agent
+  hands over to the next one, which starts afresh. It gets the reason, the whole plan, the problem
+  step and the partial diff. Configs without `[routes.*]` skip repair. A problem reported by the
+  roadmap planner (`baton plan`) is not repaired.
+- **What may change.** Only the problem step and the steps after it: extend, insert or split.
+  baton, not the agent, writes `.agent-plan.md`, and only after validating the reply. Steps
+  before the problem step, the header and all `baton-evidence` log lines stay byte-identical.
+  Replaced steps are open, numbered without gaps, have a Conventional Commits message and
+  non-empty Why, Changes, Done when and Verify, and the plan has at most 12 steps (the 3–8 limit
+  of fresh plans does not apply).
+- **Once per step.** baton logs `plan repaired: step N: <reason> | old: <titles> | new: <titles>`;
+  a second problem on the same step stops the run.
+- **Continuing.** The partial diff stays in the tree and the step continues from it, like
+  `baton next --resume`. With `--commit`, `--worktree` and `baton auto` that happens at once.
+  Without `--commit`, baton writes the repair, prints the plan diff and stops (exit code 2) so you
+  can review it; then run `baton next --resume`.
+- **When it stops anyway** (exit code 4, plan unchanged, reason in the Log): the repair agent
+  failed or every agent is in cooldown, its reply did not validate, it answered
+  `BATON-NEEDS-DECISION: <reason>` because the fix needs your decision (product behavior,
+  destructive change, new dependency, architecture), or the step was already repaired.
+- **Review.** The pull request body of a milestone lists every repair under "Plan repairs" with
+  the reason and the old and new step titles.
+
 ### Plan format
 
 baton reads and writes `.agent-plan.md` and `docs/ROADMAP.md` in the format of the `/plan-commits`,
@@ -600,7 +630,8 @@ baton reads and writes `.agent-plan.md` and `docs/ROADMAP.md` in the format of t
 waiting for the commit, `[x] – <hash>` committed, `[-]` skipped. Writes are in place (markers, hash
 suffixes, Log and Changelog lines only), so hand edits survive. Each step may carry an optional
 `- **Size:** S|M|L` bullet; unknown bullets are ignored. Structural errors (no `## Steps`, unknown
-marker, duplicate step numbers) are reported with the line number.
+marker, duplicate step numbers) are reported with the line number. A repair appends a
+`plan repaired:` line to the `## Log` and rewrites the open steps; see [Plan repair](#plan-repair).
 
 ## Security
 
@@ -616,6 +647,11 @@ baton automates coding agents; it is not a sandbox.
   mistakes; they do not stop an agent from reading or changing files elsewhere on your machine.
 - **Read-only roles.** Planning and review run with the read-only mode of Claude, Codex and agy
   (agy also gets deny rules for commands and file writes; see `docs/adapters.md`). pi has no read-only flag, so a pi planner or reviewer is unrestricted.
+- **Plan repair.** The repair agent uses the read-only planning mode (not for pi, see above) and
+  cannot write `.agent-plan.md`: baton restores the file if it changes and applies only a
+  validated reply. It can still rewrite the open steps that your implementing agents then follow,
+  so repairs are bounded (open steps from the problem step on, at most 12 steps, one repair per
+  step), written to the plan Log and listed in the pull request. Review them there.
 - **Everything is committed and pushed.** `baton next --commit` and `baton auto` stage with
   `git add -A`, and auto pushes and opens a PR. Secrets or generated files that are not in
   `.gitignore` will be committed and pushed.
