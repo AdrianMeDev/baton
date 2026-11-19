@@ -94,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="print the command and prompt, change nothing"
     )
     nxt.add_argument(
+        "--resume",
+        action="store_true",
+        help="continue the open step from the partial diff in the working tree",
+    )
+    nxt.add_argument(
         "--commit",
         action="store_true",
         help="commit a verified step with the plan's message (blocked by critical findings)",
@@ -240,6 +245,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             commit=args.commit,
             push=args.push,
             worktree=args.worktree,
+            resume=args.resume,
         )
     if args.command == "pr":
         from baton.pr import run_pr

@@ -367,13 +367,14 @@ unfinished plan or a dirty tree. `--timeout` (default 1800 s) limits each planne
 
 ```
 baton next [--path DIR] [--agent NAME] [--tier {S,M,L}] [--timeout S] [--verify-timeout S] [--dry-run]
-          [--commit] [--push] [--worktree]
+          [--commit] [--push] [--worktree] [--resume]
 ```
 
 Implements exactly one plan step and stops for your commit. The tier comes from `--tier`, the
 step’s `Size` field, or `M` in that order. `--agent` selects a named agent directly. For example,
 `baton next --agent codex --dry-run` previews Codex, and `baton next --tier L` uses the large
-implementation route.
+implementation route. `--resume` continues the open step from the partial diff a limited agent
+or a plan repair left in the working tree; without it a dirty tree with an open step is refused.
 
 1. **Gate.** If a step is `[~]` and committed (HEAD is newer than the noted hash), it is marked
    `[x]` and the run continues. If it is not committed yet, baton prints the changed files and the

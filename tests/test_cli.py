@@ -322,6 +322,13 @@ def test_next_accepts_push_flag() -> None:
     assert build_parser().parse_args(["next"]).push is False
 
 
+def test_next_accepts_resume_flag() -> None:
+    from baton.cli import build_parser
+
+    assert build_parser().parse_args(["next", "--resume"]).resume is True
+    assert build_parser().parse_args(["next"]).resume is False
+
+
 ROADMAP = (FIXTURES / "roadmaps" / "planning.md").read_text(encoding="utf-8")
 GENERATED = (
     (FIXTURES / "plans" / "generated_valid.md")
