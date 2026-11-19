@@ -68,6 +68,14 @@ def test_agy_json_result() -> None:
     assert err["status"] == "ERROR"
 
 
+def test_agy_denied_result_is_empty_success_with_denied_actions() -> None:
+    rec = load(FIXTURES / "agy/denied.json")
+    data = json.loads(rec.stdout)
+    assert data["status"] == "SUCCESS"
+    assert data["response"] == ""
+    assert data["denied_actions"] == [{"action": "command", "display_name": "Bash"}]
+
+
 @pytest.mark.parametrize("name", ["ok-tty.json", "ok-notty.json"])
 def test_agy_works_with_and_without_terminal(name: str) -> None:
     rec = load(FIXTURES / "agy" / name)

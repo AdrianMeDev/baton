@@ -1,0 +1,21 @@
+{
+  "adapter": "agy",
+  "agent": "agy",
+  "argv": [
+    "agy",
+    "-p",
+    "List the files in the repository and summarize them.",
+    "--output-format",
+    "json",
+    "--mode",
+    "plan"
+  ],
+  "tty": false,
+  "exit_code": 0,
+  "timed_out": false,
+  "duration_s": 23.0,
+  "stdout": "{\"conversation_id\":\"<uuid>\",\"status\":\"SUCCESS\",\"response\":\"\",\"duration_seconds\":21.4,\"num_turns\":1,\"usage\":{\"input_tokens\":10312,\"output_tokens\":58,\"thinking_tokens\":40,\"cache_read_tokens\":0,\"total_tokens\":10410},\"denied_actions\":[{\"action\":\"command\",\"display_name\":\"Bash\"}]}\n",
+  "stderr": "agy: action denied: command (Bash) - no permission rule allows it in headless mode\n",
+  "recorded_at": "2026-11-19T10:00:00+00:00",
+  "cli_version": "1.5.12"
+}

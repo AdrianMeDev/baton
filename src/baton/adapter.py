@@ -255,6 +255,23 @@ class CodexAdapter:
         return self.parse(run_command(self.argv(prompt), repo, timeout, input=prompt))
 
 
+def _empty_answer_message(denied: object, stderr: str) -> str:
+    """Explain an empty agy answer, naming the denied actions when agy reports any."""
+    names: list[str] = []
+    if isinstance(denied, list):
+        for item in denied:
+            if isinstance(item, dict) and isinstance(item.get("action"), str):
+                action = item["action"]
+                display = item.get("display_name")
+                names.append(f"{action} ({display})" if isinstance(display, str) else action)
+    if names:
+        return (
+            f"agy returned no answer: denied {', '.join(dict.fromkeys(names))}"
+            " - no permission rule allows it in headless mode"
+        )
+    return f"agy returned no answer: {stderr}" if stderr else "agy returned no answer"
+
+
 class AgyAdapter:
     """Run Antigravity in headless accept-edits mode over ordinary pipes."""
 
@@ -306,6 +323,8 @@ class AgyAdapter:
         response = data.get("response")
         if not isinstance(response, str):
             return _failure("agy SUCCESS output has no string response", raw)
+        if not response.strip():
+            return _failure(_empty_answer_message(data.get("denied_actions"), stderr), raw)
         return AgentResult(ok=True, text=response, raw=raw)
 
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
