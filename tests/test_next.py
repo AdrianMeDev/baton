@@ -1757,3 +1757,95 @@ def test_without_repair_hook_behaviour_is_unchanged(repo):
 
     assert code == EXIT_ROADMAP_PROBLEM
     assert len(plan_of(repo).steps) == 2
+
+
+@pytest.fixture
+def plan_repair_chain(repo, tmp_path_factory, monkeypatch):
+    config = tmp_path_factory.mktemp("repair-config") / "config.toml"
+    config.write_text("""[agents.worker]
+adapter="claude"
+command="worker"
+[agents.planner-a]
+adapter="claude"
+command="planner-a"
+[agents.planner-b]
+adapter="codex"
+command="planner-b"
+[agents.reviewer]
+adapter="claude"
+command="reviewer"
+provider="independent"
+[routes.review]
+M=["reviewer"]
+[routes.implement]
+M=["worker"]
+[routes.plan_commits]
+S=["planner-b"]
+M=["planner-b"]
+L=["planner-a", "planner-b"]
+""")
+    agents = {
+        "worker": SequenceAdapter(PROBLEM, AgentResult(ok=True, text="done"), action=edit),
+        "planner-a": FakeAdapter(AgentResult(ok=True, text=REPAIRED_STEPS)),
+        "planner-b": FakeAdapter(AgentResult(ok=True, text=REPAIRED_STEPS)),
+        "reviewer": FakeAdapter(AgentResult(ok=True, text='{"findings": []}')),
+    }
+
+    def make(agent, read_only=False):
+        flags.append((agent.name, read_only))
+        return agents[agent.name]
+
+    flags: list[tuple[str, bool]] = []
+    monkeypatch.setattr("baton.routed.make_adapter", make)
+    repair_repo(repo)
+    return config, agents, flags
+
+
+def test_repair_is_routed_to_the_l_tier_planner_read_only(repo, plan_repair_chain, git_identity):
+    config, agents, flags = plan_repair_chain
+
+    code, out = invoke_chain(repo, (config, agents), commit=True)
+
+    assert code == EXIT_OK, out
+    assert len(agents["planner-a"].prompts) == 1
+    assert "step is too big" in agents["planner-a"].prompts[0]
+    assert agents["planner-b"].prompts == []
+    assert ("planner-a", True) in flags
+    assert len(plan_of(repo).steps) == 3
+    assert plan_of(repo).steps[0].status == "done"
+
+
+def test_limited_repair_agent_falls_back_to_the_next_one(repo, plan_repair_chain, git_identity):
+    from baton.limits import UsageLimit
+
+    config, agents, _ = plan_repair_chain
+    agents["planner-a"] = FakeAdapter(AgentResult(ok=False, error="quota", limit=UsageLimit()))
+
+    code, out = invoke_chain(repo, (config, agents), commit=True)
+
+    assert code == EXIT_OK, out
+    assert len(agents["planner-b"].prompts) == 1
+    assert "feat: first part two" in [s.message for s in plan_of(repo).steps]
+
+
+def test_repair_decision_request_stops_the_run(repo, plan_repair_chain, git_identity):
+    config, agents, _ = plan_repair_chain
+    agents["planner-a"] = FakeAdapter(
+        AgentResult(ok=True, text="BATON-NEEDS-DECISION: choose a database")
+    )
+
+    code, out = invoke_chain(repo, (config, agents), commit=True)
+
+    assert code == EXIT_ROADMAP_PROBLEM
+    assert "choose a database" in out
+    assert len(plan_of(repo).steps) == 2
+
+
+def test_repair_in_a_worktree_is_mirrored_back(repo, plan_repair_chain, git_identity):
+    config, agents, _ = plan_repair_chain
+
+    code, out = invoke_chain(repo, (config, agents), worktree=True)
+
+    assert code == EXIT_OK, out
+    assert [s.message for s in plan_of(repo).steps][1] == "feat: first part two"
+    assert any(line.startswith("plan repaired:") for line in plan_of(repo).log)

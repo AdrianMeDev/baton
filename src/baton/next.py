@@ -56,7 +56,7 @@ from baton.prompt import (
     roadmap_problem,
     step_text,
 )
-from baton.repair import repair_from_reply, repaired_before
+from baton.repair import repair_from_reply, repair_prompt, repaired_before
 from baton.review import (
     SEVERITIES,
     ReviewError,
@@ -67,7 +67,7 @@ from baton.review import (
     review_context,
 )
 from baton.roadmap import RoadmapError
-from baton.routed import RoutedAdapter, say
+from baton.routed import RoutedAdapter, RoutedPlanner, say
 from baton.router import resolve_route
 from baton.verify import VerifyResult, _clean, run_verify
 from baton.worktree import ensure_worktree, mirror_plan
@@ -705,6 +705,20 @@ def run_next_command(
             raise ReviewError(result.error)
         return ReviewResult(reviewer.attempted_agents[-1], parse_review(result.text))
 
+    def repair_plan(plan: Plan, plan_text: str, step: Step, reason: str, diff: str) -> str | None:
+        assert config is not None and implementation is not None
+        if not config.routes:
+            return None
+        route = resolve_route(config, "plan_commits", tier="L")
+        planner = RoutedPlanner(route, implementation.store, out)
+        reply = planner.run(
+            repair_prompt(plan, plan_text, step, reason, diff), active, agent_timeout
+        )
+        if not reply.ok:
+            say(out, f"The plan repair agent failed: {reply.error}")
+            return None
+        return reply.text
+
     if dry_run:
         try:
             return _dry_run(
@@ -733,6 +747,7 @@ def run_next_command(
             commit=commit or worktree,
             push=push,
             resume=resume,
+            repair_plan=repair_plan,
         )
 
     return _with_worktree(repo, worktree, out, run_in)

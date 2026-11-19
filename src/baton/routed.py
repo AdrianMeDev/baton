@@ -136,3 +136,19 @@ class RoutedAdapter:
             previous = agent.name
         self.exhausted = True
         return AgentResult(ok=False, error=self._exhaustion_message())
+
+
+class RoutedPlanner(RoutedAdapter):
+    """A route for planning: a successor after a usage limit simply starts the plan afresh."""
+
+    read_only = True
+
+    def _handoff(self, prompt: str, previous: str, repo: Path) -> str:
+        return prompt
+
+    @staticmethod
+    def _exhausted() -> str:
+        return (
+            "No available agents remain in this route. No plan was written. "
+            "Wait for a cooldown to expire or sign in manually, then run `baton plan` again."
+        )
