@@ -48,6 +48,14 @@ def git(repo: Path, *args: str) -> str:
     ).stdout
 
 
+@pytest.fixture(autouse=True)
+def git_identity(monkeypatch):
+    # commit_all runs plain `git commit`, which needs an identity on CI runners.
+    for role in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{role}_NAME", "t")
+        monkeypatch.setenv(f"GIT_{role}_EMAIL", "t@example.com")
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     git(tmp_path, "init", "-q", "-b", "main")
