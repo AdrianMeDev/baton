@@ -152,7 +152,7 @@ above 64 KB (or beyond 400,000 characters in total) are sent only as path, size 
 the reviewer is told which parts were not seen.
 
 Planning and review run with the agent's read-only mode (Claude `--permission-mode plan`, Codex
-`--sandbox read-only`, agy `--mode plan`); implementation and fixes may edit files. pi has no
+`--sandbox read-only`, agy `--mode plan` with deny rules for commands and file writes); implementation and fixes may edit files. pi has no
 read-only flag, so a pi planner or reviewer is not restricted; see `docs/adapters.md`.
 
 ```bash
@@ -550,13 +550,13 @@ baton automates coding agents; it is not a sandbox.
 - **User rights.** Agent CLIs and each step's **Verify** command run as your user, in your
   checkout or worktree, with your environment and credentials. Only Codex implementation runs
   are confined by its `--sandbox workspace-write`. Claude is restricted by permission flags
-  (edits allowed, Bash allowed, `git` denied), agy by `--mode accept-edits`; pi has no such
-  restriction.
+  (edits allowed, Bash allowed, `git` denied), agy by `--mode accept-edits` and rules that allow
+  commands but deny `git`; pi has no such restriction.
 - **Guards, not isolation.** baton checks that HEAD did not move, that `.agent-plan.md` is
   unchanged and that the working tree matches what was verified. These checks detect many
   mistakes; they do not stop an agent from reading or changing files elsewhere on your machine.
 - **Read-only roles.** Planning and review run with the read-only mode of Claude, Codex and agy
-  (see `docs/adapters.md`). pi has no read-only flag, so a pi planner or reviewer is unrestricted.
+  (agy also gets deny rules for commands and file writes; see `docs/adapters.md`). pi has no read-only flag, so a pi planner or reviewer is unrestricted.
 - **Everything is committed and pushed.** `baton next --commit` and `baton auto` stage with
   `git add -A`, and auto pushes and opens a PR. Secrets or generated files that are not in
   `.gitignore` will be committed and pushed.
