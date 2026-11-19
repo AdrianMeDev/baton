@@ -547,3 +547,69 @@ def test_large_prompt_reaches_the_child_via_stdin(tmp_path, name, cls):
     assert out.read_text() == prompt
     argv_text = Path(f"{out}.argv").read_text()
     assert len(argv_text) < 1000 and "xxxx" not in argv_text
+
+
+def _fake_argv_agent(tmp_path, listing):
+    """A fake agy/pi CLI that copies the file named in its prompt argument, if any."""
+    script = tmp_path / "fake-cli"
+    script.write_text(
+        "#!/bin/sh\n"
+        'while [ "$1" != -p ]; do shift; done; last=$2\n'
+        'case "$last" in\n'
+        '  *"Read the complete task from the file "*)\n'
+        "    f=${last#*file }; f=${f%% and carry*}\n"
+        f'    cp "$f" "{tmp_path}/received"; stat -c %a "$f" > "{tmp_path}/mode" ;;\n'
+        f'  *) printf %s "$last" > "{tmp_path}/received" ;;\n'
+        "esac\n"
+        f'printf %s "$#" > "{tmp_path}/argc"\n'
+        f'printf %s "${{#last}}" > "{tmp_path}/arglen"\n'
+        f"printf '{listing}\\n'\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+AGY_OK = '{"status":"SUCCESS","response":"OK"}'
+PI_OK = (
+    '{"type":"agent_start"}\\n'
+    '{"type":"message_end","message":{"role":"assistant","stopReason":"stop",'
+    '"content":[{"type":"text","text":"OK"}]}}\\n{"type":"agent_settled"}'
+)
+
+
+@pytest.mark.parametrize(("cls", "listing"), [(AgyAdapter, AGY_OK), (PiAdapter, PI_OK)])
+def test_large_prompt_goes_through_a_private_file(tmp_path, cls, listing):
+    import tempfile
+
+    work = tmp_path / "repo"
+    work.mkdir()
+    script = _fake_argv_agent(tmp_path, listing)
+    prompt = "x" * 300_000 + "\nend"
+    before = set(Path(tempfile.gettempdir()).glob("baton-prompt-*"))
+    res = cls(str(script)).run(prompt, work, 30)
+    assert res.ok, res.error
+    assert (tmp_path / "received").read_text() == prompt
+    assert (tmp_path / "mode").read_text().strip() == "600"
+    assert int((tmp_path / "arglen").read_text()) < 500
+    assert list(work.iterdir()) == []
+    assert set(Path(tempfile.gettempdir()).glob("baton-prompt-*")) == before
+
+
+@pytest.mark.parametrize(("cls", "listing"), [(AgyAdapter, AGY_OK), (PiAdapter, PI_OK)])
+def test_small_prompt_stays_in_argv(tmp_path, cls, listing):
+    script = _fake_argv_agent(tmp_path, listing)
+    assert cls(str(script)).run("do it", tmp_path, 30).ok
+    assert (tmp_path / "received").read_text() == "do it"
+    assert not (tmp_path / "mode").exists()
+
+
+def test_prompt_file_is_removed_after_timeout(tmp_path):
+    import tempfile
+
+    script = tmp_path / "slow"
+    script.write_text("#!/bin/sh\nsleep 30\n")
+    script.chmod(0o755)
+    before = set(Path(tempfile.gettempdir()).glob("baton-prompt-*"))
+    res = AgyAdapter(str(script)).run("x" * 200_000, tmp_path, 1)
+    assert not res.ok and "timed out" in res.error
+    assert set(Path(tempfile.gettempdir()).glob("baton-prompt-*")) == before

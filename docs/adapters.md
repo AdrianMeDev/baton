@@ -82,6 +82,11 @@ Success requires exit 0, a `turn.completed` event and a final agent message.
 ### Implement call
 
 `agy -p <prompt> --output-format json --mode accept-edits [--model M]` uses ordinary pipes.
+
+Stdin input is unverified for agy and pi. Prompts up to 100,000 bytes are passed in argv; larger
+ones are written to a mode-0600 file in a private temporary directory outside the checkout, and
+argv carries a short instruction to read that file. The file is removed after the run, also on
+timeout. The same applies to pi.
 Both pipe and terminal probes returned valid JSON on 1.5.11. An empty response stream fails
 the implementation run. `baton probe agy --tty` remains available for investigating terminal
 behavior.

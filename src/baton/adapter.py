@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from functools import wraps
@@ -14,6 +16,8 @@ from baton.limits import UsageLimit, classify_limit
 from baton.runner import RunResult, run_command
 
 ERROR_TAIL_CHARS = 500
+# Linux caps a single argv string at 128 KiB (MAX_ARG_STRLEN); stay well below it.
+ARGV_PROMPT_LIMIT = 100_000
 
 
 @dataclass(frozen=True)
@@ -75,6 +79,25 @@ def _classify_failure(parse):
         return replace(parsed, limit=limit)
 
     return wrapped
+
+
+def _run_argv_adapter(adapter: Any, prompt: str, repo: Path, timeout: float) -> RunResult:
+    """Run an adapter whose CLI takes the prompt as an argument.
+
+    Prompts above ``ARGV_PROMPT_LIMIT`` go into a private file (mode 0600) in a temporary
+    directory outside the checkout; argv then carries a short instruction to read it.
+    """
+    if len(prompt.encode("utf-8")) <= ARGV_PROMPT_LIMIT:
+        return run_command(adapter.argv(prompt), repo, timeout)
+    with tempfile.TemporaryDirectory(prefix="baton-prompt-") as tmp:
+        path = Path(tmp) / "prompt.md"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(prompt)
+        instruction = (
+            f"Read the complete task from the file {path} and carry it out exactly as written."
+        )
+        return run_command(adapter.argv(instruction), repo, timeout)
 
 
 class ClaudeAdapter:
@@ -277,7 +300,7 @@ class AgyAdapter:
         return AgentResult(ok=True, text=response, raw=raw)
 
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
-        return self.parse(run_command(self.argv(prompt), repo, timeout))
+        return self.parse(_run_argv_adapter(self, prompt, repo, timeout))
 
 
 class PiAdapter:
@@ -367,7 +390,7 @@ class PiAdapter:
         return AgentResult(ok=True, text="\n".join(parts), cost=cost, raw=raw)
 
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
-        return self.parse(run_command(self.argv(prompt), repo, timeout))
+        return self.parse(_run_argv_adapter(self, prompt, repo, timeout))
 
 
 def _pi_message_cost(message: dict[str, Any]) -> float | None:
