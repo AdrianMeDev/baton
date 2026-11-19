@@ -14,6 +14,10 @@ COMMIT_TYPES = ("feat", "fix", "refactor", "test", "docs", "chore", "perf", "bui
 _COMMIT_RE = re.compile(rf"^(?:{'|'.join(COMMIT_TYPES)})(?:\([a-z0-9][a-z0-9._/-]*\))?!?: \S.*$")
 
 
+def is_commit_message(message: str) -> bool:
+    return _COMMIT_RE.match(message) is not None
+
+
 def validate_plan(text: str, milestone_id: str) -> list[str]:
     """Readable reasons why ``text`` is not an acceptable fresh plan for ``milestone_id``.
 
@@ -46,7 +50,7 @@ def validate_plan(text: str, milestone_id: str) -> list[str]:
             errors.append(f"{where}: must be open '[ ]', found {step.status}")
         if not step.message:
             errors.append(f"{where}: missing commit message")
-        elif not _COMMIT_RE.match(step.message):
+        elif not is_commit_message(step.message):
             errors.append(
                 f"{where}: commit message {step.message!r} is not '<type>(<scope>): <description>'"
             )
