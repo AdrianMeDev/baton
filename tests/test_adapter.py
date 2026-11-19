@@ -5,7 +5,13 @@ from unittest.mock import Mock
 
 import pytest
 
-from baton.adapter import AgyAdapter, ClaudeAdapter, CodexAdapter, PiAdapter
+from baton.adapter import (
+    AGY_EDIT_SETTINGS,
+    AgyAdapter,
+    ClaudeAdapter,
+    CodexAdapter,
+    PiAdapter,
+)
 from baton.recording import load
 from baton.runner import RunResult
 
@@ -194,10 +200,31 @@ def test_agy_argv_requests_headless_edits():
         "json",
         "--mode",
         "accept-edits",
+        "--settings",
+        AGY_EDIT_SETTINGS,
     ]
     argv = AgyAdapter("my-agy", "Gemini 4 Argon").argv("do it")
     assert argv[0] == "my-agy"
     assert argv[-2:] == ["--model", "Gemini 4 Argon"]
+
+
+def _agy_rules(argv):
+    return json.loads(argv[argv.index("--settings") + 1])["permissions"]
+
+
+def test_agy_edit_role_allows_commands_but_not_git():
+    assert _agy_rules(AgyAdapter().argv("x")) == {"allow": ["command(*)"], "deny": ["command(git)"]}
+
+
+def test_agy_read_only_role_denies_commands_and_writes():
+    rules = _agy_rules(AgyAdapter(read_only=True).argv("x"))
+    assert rules == {"deny": ["command(*)", "write_file(*)"]}
+
+
+def test_agy_settings_precede_model():
+    argv = AgyAdapter(model="m", read_only=True).argv("x")
+    assert argv.index("--settings") < argv.index("--model")
+    assert argv[-2:] == ["--model", "m"]
 
 
 def test_agy_empty_output_runs_once(monkeypatch, tmp_path):
@@ -240,6 +267,31 @@ def test_agy_parse_invalid_result(stdout, diagnostic):
     res = AgyAdapter().parse(RunResult(stdout, "", 0, False, 1))
     assert not res.ok
     assert res.error == diagnostic
+
+
+def test_agy_empty_answer_names_denied_actions():
+    res = AgyAdapter().parse(_run_result("denied.json", "agy"))
+    assert not res.ok
+    assert res.error == (
+        "agy returned no answer: denied command (Bash)"
+        " - no permission rule allows it in headless mode"
+    )
+
+
+@pytest.mark.parametrize("response", ['""', '"  \\n"'])
+def test_agy_empty_answer_without_denied_actions_uses_stderr(response):
+    stdout = '{"status":"SUCCESS","response":' + response + "}"
+    res = AgyAdapter().parse(RunResult(stdout, "model stalled\n", 0, False, 1))
+    assert not res.ok
+    assert res.error == "agy returned no answer: model stalled"
+    assert not AgyAdapter().parse(RunResult(stdout, "", 0, False, 1)).ok
+
+
+def test_agy_answer_with_denied_actions_stays_success():
+    stdout = '{"status":"SUCCESS","response":"done","denied_actions":[{"action":"command"}]}'
+    res = AgyAdapter().parse(RunResult(stdout, "", 0, False, 1))
+    assert res.ok
+    assert res.text == "done"
 
 
 def test_agy_nonzero_exit_with_success_payload_fails():

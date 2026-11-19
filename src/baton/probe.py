@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TextIO
 
-from baton.adapter import make_adapter
+from baton.adapter import AGY_READ_ONLY_SETTINGS, make_adapter
 from baton.config import AgentConfig, ConfigError, find_config_path, load_config
 from baton.limits import LimitStateError, LimitStore
 from baton.recording import Recording, save
@@ -34,7 +34,10 @@ def probe_argv(agent: AgentConfig, prompt: str = DEFAULT_PROMPT) -> list[str]:
         argv = [cmd, "exec", prompt, "--json", "--sandbox", "read-only", "--skip-git-repo-check"]
         model_flag = "-m"
     elif agent.adapter == "agy":
-        argv = [cmd, "-p", prompt, "--output-format", "json", "--mode", "plan"]
+        argv = [
+            cmd, "-p", prompt, "--output-format", "json", "--mode", "plan",
+            "--settings", AGY_READ_ONLY_SETTINGS,
+        ]  # fmt: skip
         model_flag = "--model"
     elif agent.adapter == "pi":
         argv = [cmd, "-p", prompt, "--mode", "json"]

@@ -4,7 +4,7 @@ The probe recordings live in `tests/fixtures/<adapter>/` and are the reference f
 and ordinary-error regression tests. Usage-limit cases are simulated until real captures exist.
 All runs used the prompt `Reply with exactly: OK` in an empty temporary directory.
 
-CLI versions: claude 2.1.311, codex 0.169.0, agy 1.5.11, pi 1.5.0.
+CLI versions: claude 2.1.311, codex 0.169.0, agy 1.5.12, pi 1.5.0.
 
 ## Summary
 
@@ -12,7 +12,7 @@ CLI versions: claude 2.1.311, codex 0.169.0, agy 1.5.11, pi 1.5.0.
 |---|---|---|---|---|---|
 | claude | `claude -p <prompt> --output-format json` | `--permission-mode plan` | one JSON object | `result` | 1 |
 | codex | `codex exec <prompt> --json` | `--sandbox read-only` | JSON lines | `item.completed` with `item.type == "agent_message"`, field `item.text` | 1 |
-| agy | `agy -p <prompt> --output-format json` | `--mode plan` | one JSON object | `response` | 1 |
+| agy | `agy -p <prompt> --output-format json` | `--mode plan` plus deny rules (`--settings`) | one JSON object | `response` | 1 |
 | pi | `pi -p <prompt> --mode json` | none found (tools `read`, `bash`, `edit`, `write` are on) | JSON lines | last `message_end` with `message.role == "assistant"`, `message.content[].text` | **0** |
 
 Model selection: `--model <name>` (claude, agy, pi; pi takes `provider/model`) and `-m <name>` (codex).
@@ -71,24 +71,45 @@ Success requires exit 0, a `turn.completed` event and a final agent message.
 
 ## agy (Antigravity)
 
-- Call: `agy -p <prompt> --output-format json --mode plan [--model M]`.
+- Call: `agy -p <prompt> --output-format json --mode plan --settings <rules> [--model M]`.
 - stdout is a single JSON object: `status` (`"SUCCESS"` or `"ERROR"`), `response` (answer, with
   trailing newline), `error` (only on failure), `conversation_id`, `num_turns`, `usage`.
 - Error (unknown model): exit 1, `status: "ERROR"`, `response: ""`, `error` lists the available
   model names; the same text is on stderr.
 - Limit message: not verified.
-- Fixtures: `tests/fixtures/agy/ok.json`, `ok-notty.json`, `ok-tty.json`, `error.json`.
+- Fixtures: `tests/fixtures/agy/ok.json`, `ok-notty.json`, `ok-tty.json`, `error.json`,
+  `denied.json`.
+
+### Permission rules
+
+Verified live with agy 1.5.12; `denied.json` is rebuilt from that capture, not recorded with
+`baton probe --record`, whose prompt needs no tools.
+
+- Without a matching rule, headless agy auto-denies every tool call, ends the turn with
+  `status: "SUCCESS"`, an empty `response` and `denied_actions` (e.g.
+  `[{"action": "command", "display_name": "Bash"}]`), and explains the denial on stderr. baton
+  treats an empty answer as a failure and names the denied actions in the error.
+- An explicit deny rule behaves differently: the model is told and continues.
+- Rule syntax: `command(<prefix>)` matches by prefix per command segment (`find ... | sort`
+  needs both), `write_file(<path>)`, `read_file(<path>)`. `--settings '<json>'` applies to one
+  session only.
+- Whether `--settings` permissions merge with or replace the user's own `settings.json` rules is
+  unknown; baton's rules are complete for its roles either way.
+- Read-only roles (plan, review, probe): `{"deny": ["command(*)", "write_file(*)"]}`.
+- Edit roles (implement, fix): `{"allow": ["command(*)"], "deny": ["command(git)"]}`, the same
+  policy as Claude (Bash without git).
 
 ### Implement call
 
-`agy -p <prompt> --output-format json --mode accept-edits [--model M]` uses ordinary pipes.
+`agy -p <prompt> --output-format json --mode accept-edits --settings <rules> [--model M]` uses
+ordinary pipes.
 
 Stdin input is unverified for agy and pi. Prompts up to 100,000 bytes are passed in argv; larger
 ones are written to a mode-0600 file in a private temporary directory outside the checkout, and
 argv carries a short instruction to read that file. The file is removed after the run, also on
 timeout. The same applies to pi.
-Both pipe and terminal probes returned valid JSON on 1.5.11. An empty response stream fails
-the implementation run. `baton probe agy --tty` remains available for investigating terminal
+Both pipe and terminal probes returned valid JSON on 1.5.11. An empty response, with or without
+`denied_actions`, fails the run. `baton probe agy --tty` remains available for investigating terminal
 behavior.
 
 ## pi
@@ -220,8 +241,8 @@ baton builds adapters per role (`make_adapter(agent, read_only=...)`):
 
 | Role | claude | codex | agy | pi |
 |---|---|---|---|---|
-| plan (`baton plan`, `plan-roadmap`), review | `--permission-mode plan` | `--sandbox read-only` | `--mode plan` | no flag: unrestricted |
-| implement, fix | `--permission-mode acceptEdits`, Bash without git | `--sandbox workspace-write` | `--mode accept-edits` | no flag: unrestricted |
+| plan (`baton plan`, `plan-roadmap`), review | `--permission-mode plan` | `--sandbox read-only` | `--mode plan`, deny `command(*)` and `write_file(*)` | no flag: unrestricted |
+| implement, fix | `--permission-mode acceptEdits`, Bash without git | `--sandbox workspace-write` | `--mode accept-edits`, allow `command(*)`, deny `command(git)` | no flag: unrestricted |
 
 pi has no read-only flag, so for pi in a planning or review role baton's HEAD, working-tree and
 plan-file checks are the only guard. Review additionally runs in an empty temporary directory.
