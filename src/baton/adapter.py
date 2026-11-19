@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from functools import wraps
@@ -14,6 +16,8 @@ from baton.limits import UsageLimit, classify_limit
 from baton.runner import RunResult, run_command
 
 ERROR_TAIL_CHARS = 500
+# Linux caps a single argv string at 128 KiB (MAX_ARG_STRLEN); stay well below it.
+ARGV_PROMPT_LIMIT = 100_000
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,8 @@ class Adapter(Protocol):
 
 class CommandAdapter(Adapter, Protocol):
     def parse(self, result: RunResult) -> AgentResult: ...
+
+    transport: str
 
     def argv(self, prompt: str) -> list[str]: ...
 
@@ -75,23 +81,49 @@ def _classify_failure(parse):
     return wrapped
 
 
+def _run_argv_adapter(adapter: Any, prompt: str, repo: Path, timeout: float) -> RunResult:
+    """Run an adapter whose CLI takes the prompt as an argument.
+
+    Prompts above ``ARGV_PROMPT_LIMIT`` go into a private file (mode 0600) in a temporary
+    directory outside the checkout; argv then carries a short instruction to read it.
+    """
+    if len(prompt.encode("utf-8")) <= ARGV_PROMPT_LIMIT:
+        return run_command(adapter.argv(prompt), repo, timeout)
+    with tempfile.TemporaryDirectory(prefix="baton-prompt-") as tmp:
+        path = Path(tmp) / "prompt.md"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(prompt)
+        instruction = (
+            f"Read the complete task from the file {path} and carry it out exactly as written."
+        )
+        return run_command(adapter.argv(instruction), repo, timeout)
+
+
 class ClaudeAdapter:
     """``claude -p`` with edits allowed and git blocked (see docs/adapters.md)."""
+
+    transport = "stdin"
 
     def __init__(
         self,
         command: str = "claude",
         model: str | None = None,
         limit_patterns: tuple[str, ...] | None = None,
+        read_only: bool = False,
     ) -> None:
         self.command = command
         self.model = model
         self.limit_patterns = limit_patterns
+        self.read_only = read_only
 
     def argv(self, prompt: str) -> list[str]:
-        argv = [self.command, "-p", prompt, "--output-format", "json"]
+        """Argv without the prompt: ``claude -p`` reads it from stdin."""
+        argv = [self.command, "-p", "--output-format", "json"]
         if self.model:
             argv += ["--model", self.model]
+        if self.read_only:
+            return [*argv, "--permission-mode", "plan"]
         argv += [
             "--permission-mode",
             "acceptEdits",
@@ -132,34 +164,39 @@ class ClaudeAdapter:
         return AgentResult(ok=True, text=text, cost=cost, raw=raw)
 
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
-        return self.parse(run_command(self.argv(prompt), repo, timeout))
+        return self.parse(run_command(self.argv(prompt), repo, timeout, input=prompt))
 
 
 class CodexAdapter:
     """Run ``codex exec`` with workspace edits and JSONL events."""
+
+    transport = "stdin"
 
     def __init__(
         self,
         command: str = "codex",
         model: str | None = None,
         limit_patterns: tuple[str, ...] | None = None,
+        read_only: bool = False,
     ) -> None:
         self.command = command
         self.model = model
         self.limit_patterns = limit_patterns
+        self.read_only = read_only
 
     def argv(self, prompt: str) -> list[str]:
+        """Argv without the prompt: ``codex exec -`` reads it from stdin."""
         argv = [
             self.command,
             "exec",
             "--json",
             "--skip-git-repo-check",
             "--sandbox",
-            "workspace-write",
+            "read-only" if self.read_only else "workspace-write",
         ]
         if self.model:
             argv += ["-m", self.model]
-        return [*argv, "--", prompt]
+        return [*argv, "-"]
 
     @_classify_failure
     def parse(self, result: RunResult) -> AgentResult:
@@ -215,24 +252,29 @@ class CodexAdapter:
         return AgentResult(ok=True, text=text, raw=raw)
 
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
-        return self.parse(run_command(self.argv(prompt), repo, timeout))
+        return self.parse(run_command(self.argv(prompt), repo, timeout, input=prompt))
 
 
 class AgyAdapter:
     """Run Antigravity in headless accept-edits mode over ordinary pipes."""
+
+    transport = "argv"
 
     def __init__(
         self,
         command: str = "agy",
         model: str | None = None,
         limit_patterns: tuple[str, ...] | None = None,
+        read_only: bool = False,
     ) -> None:
         self.command = command
         self.model = model
         self.limit_patterns = limit_patterns
+        self.read_only = read_only
 
     def argv(self, prompt: str) -> list[str]:
-        argv = [self.command, "-p", prompt, "--output-format", "json", "--mode", "accept-edits"]
+        mode = "plan" if self.read_only else "accept-edits"
+        argv = [self.command, "-p", prompt, "--output-format", "json", "--mode", mode]
         if self.model:
             argv += ["--model", self.model]
         return argv
@@ -267,21 +309,25 @@ class AgyAdapter:
         return AgentResult(ok=True, text=response, raw=raw)
 
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
-        return self.parse(run_command(self.argv(prompt), repo, timeout))
+        return self.parse(_run_argv_adapter(self, prompt, repo, timeout))
 
 
 class PiAdapter:
     """Run pi with JSONL events and pass its provider-qualified model through."""
+
+    transport = "argv"
 
     def __init__(
         self,
         command: str = "pi",
         model: str | None = None,
         limit_patterns: tuple[str, ...] | None = None,
+        read_only: bool = False,
     ) -> None:
         self.command = command
         self.model = model
         self.limit_patterns = limit_patterns
+        self.read_only = read_only
 
     def argv(self, prompt: str) -> list[str]:
         argv = [self.command, "-p", prompt, "--mode", "json"]
@@ -355,7 +401,7 @@ class PiAdapter:
         return AgentResult(ok=True, text="\n".join(parts), cost=cost, raw=raw)
 
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
-        return self.parse(run_command(self.argv(prompt), repo, timeout))
+        return self.parse(_run_argv_adapter(self, prompt, repo, timeout))
 
 
 def _pi_message_cost(message: dict[str, Any]) -> float | None:
@@ -367,9 +413,13 @@ def _pi_message_cost(message: dict[str, Any]) -> float | None:
     return None
 
 
-def make_adapter(agent: AgentConfig) -> CommandAdapter:
+def make_adapter(agent: AgentConfig, read_only: bool = False) -> CommandAdapter:
+    """Build the adapter for ``agent``; ``read_only`` is for planning and review roles.
+
+    pi has no read-only flag, so it ignores ``read_only`` (see docs/adapters.md).
+    """
     adapters = {"claude": ClaudeAdapter, "codex": CodexAdapter, "agy": AgyAdapter, "pi": PiAdapter}
-    return adapters[agent.adapter](agent.command, agent.model, agent.limit_patterns)
+    return adapters[agent.adapter](agent.command, agent.model, agent.limit_patterns, read_only)
 
 
 def _reported_tokens(adapter: str, raw: str) -> int | None:

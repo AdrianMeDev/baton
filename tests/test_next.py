@@ -96,7 +96,7 @@ def test_success_marks_pending_and_keeps_head(repo: Path) -> None:
     assert head(repo) == before
     assert "Step 1/2: feat: first" in out
     assert "new.txt" in out
-    assert 'git commit -m "feat: first"' in out
+    assert "git commit -m 'feat: first'" in out
     assert "feat: second" in out
     assert "step 1 implemented" in plan_of(repo).log[-1]
     assert "feat: first" in adapter.prompts[0] and "feat: second" not in adapter.prompts[0]
@@ -148,7 +148,7 @@ def test_gate_dirty_blocks(repo: Path) -> None:
     code, out = run(repo, adapter)
     assert code == EXIT_STOPPED
     assert adapter.prompts == []
-    assert "new.txt" in out and 'git commit -m "feat: first"' in out
+    assert "new.txt" in out and "git commit -m 'feat: first'" in out
 
 
 def test_command_checks_gate_before_resolving_agent(repo: Path) -> None:
@@ -240,7 +240,9 @@ M=["first", "first", "second"]
         "second": FakeAdapter(action=edit),
         "reviewer": FakeAdapter(AgentResult(ok=True, text='{"findings": []}')),
     }
-    monkeypatch.setattr("baton.routed.make_adapter", lambda agent: agents[agent.name])
+    monkeypatch.setattr(
+        "baton.routed.make_adapter", lambda agent, read_only=False: agents[agent.name]
+    )
     return config, agents
 
 
@@ -462,7 +464,7 @@ def test_cli_limit_recovery(repo, chain, monkeypatch, capsys, routed_executions)
     second.write_text(
         f"#!{sys.executable}\n"
         "import json, sys\nfrom pathlib import Path\n"
-        "prompt = sys.argv[-1]\n"
+        "prompt = sys.stdin.read()\n"
         "assert 'partial implementation' in prompt and 'notes.txt' in prompt\n"
         "assert Path('notes.txt').read_text() == 'partial notes\\n'\n"
         "Path('a.txt').write_text('finished implementation\\n')\n"
@@ -1017,10 +1019,7 @@ def test_cli_quality_loop_with_partial_handoff_and_independent_review(
         path.write_text(
             f"#!{sys.executable}\nimport json, sys\nfrom pathlib import Path\n"
             f'with Path({str(events)!r}).open("a") as log: log.write({name!r} + "\\n")\n'
-            "prompt = sys.argv[sys.argv.index('-p') + 1]\n"
-            + action
-            + "\n"
-            + f"print(json.dumps({response!r}))\n"
+            "prompt = sys.stdin.read()\n" + action + "\n" + f"print(json.dumps({response!r}))\n"
         )
         path.chmod(0o755)
         return str(path)
@@ -1605,3 +1604,15 @@ def test_plan_restored_on_failed_external_phase(repo, phase):
     assert restored.startswith(trusted.decode().split("## Log")[0])
     assert plan_of(repo).steps[0].status == "open"
     assert (repo / "new.txt").read_text() == "hello\n"
+
+
+def test_commit_hint_is_shell_safe() -> None:
+    import shlex
+
+    from baton.next import _commit_hint
+
+    message = 'docs: explain `rm -rf build` $HOME "q" it\'s done!'
+    buf = io.StringIO()
+    _commit_hint(buf, message)
+    line = buf.getvalue().splitlines()[-1].strip()
+    assert shlex.split(line) == ["git", "commit", "-m", message]

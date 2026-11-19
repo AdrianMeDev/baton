@@ -134,8 +134,11 @@ def run_command(
     timeout: float,
     env: Mapping[str, str] | None = None,
     tty: bool = False,
+    input: str | None = None,
 ) -> RunResult:
     """Run ``argv`` in ``cwd`` and capture stdout and stderr.
+
+    ``input`` is written to the child's stdin (pipe mode only); without it stdin is closed.
 
     With ``tty=True`` the command runs on a pseudo-terminal: stdout and stderr arrive
     interleaved in ``stdout`` (``stderr`` stays empty) with ANSI escapes removed.
@@ -143,6 +146,8 @@ def run_command(
     On timeout the process group is terminated and ``timed_out`` is True. A command
     that cannot be started yields exit code 127 and the error text in stderr.
     """
+    if tty and input is not None:
+        raise ValueError("input is not supported together with tty=True")
     start = time.monotonic()
     if tty:
         return _run_tty(argv, cwd, timeout, env, start)
@@ -151,7 +156,7 @@ def run_command(
             list(argv),
             cwd=cwd,
             env=None if env is None else dict(env),
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if input is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -163,7 +168,7 @@ def run_command(
 
     timed_out = False
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        stdout, stderr = proc.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
         _terminate(proc)

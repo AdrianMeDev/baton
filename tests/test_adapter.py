@@ -19,7 +19,8 @@ def _run_result(name: str, adapter: str = "claude") -> RunResult:
 
 def test_argv_without_model():
     argv = ClaudeAdapter("claude").argv("do it")
-    assert argv[:4] == ["claude", "-p", "do it", "--output-format"]
+    assert argv[:4] == ["claude", "-p", "--output-format", "json"]
+    assert "do it" not in argv
     assert "--model" not in argv
     assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
 
@@ -88,8 +89,7 @@ def test_codex_argv():
         "--skip-git-repo-check",
         "--sandbox",
         "workspace-write",
-        "--",
-        "do it",
+        "-",
     ]
     assert CodexAdapter("my-codex", "my-model").argv("--literal prompt") == [
         "my-codex",
@@ -100,16 +100,17 @@ def test_codex_argv():
         "workspace-write",
         "-m",
         "my-model",
-        "--",
-        "--literal prompt",
+        "-",
     ]
+    assert "--literal prompt" not in CodexAdapter().argv("--literal prompt")
 
 
 def test_codex_run_passes_cwd_and_timeout(monkeypatch, tmp_path):
     adapter = CodexAdapter()
 
-    def fake_run(argv, cwd, timeout):
+    def fake_run(argv, cwd, timeout, input=None):
         assert argv == adapter.argv("do it")
+        assert input == "do it"
         assert cwd == tmp_path
         assert timeout == 17
         return _run_result("ok.json", "codex")
@@ -517,3 +518,126 @@ def test_optional_usage(usage, expected):
     assert _reported_tokens("CodexAdapter", event) == expected
     if expected is not None:
         assert _reported_tokens("CodexAdapter", event + "\n" + event) == expected * 2
+
+
+def _fake_agent(tmp_path, name):
+    """A fake CLI that records its argv and stdin, then prints a valid result."""
+    script = tmp_path / name
+    out = tmp_path / f"{name}.stdin"
+    if name == "claude":
+        reply = '{"is_error": false, "result": "OK"}'
+    else:
+        reply = (
+            '{"type":"turn.started"}\\n{"type":"item.completed","item":'
+            '{"type":"agent_message","text":"OK"}}\\n{"type":"turn.completed"}'
+        )
+    script.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$@" > "{out}.argv"\ncat > "{out}"\nprintf \'{reply}\\n\'\n'
+    )
+    script.chmod(0o755)
+    return script, out
+
+
+@pytest.mark.parametrize(("name", "cls"), [("claude", ClaudeAdapter), ("codex", CodexAdapter)])
+def test_large_prompt_reaches_the_child_via_stdin(tmp_path, name, cls):
+    script, out = _fake_agent(tmp_path, name)
+    prompt = "x" * 300_000 + "\nend"
+    res = cls(str(script)).run(prompt, tmp_path, 30)
+    assert res.ok, res.error
+    assert out.read_text() == prompt
+    argv_text = Path(f"{out}.argv").read_text()
+    assert len(argv_text) < 1000 and "xxxx" not in argv_text
+
+
+def _fake_argv_agent(tmp_path, listing):
+    """A fake agy/pi CLI that copies the file named in its prompt argument, if any."""
+    script = tmp_path / "fake-cli"
+    script.write_text(
+        "#!/bin/sh\n"
+        'while [ "$1" != -p ]; do shift; done; last=$2\n'
+        'case "$last" in\n'
+        '  *"Read the complete task from the file "*)\n'
+        "    f=${last#*file }; f=${f%% and carry*}\n"
+        f'    cp "$f" "{tmp_path}/received"; stat -c %a "$f" > "{tmp_path}/mode" ;;\n'
+        f'  *) printf %s "$last" > "{tmp_path}/received" ;;\n'
+        "esac\n"
+        f'printf %s "$#" > "{tmp_path}/argc"\n'
+        f'printf %s "${{#last}}" > "{tmp_path}/arglen"\n'
+        f"printf '{listing}\\n'\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+AGY_OK = '{"status":"SUCCESS","response":"OK"}'
+PI_OK = (
+    '{"type":"agent_start"}\\n'
+    '{"type":"message_end","message":{"role":"assistant","stopReason":"stop",'
+    '"content":[{"type":"text","text":"OK"}]}}\\n{"type":"agent_settled"}'
+)
+
+
+@pytest.mark.parametrize(("cls", "listing"), [(AgyAdapter, AGY_OK), (PiAdapter, PI_OK)])
+def test_large_prompt_goes_through_a_private_file(tmp_path, cls, listing):
+    import tempfile
+
+    work = tmp_path / "repo"
+    work.mkdir()
+    script = _fake_argv_agent(tmp_path, listing)
+    prompt = "x" * 300_000 + "\nend"
+    before = set(Path(tempfile.gettempdir()).glob("baton-prompt-*"))
+    res = cls(str(script)).run(prompt, work, 30)
+    assert res.ok, res.error
+    assert (tmp_path / "received").read_text() == prompt
+    assert (tmp_path / "mode").read_text().strip() == "600"
+    assert int((tmp_path / "arglen").read_text()) < 500
+    assert list(work.iterdir()) == []
+    assert set(Path(tempfile.gettempdir()).glob("baton-prompt-*")) == before
+
+
+@pytest.mark.parametrize(("cls", "listing"), [(AgyAdapter, AGY_OK), (PiAdapter, PI_OK)])
+def test_small_prompt_stays_in_argv(tmp_path, cls, listing):
+    script = _fake_argv_agent(tmp_path, listing)
+    assert cls(str(script)).run("do it", tmp_path, 30).ok
+    assert (tmp_path / "received").read_text() == "do it"
+    assert not (tmp_path / "mode").exists()
+
+
+def test_prompt_file_is_removed_after_timeout(tmp_path):
+    import tempfile
+
+    script = tmp_path / "slow"
+    script.write_text("#!/bin/sh\nsleep 30\n")
+    script.chmod(0o755)
+    before = set(Path(tempfile.gettempdir()).glob("baton-prompt-*"))
+    res = AgyAdapter(str(script)).run("x" * 200_000, tmp_path, 1)
+    assert not res.ok and "timed out" in res.error
+    assert set(Path(tempfile.gettempdir()).glob("baton-prompt-*")) == before
+
+
+def test_read_only_argv_per_adapter():
+    claude = ClaudeAdapter(read_only=True).argv("x")
+    assert claude[claude.index("--permission-mode") + 1] == "plan"
+    assert not {"acceptEdits", "--allowedTools", "--disallowedTools"} & set(claude)
+    codex = CodexAdapter(read_only=True).argv("x")
+    assert codex[codex.index("--sandbox") + 1] == "read-only"
+    assert "workspace-write" not in codex
+    agy = AgyAdapter(read_only=True).argv("x")
+    assert agy[agy.index("--mode") + 1] == "plan"
+    assert "accept-edits" not in agy
+    assert PiAdapter(read_only=True).argv("x") == PiAdapter().argv("x")
+
+
+def test_write_argv_is_unchanged_by_default():
+    assert "acceptEdits" in ClaudeAdapter().argv("x")
+    assert "workspace-write" in CodexAdapter().argv("x")
+    assert "accept-edits" in AgyAdapter().argv("x")
+
+
+def test_make_adapter_passes_read_only():
+    from baton.adapter import make_adapter
+    from baton.config import AgentConfig
+
+    agent = AgentConfig("c", "claude", "claude")
+    assert "plan" in make_adapter(agent, read_only=True).argv("x")
+    assert "acceptEdits" in make_adapter(agent).argv("x")

@@ -61,7 +61,7 @@ for _role in ("plan_commits", "implement", "fix", "review"):
 
 FAKE_PLANNER = """#!{python}
 import json, re, sys
-prompt = sys.argv[2]
+prompt = sys.stdin.read()
 m = re.search(r"planning milestone (M\\d+) – (.+?) of the roadmap", prompt)
 mid, name = m[1], m[2]
 steps = "\\n".join(
@@ -80,7 +80,7 @@ print(json.dumps({{"is_error": False, "result": plan}}))
 FAKE_CODER = """#!{python}
 import json, re, sys
 from pathlib import Path
-prompt = sys.argv[2]
+prompt = sys.stdin.read()
 for name in re.findall(r"\\*\\*Changes:\\*\\* `([^`]+)`", prompt):
     Path(name).write_text("x\\n")
 print(json.dumps({{"is_error": False, "result": "done"}}))

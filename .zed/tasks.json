@@ -5,13 +5,13 @@
   { "label": "doctor", "command": "uv run baton doctor", "reveal": "always" },
   {
     "label": "baton next",
-    "command": "uv run baton next",
+    "command": "baton next",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always"
   },
   {
     "label": "baton auto",
-    "command": "uv run baton auto",
+    "command": "baton auto",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always"
   }

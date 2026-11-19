@@ -17,12 +17,22 @@ class RunStore:
         self.path = path if path is not None else limit_state_path().with_name("runs.jsonl")
 
     def read(self):
+        return self._load()[0]
+
+    def _load(self):
+        """Parse the journal; also report whether a torn final line was ignored.
+
+        A crash or full disk can leave a last line without its newline that is cut off. That
+        line alone is ignored; a corrupt line anywhere else still raises with its line number.
+        """
         try:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
+            text = self.path.read_text(encoding="utf-8")
         except FileNotFoundError:
-            return []
+            return [], False
         except (OSError, UnicodeError) as exc:
             raise LimitStateError(f"Cannot read {self.path}: {exc}") from exc
+        lines = text.splitlines()
+        unterminated = bool(text) and not text.endswith("\n")
         records = []
         starts = set()
         finished = set()
@@ -57,8 +67,10 @@ class RunStore:
                     finished.add(ident)
                 records.append(row)
             except (ValueError, KeyError, TypeError) as exc:
+                if unterminated and number == len(lines):
+                    return records, True
                 raise LimitStateError(f"Invalid journal {self.path}:{number}: {exc}") from exc
-        return records
+        return records, False
 
     @contextmanager
     def locked(self):
@@ -70,7 +82,23 @@ class RunStore:
         except OSError as exc:
             raise LimitStateError(f"Cannot update {self.path}: {exc}") from exc
 
+    def _repair_tail(self):
+        """Make the file end on a line boundary: drop a torn last line or terminate a valid one."""
+        try:
+            data = self.path.read_bytes()
+        except FileNotFoundError:
+            return
+        if not data or data.endswith(b"\n"):
+            return
+        if self._load()[1]:
+            with self.path.open("r+b") as stream:
+                stream.truncate(data.rfind(b"\n") + 1)
+        else:
+            with self.path.open("ab") as stream:
+                stream.write(b"\n")
+
     def _append(self, row):
+        self._repair_tail()
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(row, allow_nan=False) + "\n")
             stream.flush()

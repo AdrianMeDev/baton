@@ -39,6 +39,11 @@ class RoutedAdapter:
         self.out = out
         self.runs = RunStore()
 
+    @property
+    def read_only(self) -> bool:
+        """Planning and review only read; implementation and fixes may edit."""
+        return self.review
+
     def _eligible(self):
         seen = set()
         for agent in self.route.agents:
@@ -60,7 +65,9 @@ class RoutedAdapter:
         )
         if agent is not None:
             self._announce(agent)
-            return make_adapter(agent).argv(prompt)
+            adapter = make_adapter(agent, read_only=self.read_only)
+            self.transport = getattr(adapter, "transport", "argv")
+            return adapter.argv(prompt)
         raise ConfigError(self._exhaustion_message())
 
     def _exhaustion_message(self):
@@ -101,7 +108,7 @@ class RoutedAdapter:
             current_prompt = prompt
             if previous is not None and not self.review:
                 current_prompt = self._handoff(prompt, previous, repo)
-            adapter = make_adapter(agent)
+            adapter = make_adapter(agent, read_only=self.read_only)
             self.attempted_agents.append(agent)
             result = (
                 run_isolated_review(adapter, current_prompt, timeout)

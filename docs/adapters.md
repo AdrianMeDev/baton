@@ -37,10 +37,12 @@ Probes never read tokens or auth files; the CLIs use the login the user already 
 `baton next` uses a write-enabled call, built by `ClaudeAdapter.argv()` in `src/baton/adapter.py`:
 
 ```
-claude -p <prompt> --output-format json [--model M] \
+claude -p --output-format json [--model M] \
   --permission-mode acceptEdits --allowedTools Bash --disallowedTools "Bash(git:*)"
 ```
 
+- The prompt is written to the child's stdin, not passed in argv, so it is not limited by the
+  kernel's 128 KiB per-argument limit (`baton next --dry-run` prints "(prompt via stdin)").
 - `acceptEdits` lets the agent change files without prompting; there is no plan mode here.
 - `Bash` is allowed so the agent can run tests; `Bash(git:*)` is disallowed, so the agent cannot
   commit, stash or reset. This is a guard, not a sandbox: baton additionally compares HEAD before
@@ -63,7 +65,8 @@ claude -p <prompt> --output-format json [--model M] \
 
 ### Implement call
 
-`codex exec --json --sandbox workspace-write [-m M] -- <prompt>` runs in the repository.
+`codex exec --json --sandbox workspace-write [-m M] -` runs in the repository; the trailing `-`
+makes codex read the prompt from stdin.
 Success requires exit 0, a `turn.completed` event and a final agent message.
 
 ## agy (Antigravity)
@@ -79,6 +82,11 @@ Success requires exit 0, a `turn.completed` event and a final agent message.
 ### Implement call
 
 `agy -p <prompt> --output-format json --mode accept-edits [--model M]` uses ordinary pipes.
+
+Stdin input is unverified for agy and pi. Prompts up to 100,000 bytes are passed in argv; larger
+ones are written to a mode-0600 file in a private temporary directory outside the checkout, and
+argv carries a short instruction to read that file. The file is removed after the run, also on
+timeout. The same applies to pi.
 Both pipe and terminal probes returned valid JSON on 1.5.11. An empty response stream fails
 the implementation run. `baton probe agy --tty` remains available for investigating terminal
 behavior.
@@ -205,3 +213,15 @@ passed (133 tests). This waiver does not establish real-provider quota compatibi
 For a future genuine quota response, use `baton probe <agent> --record tests/fixtures/<adapter>/limit.json`, review the
 redaction, document CLI/model and reset wording here, and add a parser regression test. Do not
 infer real-provider compatibility from simulated cases.
+
+## Role permissions
+
+baton builds adapters per role (`make_adapter(agent, read_only=...)`):
+
+| Role | claude | codex | agy | pi |
+|---|---|---|---|---|
+| plan (`baton plan`, `plan-roadmap`), review | `--permission-mode plan` | `--sandbox read-only` | `--mode plan` | no flag: unrestricted |
+| implement, fix | `--permission-mode acceptEdits`, Bash without git | `--sandbox workspace-write` | `--mode accept-edits` | no flag: unrestricted |
+
+pi has no read-only flag, so for pi in a planning or review role baton's HEAD, working-tree and
+plan-file checks are the only guard. Review additionally runs in an empty temporary directory.

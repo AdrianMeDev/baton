@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import sys
 from pathlib import Path
 from typing import TextIO
@@ -50,7 +51,7 @@ def _gate_lines(plan: Plan, root: Path) -> list[str]:
             *(f"  {path}" for path in gate.dirty),
             "Commit it:",
             "  git add -A",
-            f'  git commit -m "{step.message}"',
+            f"  git commit -m {shlex.quote(step.message)}",
         ]
     if gate.state == "committed":
         return [

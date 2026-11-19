@@ -56,6 +56,8 @@ ATTEMPTS = 2  # the first plan plus one retry with the validation errors
 class RoutedPlanner(RoutedAdapter):
     """A route for planning: a successor after a usage limit simply starts the plan afresh."""
 
+    read_only = True
+
     def _handoff(self, prompt: str, previous: str, repo: Path) -> str:
         return prompt
 
@@ -291,6 +293,8 @@ def run_plan_command(
         adapter = select_adapter(milestone)
         say(out, "Command (cwd = repo root):")
         say(out, "  " + " ".join(shlex.quote(a) for a in adapter.argv("<prompt>")))
+        if getattr(adapter, "transport", "argv") == "stdin":
+            say(out, "  (prompt via stdin)")
         say(out, "Prompt:")
         say(out, target.prompt())
         return EXIT_OK

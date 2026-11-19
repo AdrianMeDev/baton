@@ -97,3 +97,48 @@ def test_baton_stop_corrupt_state_fails(tmp_path, monkeypatch, capsys):
     (tmp_path / "state/baton/auto.json").write_text("{")
     assert main(["stop", "--path", str(tmp_path)]) == 1
     assert "Cannot request stop" in capsys.readouterr().out
+
+
+def test_run_lock_refuses_a_second_holder_and_releases(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    store = AutoStore(tmp_path / "auto.json")
+    other = AutoStore(tmp_path / "auto.json")
+    with (
+        store.run_lock(repo),
+        pytest.raises(AutoStateError, match="already active"),
+        other.run_lock(repo),
+    ):
+        pass
+    with store.run_lock(repo):  # released after the run
+        pass
+
+
+def test_run_lock_is_released_after_an_exception(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    store = AutoStore(tmp_path / "auto.json")
+    with pytest.raises(RuntimeError), store.run_lock(repo):
+        raise RuntimeError("boom")
+    with store.run_lock(repo):
+        pass
+
+
+def test_run_locks_of_different_repositories_do_not_block(tmp_path):
+    first, second = tmp_path / "a", tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    store = AutoStore(tmp_path / "auto.json")
+    with store.run_lock(first), store.run_lock(second):
+        pass
+
+
+def test_stop_does_not_need_the_run_lock(tmp_path, monkeypatch, capsys):
+    from baton.autostate import run_stop_command
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    with AutoStore().run_lock(repo):
+        assert run_stop_command(repo) == 0
+    assert AutoStore().read(repo).stop_requested

@@ -699,3 +699,33 @@ def test_periodic_recheck_skips_agent_capped_during_wait(world, monkeypatch):
     )
     assert "Daily run budget exhausted" in hooks.wait("implement", "M")
     assert probes == []
+
+
+def test_second_auto_run_is_refused_without_touching_state(loop):
+    from baton.autostate import AutoStore
+
+    loop.store.update(loop.repo, steps_done=7, started_at="earlier")
+    before = loop.store.read(loop.repo)
+    with AutoStore().run_lock(loop.repo):
+        assert loop.auto() == 2
+    assert "already active" in loop.out.getvalue()
+    assert loop.store.read(loop.repo) == before
+    assert loop.merged == []
+
+
+def test_auto_lock_is_released_after_a_run(loop):
+    from baton.autostate import AutoStore
+
+    assert loop.auto() == 0
+    with AutoStore().run_lock(loop.repo):  # free again
+        pass
+
+
+def test_auto_lock_is_released_after_an_exception(loop):
+    from baton.autostate import AutoStore
+
+    loop.plan = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    with pytest.raises(RuntimeError):
+        loop.auto()
+    with AutoStore().run_lock(loop.repo):
+        pass

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -16,6 +17,11 @@ from baton.git import PLAN_FILENAME, _git
 
 Severity = Literal["critical", "warning", "informational"]
 SEVERITIES = ("critical", "warning", "informational")
+
+# Bounds for the context sent to the reviewer (characters of the serialized parts).
+MAX_DIFF_CHARS = 200_000
+MAX_UNTRACKED_FILE_BYTES = 64_000
+MAX_CONTEXT_CHARS = 400_000
 
 
 class ReviewError(ValueError):
@@ -67,11 +73,23 @@ def parse_review(text: str) -> tuple[Finding, ...]:
     return tuple(findings)
 
 
+def _omitted(name: str, raw: bytes, reason: str) -> dict[str, object]:
+    return {
+        "path": name,
+        "omitted": reason,
+        "size": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
 def review_context(repo: Path) -> str:
-    """Collect the final HEAD-to-tree patch and complete untracked contents, read-only.
+    """Collect the final HEAD-to-tree patch and untracked contents, read-only and bounded.
 
     Symlinks are represented by their target text, never followed. Binary new files
     are base64 encoded. The orchestration plan is excluded from candidate changes.
+    A diff above ``MAX_DIFF_CHARS`` is cut with an explicit marker; untracked files above
+    ``MAX_UNTRACKED_FILE_BYTES``, or beyond the total ``MAX_CONTEXT_CHARS``, are listed only
+    with path, size and sha256 and an ``omitted`` reason.
     """
     patch = _git(
         repo,
@@ -84,6 +102,10 @@ def review_context(repo: Path) -> str:
         ".",
         f":(exclude){PLAN_FILENAME}",
     )
+    if len(patch) > MAX_DIFF_CHARS:
+        marker = f"[baton: diff truncated, first {MAX_DIFF_CHARS} of {len(patch)} characters shown]"
+        patch = f"{patch[:MAX_DIFF_CHARS]}\n{marker}\n"
+    budget = MAX_CONTEXT_CHARS - len(patch)
     paths = _git(repo, "ls-files", "--others", "--exclude-standard", "-z")
     untracked = []
     for name in paths.split("\0"):
@@ -96,10 +118,17 @@ def review_context(repo: Path) -> str:
         if not path.is_file():
             raise ReviewError(f"Cannot review non-regular file: {name!r}")
         raw = path.read_bytes()
+        if len(raw) > MAX_UNTRACKED_FILE_BYTES:
+            untracked.append(_omitted(name, raw, "file too large"))
+            continue
         try:
             content, encoding = raw.decode("utf-8"), "utf-8"
         except UnicodeDecodeError:
             content, encoding = base64.b64encode(raw).decode("ascii"), "base64"
+        if len(content) > budget:
+            untracked.append(_omitted(name, raw, "context limit reached"))
+            continue
+        budget -= len(content)
         untracked.append({"path": name, "content": content, "encoding": encoding})
     return json.dumps({"diff": patch, "untracked": untracked}, ensure_ascii=True)
 

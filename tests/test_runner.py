@@ -2,6 +2,8 @@ import sys
 import time
 from contextlib import suppress
 
+import pytest
+
 from baton.runner import run_command, strip_ansi
 
 
@@ -151,3 +153,19 @@ def test_exited_parent_with_stubborn_descendant(tmp_path):
             if pidfile.exists():
                 with suppress(ProcessLookupError):
                     os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+
+def test_input_reaches_stdin(tmp_path):
+    payload = "y" * 300_000
+    res = run_command(["cat"], tmp_path, 30, input=payload)
+    assert res.exit_code == 0 and res.stdout == payload
+
+
+def test_input_is_rejected_with_tty(tmp_path):
+    with pytest.raises(ValueError):
+        run_command(["cat"], tmp_path, 5, tty=True, input="x")
+
+
+def test_input_to_child_that_does_not_read(tmp_path):
+    res = run_command(["true"], tmp_path, 10, input="z" * 300_000)
+    assert res.exit_code == 0

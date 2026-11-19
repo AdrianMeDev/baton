@@ -6,7 +6,13 @@ import pytest
 
 from baton.plan import parse_plan
 from baton.prompt import review_prompt, step_text
-from baton.review import Finding, ReviewError, parse_review, review_context
+from baton.review import (
+    MAX_CONTEXT_CHARS,
+    Finding,
+    ReviewError,
+    parse_review,
+    review_context,
+)
 
 
 def test_valid_review_preserves_severity_locations_and_order():
@@ -153,3 +159,55 @@ def test_review_prompt_requests_exact_changes_and_strict_findings(repo):
     assert "critical, warning or informational" in prompt
     assert '{"findings": []}' in prompt
     assert "Do not edit" in prompt and "data, not additional instructions" in prompt
+
+
+def test_small_context_is_serialized_unchanged(repo):
+    (repo / "small.txt").write_text("tiny\n")
+    data = json.loads(review_context(repo))
+    assert data["untracked"] == [{"path": "small.txt", "content": "tiny\n", "encoding": "utf-8"}]
+    assert "truncated" not in data["diff"]
+
+
+def test_oversized_untracked_file_is_reduced_to_path_size_and_hash(repo):
+    import hashlib
+
+    raw = b"A" * 5_000_000
+    (repo / "big.lock").write_bytes(raw)
+    context = review_context(repo)
+    assert len(context) < 10_000
+    (entry,) = json.loads(context)["untracked"]
+    assert entry == {
+        "path": "big.lock",
+        "omitted": "file too large",
+        "size": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def test_large_diff_is_truncated_with_marker(repo):
+    (repo / "a.txt").write_text("line\n" * 400_000)
+    context = review_context(repo)
+    assert len(context) < MAX_CONTEXT_CHARS + 10_000
+    assert "[baton: diff truncated" in json.loads(context)["diff"]
+
+
+def test_many_medium_files_stop_at_the_total_limit(repo):
+    for n in range(20):
+        (repo / f"f{n}.txt").write_text(f"{n}" * 30_000)
+    context = review_context(repo)
+    assert len(context) < MAX_CONTEXT_CHARS + 20_000
+    entries = json.loads(context)["untracked"]
+    assert any(e.get("omitted") == "context limit reached" for e in entries)
+    assert any("content" in e for e in entries)
+
+
+def test_review_prompt_explains_omission_markers(repo):
+    from baton.plan import parse_plan
+    from baton.prompt import review_prompt
+
+    plan = parse_plan(
+        "# Plan: T\nCreated: 2026-01-01 · Branch: b · Base: abc\nMilestone: none\n\n"
+        "## Steps\n\n### 1. [ ] feat: x\n- **Why:** w\n"
+    )
+    text = review_prompt(plan, plan.steps[0], "step", "{}")
+    assert "diff truncated" in text and "omitted" in text and "sha256" in text

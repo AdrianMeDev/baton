@@ -82,11 +82,7 @@ DEFAULT_VERIFY_TIMEOUT = 900.0
 
 def _commit_hint(out: TextIO, message: str) -> None:
     say(out, "  git add -A")
-    say(out, f"  git commit -m {_quote(message)}")
-
-
-def _quote(text: str) -> str:
-    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$") + '"'
+    say(out, f"  git commit -m {shlex.quote(message)}")
 
 
 def _log(plan_path: Path, line: str, date: str) -> None:
@@ -544,6 +540,8 @@ def _dry_run(
     adapter = select_adapter(step)
     say(out, "Command (cwd = repo root):")
     say(out, "  " + " ".join(shlex.quote(a) for a in adapter.argv("<prompt>")))
+    if getattr(adapter, "transport", "argv") == "stdin":
+        say(out, "  (prompt via stdin)")
     say(out, "Prompt:")
     say(out, prompt)
     return EXIT_OK
