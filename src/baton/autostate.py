@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import tempfile
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -120,6 +122,35 @@ class AutoStore:
             if temp_path is not None:
                 with suppress(OSError):
                     temp_path.unlink(missing_ok=True)
+
+    @contextmanager
+    def run_lock(self, repo: Path) -> Iterator[None]:
+        """Hold the per-repository auto run lock; raise ``AutoStateError`` if it is taken.
+
+        The lock is a non-blocking ``flock`` on a file in the state directory, so it is
+        released by the OS when the run ends or the process dies. ``baton stop`` never
+        takes it.
+        """
+        digest = hashlib.sha256(self._key(repo).encode("utf-8")).hexdigest()[:16]
+        lock_path = self.path.parent / f"auto-{digest}.lock"
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = lock_path.open("a")
+        except OSError as exc:
+            raise AutoStateError(
+                f"Cannot open {lock_path}: {exc}. Check state directory permissions."
+            ) from exc
+        with handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise AutoStateError(
+                    f"another baton auto run is already active for {repo}. "
+                    "Wait for it to finish or run `baton stop` first."
+                ) from exc
+            except OSError as exc:
+                raise AutoStateError(f"Cannot lock {lock_path}: {exc}.") from exc
+            yield
 
     def reset(self, repo: Path) -> None:
         """Forget a repository's state, e.g. when the roadmap is finished."""

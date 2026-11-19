@@ -11,7 +11,7 @@ import re
 import sys
 import time
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -436,11 +436,53 @@ def run_auto_command(
             raise ConfigError("--max-hours must be greater than 0")
         config = load_config(find_config_path(config_path))
         store = AutoStore()
-        # A stop requested before this run started belongs to an earlier run.
-        store.update(repo, stop_requested=False, steps_done=0, started_at=now().isoformat())
+        # Refuse a second concurrent run before touching the shared state.
+        stack = ExitStack()
+        stack.enter_context(store.run_lock(repo))
+        try:
+            # A stop requested before this run started belongs to an earlier run.
+            store.update(repo, stop_requested=False, steps_done=0, started_at=now().isoformat())
+        except BaseException:
+            stack.close()
+            raise
     except (GitError, ConfigError, AutoStateError, OSError) as exc:
         say(out, f"Cannot start: {exc}")
         return EXIT_NOT_STARTED
+    with stack:
+        return _auto_loop(
+            repo,
+            config,
+            config_path,
+            store,
+            out,
+            hooks,
+            notifier,
+            now,
+            sleep,
+            merge,
+            max_steps,
+            max_hours,
+            agent_timeout,
+            verify_timeout,
+        )
+
+
+def _auto_loop(
+    repo,
+    config,
+    config_path,
+    store,
+    out,
+    hooks,
+    notifier,
+    now,
+    sleep,
+    merge,
+    max_steps,
+    max_hours,
+    agent_timeout,
+    verify_timeout,
+) -> int:
 
     settings = config.auto
     merge = settings.merge if merge is None else merge
