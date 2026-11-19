@@ -110,6 +110,29 @@ def repaired_before(plan: Plan, step_number: int) -> bool:
     return any(entry.startswith(prefix) for entry in plan.log)
 
 
+@dataclass(frozen=True)
+class RepairRecord:
+    """A ``plan repaired:`` log line: the problem step, the reason and the step titles."""
+
+    step: int
+    reason: str
+    old: str
+    new: str
+
+
+_RECORD_RE = re.compile(rf"^(?:[0-9-]+: )?{re.escape(REPAIR_LOG_PREFIX)}step (\d+): (.*)$", re.S)
+
+
+def parse_repair_log(entry: str) -> RepairRecord | None:
+    """Read a log entry written by ``apply_repair``; ``None`` for any other entry."""
+    match = _RECORD_RE.match(entry)
+    if not match:
+        return None
+    rest, _, new = match[2].rpartition(" | new: ")
+    rest, _, old = rest.rpartition(" | old: ")
+    return RepairRecord(int(match[1]), rest, old, new)
+
+
 def validate_repair(old: str, new: str, step_number: int) -> list[str]:
     """Readable reasons why ``new`` is not an acceptable repair of ``old`` at ``step_number``."""
     try:

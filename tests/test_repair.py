@@ -271,3 +271,18 @@ def test_repair_prompt_carries_reason_step_and_diff():
     assert "diff --git a/x b/x" in prompt
     assert "BATON-NEEDS-DECISION:" in prompt
     assert "at most 12 steps" in prompt
+
+
+def test_parse_repair_log_round_trips_what_apply_wrote():
+    from baton.repair import parse_repair_log
+
+    result = apply_repair(PLAN, 2, _step(2, "feat(widget): a"), "x | y")
+    entry = parse_plan(result.text).log[-1]
+
+    record = parse_repair_log(entry)
+
+    assert record is not None
+    assert (record.step, record.reason) == (2, "x | y")
+    assert record.old == "feat(widget): render widgets; docs(widget): document widgets"
+    assert record.new == "feat(widget): a"
+    assert parse_repair_log("2026-11-19: step 1 done") is None
