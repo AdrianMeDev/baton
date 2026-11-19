@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime
 import shlex
 import sys
+import tempfile
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import replace
@@ -102,14 +103,15 @@ def _protect_plan(path: Path):
         yield
     finally:
         try:
-            intact = not path.is_symlink() and path.read_bytes() == trusted
+            intact = not path.is_symlink() and path.is_file() and path.read_bytes() == trusted
         except OSError:
             intact = False
         if not intact:
-            if path.is_symlink() or path.is_file():
-                path.unlink()
-            elif path.is_dir():
-                path.rmdir()
+            if path.is_dir() and not path.is_symlink():
+                displaced = Path(tempfile.mkdtemp(prefix="baton-replaced-plan-", dir=path.parent))
+                path.rename(displaced / "replaced-plan")
+            else:
+                path.unlink(missing_ok=True)
             path.write_bytes(trusted)
             raise PlanError("Active plan changed during execution; trusted plan restored")
 
