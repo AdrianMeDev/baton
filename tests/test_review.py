@@ -211,3 +211,16 @@ def test_review_prompt_explains_omission_markers(repo):
     )
     text = review_prompt(plan, plan.steps[0], "step", "{}")
     assert "diff truncated" in text and "omitted" in text and "sha256" in text
+
+
+def test_review_prompt_limits_critical_to_defects_shown_in_the_changes():
+    from baton.plan import parse_plan
+    from baton.prompt import review_prompt
+
+    plan = parse_plan(
+        "# Plan: T\nCreated: 2026-01-01 · Branch: b · Base: abc\nMilestone: none\n\n"
+        "## Steps\n\n### 1. [ ] feat: x\n- **Why:** w\n"
+    )
+    text = review_prompt(plan, plan.steps[0], "step", "{}")
+    assert "critical only for a defect you can show in the changes" in text
+    assert "report it as warning" in text

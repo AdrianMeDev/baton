@@ -102,7 +102,11 @@ def review_prompt(plan: Plan, step: Step, text: str, changes: str) -> str:
         "Return only a JSON object with this format:\n"
         '{"findings": [{"severity": "critical", "message": "Describe the problem", '
         '"path": "relative/file.py", "line": 1}]}\n'
-        "severity must be critical, warning or informational. message must be non-empty. "
+        "severity must be critical, warning or informational. Use critical only for a defect you "
+        "can show in the changes below. If a concern depends on code outside the diff (for example "
+        "an import or a definition you cannot see), report it as warning and say what you could "
+        "not verify; baton ran the step's Verify command before this review. "
+        "message must be non-empty. "
         "path and line are optional; line must be a positive integer with a path. "
         'Return {"findings": []} when there are no findings. No Markdown fences or prose.\n\n'
         f"Step:\n{text}\n\n"
