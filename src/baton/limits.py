@@ -16,10 +16,12 @@ from typing import Any
 # Deliberately exclude generic HTTP 429: it can mean a transient request-rate limit.
 DEFAULT_LIMIT_PATTERNS = (
     r"\busage[_ -]limit(?:[_ -](?:reached|exceeded))?\b",
-    r"\b(?:quota|credit balance)\b.{0,40}\b(?:exceeded|exhausted|depleted)\b",
+    r"\b(?:quota|credit balance)\b.{0,40}\b(?:exceeded|exhausted|depleted|reached)\b",
     r"\binsufficient[_ -](?:quota|credits)\b",
     r"\b(?:hit|reached|exceeded) your (?:usage |weekly |daily )?limit\b",
 )
+
+_DURATION_PART = r"(\d+(?:\.\d+)?)\s*(s(?:econds?)?|m(?:inutes?)?|h(?:ours?)?)(?![a-z])"
 
 
 @dataclass(frozen=True)
@@ -84,15 +86,16 @@ def classify_limit(
             if parsed is not None:
                 resets.append(parsed)
         relative = re.search(
-            r"(?:retry|resets?) (?:after|in)\s+(\d+(?:\.\d+)?)"
-            r"\s*(s(?:econds?)?|m(?:inutes?)?|h(?:ours?)?)\b",
-            text,
-            re.IGNORECASE,
+            rf"(?:retry|resets?) (?:after|in)\s+((?:{_DURATION_PART}\s*)+)", text, re.IGNORECASE
         )
         if relative:
-            scale = {"s": 1, "m": 60, "h": 3600}[relative[2][0].lower()]
+            # A compound duration such as "37m10s" is the sum of its parts.
+            seconds = sum(
+                float(number) * {"s": 1, "m": 60, "h": 3600}[unit[0].lower()]
+                for number, unit in re.findall(_DURATION_PART, relative[1], re.IGNORECASE)
+            )
             with suppress(OverflowError):
-                resets.append(now + timedelta(seconds=float(relative[1]) * scale))
+                resets.append(now + timedelta(seconds=seconds))
     return UsageLimit(max(resets) if resets else None)
 
 

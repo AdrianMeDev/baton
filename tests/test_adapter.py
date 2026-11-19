@@ -510,6 +510,14 @@ def test_structured_reset_fields(adapter):
         ({"retry_after_seconds": 120}, "quota exhausted", "2026-11-18T12:02:00+00:00"),
         ({}, "Usage limit reached; reset in 2 hours", "2026-11-18T14:00:00+00:00"),
         ({}, "Quota exceeded; resets at 2026-11-19T10:00:00Z", "2026-11-19T10:00:00+00:00"),
+        (
+            {},
+            "Individual quota reached. Please upgrade your subscription to increase your limits. "
+            "Resets in 37m10s.",
+            "2026-11-18T12:37:10+00:00",
+        ),
+        ({}, "Quota reached; retry after 1h 30m", "2026-11-18T13:30:00+00:00"),
+        ({}, "Quota reached", None),
         ({"reset_at": "2026-11-18T14:00:00+02:00"}, "quota exhausted", "2026-11-18T12:00:00+00:00"),
         ({"reset_at": "tomorrow"}, "quota exhausted", None),
         ({"reset_at": "2026-11-19T10:00:00"}, "quota exhausted", None),
