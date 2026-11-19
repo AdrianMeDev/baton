@@ -537,6 +537,28 @@ directory prevents accidental edits to the candidate through relative paths; it 
 sandbox. A changed candidate or HEAD during review invalidates the result. `--dry-run` starts no
 implementation, fix or review subprocess and does not resolve review routes.
 
+#### Review fix loop
+
+A review with a `critical` finding does not stop the run at once. If the finding names a file
+and a `[routes.fix]` route exists, baton hands the critical findings to the fix route, runs the
+step's Verify again and has the step reviewed anew:
+
+- **Trigger.** Only `critical` findings that all carry a `path`. Warnings and informational
+  findings stay in the report and the pull request. A critical finding without a location, a
+  missing `[routes.fix]`, or a config without routes keeps the old behavior: no auto-commit.
+- **Rounds.** At most two: the first with the fix route of the step's tier, the second with tier L.
+  Each round is fix, then Verify, then review. A failed fix agent, a moved HEAD or a failing Verify
+  after a fix stops the run and leaves the changes in the working tree (the Verify repair loop does
+  not run again).
+- **Independence.** Fix agents count as authors, so the new review still comes from another
+  provider. If none is left, the run stops with `no eligible reviewer`.
+- **Evidence.** Only the last review goes into the `baton-evidence` line, bound to the final tree,
+  so the milestone pull request sees the reviewed state. Every round is logged as
+  `step n: review fix round k`, and the step's note says `after k review fix rounds`.
+- **Cost.** A critical finding can add up to two fix runs and two reviews to a step. The reported
+  agent cost includes the fix runs. A critical finding that remains after two rounds blocks the
+  auto-commit as before.
+
 To replay the full offline quality loop, including partial quota work and provider exclusion:
 
 ```bash
