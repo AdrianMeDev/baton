@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from datetime import datetime
-from typing import Literal, TextIO
+from datetime import datetime, timedelta
+from typing import TextIO
 
 from baton.limits import LimitStore
 from baton.routed import say
@@ -20,26 +20,59 @@ def wait_for_reset(
     sleep: Callable[[float], None],
     stop_requested: Callable[[], bool],
     out: TextIO,
-) -> Literal["ready", "stopped"]:
+    deadline: datetime | None = None,
+    recheck_interval_seconds: float | None = None,
+    recheck: Callable[[str, float], str | None] | None = None,
+) -> str:
     """Sleep in chunks of at most five minutes until an agent is free or a stop is requested.
 
     The store is re-read every chunk, so a cleared cooldown (``baton recheck``) ends the wait early.
     """
     names = set(agents)
     announced = None
+    next_recheck = (
+        now() + timedelta(seconds=recheck_interval_seconds)
+        if recheck is not None and recheck_interval_seconds is not None
+        else None
+    )
     while True:
         if stop_requested():
             return "stopped"
         current = now()
+        if deadline is not None and current >= deadline:
+            return "budget reached: run deadline (--max-hours)"
         cooling = {n: d for n, d in store.active(now=current).items() if n in names}
         if len(cooling) < len(names):
             return "ready"
-        agent, deadline = min(cooling.items(), key=lambda item: item[1])
-        if announced != deadline:
-            announced = deadline
+        if next_recheck is not None and current >= next_recheck:
+            for name in sorted(cooling):
+                if stop_requested():
+                    return "stopped"
+                current = now()
+                if deadline is not None and current >= deadline:
+                    return "budget reached: run deadline (--max-hours)"
+                active = store.active(now=current)
+                if any(n not in active for n in names):
+                    return "ready"
+                timeout = min(120.0, (min(active[n] for n in names) - current).total_seconds())
+                if deadline is not None:
+                    timeout = min(timeout, (deadline - current).total_seconds())
+                reason = recheck(name, timeout)
+                if reason is not None:
+                    return reason
+            next_recheck = now() + timedelta(seconds=recheck_interval_seconds)
+            continue
+        agent, reset_at = min(cooling.items(), key=lambda item: item[1])
+        if announced != reset_at:
+            announced = reset_at
             say(
                 out,
                 f"{agent} in cooldown, sign in with another account or wait until "
-                f"{deadline.astimezone():%H:%M}",
+                f"{reset_at.astimezone():%H:%M}",
             )
-        sleep(min(CHUNK_SECONDS, max((deadline - current).total_seconds(), 1.0)))
+        seconds = min(CHUNK_SECONDS, max((reset_at - current).total_seconds(), 1.0))
+        if deadline is not None:
+            seconds = min(seconds, (deadline - current).total_seconds())
+        if next_recheck is not None:
+            seconds = min(seconds, (next_recheck - current).total_seconds())
+        sleep(seconds)

@@ -124,3 +124,34 @@ def test_missing_roadmap_or_milestone_raises(repo: Path) -> None:
     (repo / "docs" / "ROADMAP.md").unlink()
     with pytest.raises(RoadmapError):
         sync_milestone(repo, make_plan(), plan.steps[0], "2026-11-19")
+
+
+@pytest.mark.parametrize(
+    "target", ["/tmp/outside-roadmap", "../outside.md", "untracked.md", "escape.md"]
+)
+def test_invalid_tracked_targets_are_rejected(repo, tmp_path, target):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
+    outside.write_text(ROADMAP.format(marker=" "))
+    if target == "/tmp/outside-roadmap":
+        target = str(outside)
+    elif target == "../outside.md":
+        target = "../" + outside.name
+    elif target == "untracked.md":
+        (repo / target).write_text(outside.read_text())
+    else:
+        (repo / target).symlink_to(outside)
+        git(repo, "add", target)
+    before = outside.read_bytes()
+    plan = make_plan(milestone=f"M1 – First ({target}, tracked)")
+    with pytest.raises(RoadmapError):
+        sync_milestone(repo, plan, plan.steps[0], "2026-11-19")
+    assert outside.read_bytes() == before
+
+
+def test_tracked_roadmap_in_linked_worktree(repo, tmp_path):
+    work = tmp_path / "linked"
+    git(repo, "worktree", "add", "-b", "linked", str(work))
+    plan = make_plan()
+    sync_milestone(work, plan, plan.steps[0], "2026-11-19")
+    assert roadmap(work).milestones[0].status == "pending"
+    assert roadmap(repo).milestones[0].status == "open"

@@ -559,3 +559,143 @@ def test_real_wait_detects_mixed_budget_and_cooldown(world):
         out=world.out,
     )
     assert "Daily run budget exhausted" in hooks.wait("implement", "M")
+
+
+@pytest.mark.parametrize("merge", [True, False])
+def test_stop_in_final_step_prevents_publication_and_can_resume(world, merge):
+    world.write_plan(s1="[x] – abc1234")
+    world.on_next = lambda _: world.store.update(world.repo, stop_requested=True)
+    result = world.run(merge=merge)
+    assert result.outcome == "stopped"
+    assert result.reason == "stop requested"
+    assert not world.pr_calls
+    world.store.update(world.repo, stop_requested=False)
+    result = world.run(merge=merge)
+    assert result.outcome == ("merged" if merge else "published")
+    assert len(world.next_calls) == 1
+
+
+def test_exhausted_budget_prevents_new_planning(world):
+    result = world.run(budget=Budget(NOW, max_steps=1, steps=1))
+    assert result.outcome == "stopped"
+    assert "budget reached" in result.reason
+    assert world.plan_calls == 0
+
+
+def test_planner_retry_checks_elapsed_budget(world):
+    world.plan_codes = [EXIT_EXHAUSTED]
+
+    def wait(role, size):
+        world.now += timedelta(hours=1)
+        return "ready"
+
+    world.wait = wait
+    result = world.run(budget=Budget(NOW, max_hours=1))
+    assert "budget reached" in result.reason
+    assert world.plan_calls == 1
+
+
+def test_last_allowed_step_finalizes_before_next_planning(world):
+    world.write_plan(s1="[x] – abc1234")
+    budget = Budget(NOW, max_steps=1)
+    assert world.run(budget=budget).outcome == "merged"
+    assert world.pr_calls == [True]
+    world.plan_path.unlink()
+    result = world.run(budget=budget)
+    assert "budget reached" in result.reason
+    assert world.plan_calls == 0
+
+
+@pytest.mark.parametrize("role", ["implement", "plan_commits"])
+def test_periodic_recheck_uses_active_agent_config(world, monkeypatch, role):
+    from baton.auto import default_hooks
+    from baton.config import AgentConfig, AutoConfig, Config, ConfigLocation
+    from baton.limits import LimitStore
+    from baton.recording import Recording
+    from baton.runs import RunStore
+
+    agent = AgentConfig("custom", "claude", "custom-command", model="custom-model")
+    config = Config(
+        ConfigLocation(world.repo / "config.toml", "flag"),
+        agents={"custom": agent},
+        routes={role: {"M": ["custom"]}},
+        auto=AutoConfig(recheck_interval_seconds=30),
+    )
+    reset = NOW + timedelta(hours=2)
+    LimitStore().set("custom", reset)
+    probes = []
+
+    def probe(selected, **kwargs):
+        probes.append(selected)
+        return Recording(
+            adapter="claude",
+            agent="custom",
+            argv=[],
+            tty=False,
+            exit_code=0,
+            timed_out=False,
+            duration_s=0,
+            stdout='{"type":"result","subtype":"success","result":"OK","is_error":false}',
+            stderr="",
+            recorded_at=NOW.isoformat(),
+            cli_version="fake",
+        )
+
+    monkeypatch.setattr("baton.probe.run_probe", probe)
+
+    def sleep(seconds):
+        world.now += timedelta(seconds=seconds)
+
+    hooks = default_hooks(
+        world.repo,
+        config,
+        None,
+        agent_timeout=10,
+        verify_timeout=10,
+        now=lambda: world.now,
+        sleep=sleep,
+        store=world.store,
+        out=world.out,
+        budget=Budget(NOW, max_hours=1),
+    )
+    assert hooks.wait(role, "M") == "ready"
+    assert probes == [agent]
+    assert world.now == NOW + timedelta(seconds=30)
+    assert "custom" not in LimitStore().active(now=world.now)
+    assert RunStore().read() == []
+
+
+def test_periodic_recheck_skips_agent_capped_during_wait(world, monkeypatch):
+    from baton.auto import default_hooks
+    from baton.config import AgentConfig, AutoConfig, Config, ConfigLocation
+    from baton.limits import LimitStore
+    from baton.runs import RunStore
+
+    agent = AgentConfig("a", "claude", "fake", daily_run_budget=1)
+    config = Config(
+        ConfigLocation(world.repo / "config.toml", "flag"),
+        agents={"a": agent},
+        routes={"implement": {"M": ["a"]}},
+        auto=AutoConfig(recheck_interval_seconds=30),
+    )
+    LimitStore().set("a", NOW + timedelta(hours=1))
+    probes = []
+    monkeypatch.setattr("baton.probe.run_probe", lambda *a, **kw: probes.append(a))
+
+    def sleep(seconds):
+        world.now += timedelta(seconds=seconds)
+        RunStore().dispatch("a", now=world.now)
+
+    hooks = default_hooks(
+        world.repo,
+        config,
+        None,
+        agent_timeout=10,
+        verify_timeout=10,
+        now=lambda: world.now,
+        sleep=sleep,
+        store=world.store,
+        out=world.out,
+    )
+    assert "Daily run budget exhausted" in hooks.wait("implement", "M")
+    assert probes == []

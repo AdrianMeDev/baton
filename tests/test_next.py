@@ -1143,8 +1143,8 @@ def test_commit_flag_commits_with_step_message(repo, git_identity) -> None:
 def test_commit_flag_without_verify_command(repo, git_identity) -> None:
     write_plan(repo, verify="")
     code, out = run(repo, FakeAdapter(action=edit), commit=True)
-    assert code == EXIT_OK and "not verified" in out
-    assert plan_of(repo).steps[0].status == "done"
+    assert code == EXIT_FAILED and "require a Verify command" in out
+    assert plan_of(repo).steps[0].status == "open"
 
 
 def test_without_commit_flag_behaviour_is_unchanged(repo, git_identity) -> None:
@@ -1266,7 +1266,7 @@ def test_missing_tracked_roadmap_blocks_commit(repo, git_identity) -> None:
     code, out = run(repo, FakeAdapter(action=edit), commit=True)
     assert code == EXIT_FAILED and head(repo) == before
     assert "roadmap docs/ROADMAP.md not found" in out
-    assert plan_of(repo).steps[0].status == "pending"
+    assert plan_of(repo).steps[0].status == "open"
 
 
 def _branch(repo: Path) -> str:
@@ -1516,7 +1516,7 @@ def test_normal_output_is_not_a_roadmap_problem(repo):
     assert code == EXIT_OK
 
 
-@pytest.mark.parametrize("mode", ["edit", "delete", "symlink"])
+@pytest.mark.parametrize("mode", ["edit", "delete", "symlink", "directory", "fifo"])
 @pytest.mark.parametrize("worktree", [False, True])
 def test_active_plan_tampering_restored(repo, mode, worktree, git_identity):
     def tamper(work):
@@ -1528,6 +1528,13 @@ def test_active_plan_tampering_restored(repo, mode, worktree, git_identity):
             path.unlink()
             if mode == "symlink":
                 path.symlink_to(work / "new.txt")
+            elif mode == "directory":
+                path.mkdir()
+                (path / "partial.txt").write_text("preserved")
+            elif mode == "fifo":
+                import os
+
+                os.mkfifo(path)
 
     code, output = run(repo, FakeAdapter(action=tamper), worktree=worktree)
     assert code == EXIT_FAILED
@@ -1536,3 +1543,65 @@ def test_active_plan_tampering_restored(repo, mode, worktree, git_identity):
     active = worktree_path_for(repo, "baton/demo") if worktree else repo
     assert (active / "new.txt").read_text() == "hello\n"
     assert not (active / "compromised").exists()
+    if mode == "directory":
+        preserved = list(active.glob("baton-replaced-plan-*/replaced-plan/partial.txt"))
+        assert len(preserved) == 1
+        assert preserved[0].read_text() == "preserved"
+
+
+@pytest.mark.parametrize("mode", ["commit", "push", "worktree"])
+def test_automatic_commit_requires_verify(repo, mode, git_identity):
+    write_plan(repo, verify="")
+    before = head(repo)
+    adapter = FakeAdapter(action=edit)
+    code, output = run(repo, adapter, **{mode: True})
+    assert code == EXIT_FAILED
+    assert "require a Verify command" in output
+    assert not adapter.prompts
+    assert head(repo) == before
+    assert plan_of(repo).steps[0].status == "open"
+
+
+@pytest.mark.parametrize("phase", ["implementation", "repair", "verify", "review"])
+def test_plan_restored_on_failed_external_phase(repo, phase):
+    from baton.next import _run_next
+    from baton.review import ReviewError
+
+    def tamper(work):
+        edit(work)
+        (work / ".agent-plan.md").write_text("altered instructions")
+
+    implementation = FakeAdapter(action=edit)
+    fixer = None
+    reviewer = None
+    if phase == "implementation":
+        implementation = FakeAdapter(AgentResult(ok=False, error="failed"), action=tamper)
+    elif phase == "repair":
+        write_plan(repo, verify="false")
+        fixer = FakeAdapter(AgentResult(ok=False, error="repair failed"), action=tamper)
+    elif phase == "verify":
+        write_plan(repo, verify="printf altered > .agent-plan.md; exit 1")
+    else:
+
+        def reviewer(*args):
+            tamper(repo)
+            raise ReviewError("review failed")
+
+    trusted = (repo / ".agent-plan.md").read_bytes()
+    output = io.StringIO()
+    code = _run_next(
+        repo,
+        lambda step: implementation,
+        output,
+        agent_timeout=10,
+        verify_timeout=10,
+        select_fix=lambda step, escalated: fixer,
+        review_step=reviewer,
+    )
+    assert code == EXIT_FAILED
+    assert "trusted plan restored" in output.getvalue()
+    restored = (repo / ".agent-plan.md").read_text()
+    # The review error may be logged after restoration.
+    assert restored.startswith(trusted.decode().split("## Log")[0])
+    assert plan_of(repo).steps[0].status == "open"
+    assert (repo / "new.txt").read_text() == "hello\n"

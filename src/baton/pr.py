@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -90,7 +91,13 @@ def milestone_report(repo: Path, text: str) -> Report:
     return Report(plan.title, "\n".join(lines) + "\n", tuple(blockers))
 
 
-def run_pr(repo: Path, *, merge: bool = False, out=None) -> int:
+def run_pr(
+    repo: Path,
+    *,
+    merge: bool = False,
+    out=None,
+    stop_requested: Callable[[], bool] | None = None,
+) -> int:
     """Publish the existing milestone checkout without switching the user's branch."""
     import sys
 
@@ -152,7 +159,11 @@ def run_pr(repo: Path, *, merge: bool = False, out=None) -> int:
                 raise PlanError("Merged PR does not cover the current milestone revision")
             print(f"Already merged: {existing[0]['url']}", file=out)
             return 0
+        if stop_requested is not None and stop_requested():
+            raise PlanError("stop requested before publication")
         push(repo, branch)
+        if stop_requested is not None and stop_requested():
+            raise PlanError("stop requested before publication")
         result = publish(repo, target, plan.branch, branch, report.title, report.body)
         url = result["url"]
         print(url, file=out)
@@ -165,7 +176,10 @@ def run_pr(repo: Path, *, merge: bool = False, out=None) -> int:
                 raise PlanError("; ".join(report.blockers))
             from baton.forge import merge_when_ready
 
-            merge_when_ready(repo, target, url, revision)
+            if stop_requested is None:
+                merge_when_ready(repo, target, url, revision)
+            else:
+                merge_when_ready(repo, target, url, revision, stop_requested=stop_requested)
             print(f"Merged: {url}", file=out)
         return 0
     except (PlanError, GitError, ForgeError, OSError, ValueError, KeyError) as exc:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -102,13 +103,22 @@ def publish(repo: Path, target: str, base: str, branch: str, title: str, body: s
 
 
 def merge_when_ready(
-    repo: Path, target: str, url: str, revision: str, *, timeout: float = 300, interval: float = 5
+    repo: Path,
+    target: str,
+    url: str,
+    revision: str,
+    *,
+    timeout: float = 300,
+    interval: float = 5,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> None:
     """Wait for checks and merge only the expected revision, then confirm the result."""
     import time
 
     deadline = time.monotonic() + timeout
     while True:
+        if stop_requested is not None and stop_requested():
+            raise ForgeError("stop requested; PR remains open")
         data = json.loads(
             gh(
                 repo,
@@ -156,6 +166,8 @@ def merge_when_ready(
         if time.monotonic() >= deadline:
             raise ForgeError("CI wait timed out (pending or absent checks); PR remains open")
         time.sleep(min(interval, max(0, deadline - time.monotonic())))
+    if stop_requested is not None and stop_requested():
+        raise ForgeError("stop requested; PR remains open")
     gh(repo, "pr", "merge", url, "--repo", target, "--squash", "--match-head-commit", revision)
     confirmed = json.loads(
         gh(repo, "pr", "view", url, "--repo", target, "--json", "state,headRefOid")

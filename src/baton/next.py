@@ -11,8 +11,9 @@ from __future__ import annotations
 import datetime
 import shlex
 import sys
+import tempfile
 from collections.abc import Callable
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
@@ -66,7 +67,7 @@ from baton.review import (
 from baton.roadmap import RoadmapError
 from baton.routed import RoutedAdapter, say
 from baton.router import resolve_route
-from baton.verify import VerifyResult, run_verify
+from baton.verify import VerifyResult, _clean, run_verify
 from baton.worktree import ensure_worktree, mirror_plan
 
 EXIT_OK = 0
@@ -102,14 +103,15 @@ def _protect_plan(path: Path):
         yield
     finally:
         try:
-            intact = not path.is_symlink() and path.read_bytes() == trusted
+            intact = not path.is_symlink() and path.is_file() and path.read_bytes() == trusted
         except OSError:
             intact = False
         if not intact:
-            if path.is_symlink() or path.is_file():
-                path.unlink()
-            elif path.is_dir():
-                path.rmdir()
+            if path.is_dir() and not path.is_symlink():
+                displaced = Path(tempfile.mkdtemp(prefix="baton-replaced-plan-", dir=path.parent))
+                path.rename(displaced / "replaced-plan")
+            else:
+                path.unlink(missing_ok=True)
             path.write_bytes(trusted)
             raise PlanError("Active plan changed during execution; trusted plan restored")
 
@@ -339,6 +341,9 @@ def _run_next(
         say(out, f"Step {step.number}/{len(plan.steps)}: {step.message}")
         if commit and not _enter_branch(repo, plan, out):
             return EXIT_STOPPED
+        if commit and not _clean(step.verify):
+            say(out, "Automatic commits require a Verify command; the step stays open.")
+            return EXIT_FAILED
         adapter = select_adapter(step)
         raw_step = step_text(plan_path.read_text("utf-8"), step)
         prompt = implement_prompt(plan, step, raw_step)
@@ -368,8 +373,7 @@ def _run_next(
             return EXIT_EXHAUSTED if getattr(adapter, "exhausted", False) else EXIT_FAILED
 
         if commit:
-            with suppress(RoadmapError):
-                sync_milestone(repo, plan, step, date)
+            sync_milestone(repo, plan, step, date)
         with _protect_plan(plan_path):
             verify = run_verify(step.verify, repo, verify_timeout)
         repairs = 0
@@ -476,7 +480,7 @@ def _run_next(
         else:
             text = append_log(text, f"{date}: step {step.number} {note}, waiting for commit.")
         save_plan(plan_path, text)
-    except (ConfigError, GitError, LimitStateError, PlanError, OSError) as exc:
+    except (ConfigError, GitError, LimitStateError, PlanError, RoadmapError, OSError) as exc:
         say(out, f"Error: {exc}")
         return EXIT_FAILED
 
@@ -616,7 +620,7 @@ def run_next_command(
                 push=push,
                 worktree=worktree,
             )
-        except (ConfigError, GitError, LimitStateError, PlanError, OSError) as exc:
+        except (ConfigError, GitError, LimitStateError, PlanError, RoadmapError, OSError) as exc:
             say(out, f"Error: {exc}")
             return EXIT_FAILED
 

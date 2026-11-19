@@ -1,5 +1,6 @@
 import sys
 import time
+from contextlib import suppress
 
 from baton.runner import run_command, strip_ansi
 
@@ -102,3 +103,51 @@ def test_tty_missing_command(tmp_path):
 
 def test_strip_ansi():
     assert strip_ansi("\x1b[1;32mok\x1b[0m\x1b]0;title\x07 done\r\n") == "ok done\n"
+
+
+def test_exited_parent_with_stubborn_descendant(tmp_path):
+    import os
+    import signal
+    import subprocess
+
+    for tty in (False, True):
+        pidfile = tmp_path / f"child-{tty}.pid"
+        child_code = (
+            "import os, signal, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            f"open({str(pidfile)!r}, 'w').write(str(os.getpid())); "
+            "print('retained output', flush=True); time.sleep(60)"
+        )
+        parent_code = (
+            "import subprocess, sys, time; "
+            f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
+            "time.sleep(0.1)"
+        )
+        # A separate watchdog bounds the regression even if output draining hangs.
+        harness = (
+            "from baton.runner import run_command; "
+            "import sys; "
+            f"r = run_command([sys.executable, '-c', {parent_code!r}], "
+            f"{str(tmp_path)!r}, timeout=0.5, tty={tty!r}); "
+            "assert r.timed_out; assert 'retained output' in r.stdout"
+        )
+        started = time.monotonic()
+        try:
+            subprocess.run(py(harness), check=True, timeout=13)
+            assert time.monotonic() - started < 13
+            child = int(pidfile.read_text())
+            for _ in range(50):
+                try:
+                    os.kill(child, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.02)
+            else:
+                # Linux may retain an orphan zombie until its adopter reaps it.
+                from pathlib import Path
+
+                assert Path(f"/proc/{child}/stat").read_text().split()[2] == "Z"
+        finally:
+            if pidfile.exists():
+                with suppress(ProcessLookupError):
+                    os.kill(int(pidfile.read_text()), signal.SIGKILL)

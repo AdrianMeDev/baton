@@ -33,7 +33,7 @@ from baton.git import (
     worktree_paths,
     worktree_remove,
 )
-from baton.limits import LimitStore
+from baton.limits import LimitStateError, LimitStore
 from baton.next import (
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_VERIFY_TIMEOUT,
@@ -162,7 +162,7 @@ def run_milestone(
     try:
         plan = _read_plan(repo)
         if not _adoptable(repo, plan):
-            plan = _plan_next(repo, hooks, out, stop_requested)
+            plan = _plan_next(repo, hooks, out, stop_requested, budget)
             if isinstance(plan, MilestoneResult):
                 return plan
         assert plan is not None
@@ -212,6 +212,8 @@ def run_milestone(
                 budget.steps += 1
                 store.update(repo, step=0, steps_done=store.read(repo).steps_done + 1)
 
+        if stop_requested():
+            return stop("stop requested", milestone)
         code, output = hooks.pr(merge)
         say(out, output.rstrip())
         url = next((m[0] for m in re.finditer(r"https?://\S+", output)), "")
@@ -226,7 +228,7 @@ def run_milestone(
         _finish_local_roadmap(repo, plan)
         store.update(repo, milestone="", step=0, branch="", pr_url="")
         return MilestoneResult("merged", milestone, pr_url=url)
-    except (PlanError, RoadmapError, GitError, OSError) as exc:
+    except (PlanError, RoadmapError, GitError, LimitStateError, OSError) as exc:
         return stop(f"{exc}")
 
 
@@ -268,6 +270,7 @@ def _plan_next(
     hooks: MilestoneHooks,
     out: TextIO,
     stop_requested: Callable[[], bool],
+    budget: Budget,
 ) -> Plan | MilestoneResult:
     """Plan the next roadmap milestone; a result ends the milestone."""
     roadmap_path = find_roadmap(repo)
@@ -284,6 +287,8 @@ def _plan_next(
     while True:
         if stop_requested():
             return MilestoneResult("stopped", milestone.id, "stop requested")
+        if (reason := budget.exceeded(hooks.now())) is not None:
+            return MilestoneResult("stopped", milestone.id, reason)
         say(out, f"Planning {milestone.id} – {milestone.name}")
         code = hooks.plan()
         if code == EXIT_OK:
@@ -326,12 +331,19 @@ def default_hooks(
     sleep: Callable[[float], None],
     store: AutoStore,
     out: TextIO,
+    budget: Budget | None = None,
 ) -> MilestoneHooks:
     """The real `baton plan`, `baton next --worktree --push` and `baton pr` as hooks."""
 
     def pr(merge: bool) -> tuple[int, str]:
         buffer = io.StringIO()
-        return run_pr(repo, merge=merge, out=buffer), buffer.getvalue()
+        code = run_pr(
+            repo,
+            merge=merge,
+            out=buffer,
+            stop_requested=lambda: store.read(repo).stop_requested,
+        )
+        return code, buffer.getvalue()
 
     def wait(role: str, size: str | None) -> str:
         from baton.runs import RunStore, budget_reset_message, daily_counts
@@ -347,12 +359,30 @@ def default_hooks(
         if capped and all(a in capped or a.name in cooling for a in agents):
             return budget_reset_message()
         names = [a.name for a in agents if a not in capped]
+
+        def recheck(name: str, timeout: float) -> str | None:
+            from baton.probe import recheck_agent
+
+            counts = daily_counts(RunStore().read(), now())
+            agent = config.agents[name]
+            if agent.daily_run_budget is not None and counts.get(name, 0) >= agent.daily_run_budget:
+                return budget_reset_message()
+            recheck_agent(agent, LimitStore(), timeout=timeout, out=out, now=now)
+            return None
+
         return wait_for_reset(
             names,
             LimitStore(),
+            recheck_interval_seconds=config.auto.recheck_interval_seconds,
+            recheck=recheck if config.auto.recheck_interval_seconds is not None else None,
             now=now,
             sleep=sleep,
             stop_requested=lambda: store.read(repo).stop_requested,
+            deadline=(
+                budget.started + timedelta(hours=budget.max_hours)
+                if budget is not None and budget.max_hours is not None
+                else None
+            ),
             out=out,
         )
 
@@ -430,6 +460,7 @@ def run_auto_command(
         sleep=sleep,
         store=store,
         out=out,
+        budget=budget,
     )
     while True:
         result = run_milestone(repo, hooks, store, budget, merge=merge, out=out)

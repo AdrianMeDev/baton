@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from baton.git import GitError, _git
 from baton.plan import Plan, Step
 from baton.roadmap import (
     RoadmapError,
@@ -23,9 +24,23 @@ def sync_milestone(repo: Path, plan: Plan, step: Step, date: str) -> Path | None
     ref = plan.milestone
     if ref.tracking != "tracked" or ref.id is None or ref.roadmap is None:
         return None
-    path = repo / ref.roadmap
+    relative = Path(ref.roadmap)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise RoadmapError("roadmap must be a relative path within the checkout")
+    path = repo / relative
+    if not path.resolve().is_relative_to(repo.resolve()):
+        raise RoadmapError("roadmap escapes the checkout")
     if not path.is_file():
         raise RoadmapError(f"roadmap {ref.roadmap} not found in {repo}")
+    try:
+        tracked = _git(repo, "ls-files", "--stage", "-z", "--", relative.as_posix())
+    except GitError as exc:
+        raise RoadmapError(f"cannot validate roadmap tracking: {exc}") from exc
+    entries = [entry for entry in tracked.split("\0") if entry]
+    if len(entries) != 1 or entries[0].split("\t", 1)[-1] != relative.as_posix():
+        raise RoadmapError(f"roadmap {ref.roadmap} is not tracked")
+    if not entries[0].startswith(("100644 ", "100755 ")):
+        raise RoadmapError("tracked roadmap must be a regular file")
     original = path.read_text(encoding="utf-8")
     milestone = parse_roadmap(original).get(ref.id)
     if milestone is None:

@@ -90,3 +90,31 @@ def test_checks_can_appear_and_finish(tmp_path, monkeypatch, initial):
 
     monkeypatch.setattr("baton.forge.gh", gh)
     merge_when_ready(tmp_path, "a/b", "url", "sha", interval=0)
+
+
+@pytest.mark.parametrize("green", [True, False])
+def test_stop_during_ci_or_before_merge_leaves_pr_open(tmp_path, monkeypatch, green):
+    from baton.forge import merge_when_ready
+
+    calls = []
+    stopped = False
+
+    def gh(repo, *args):
+        nonlocal stopped
+        calls.append(args)
+        stopped = True
+        return json.dumps(
+            dict(
+                state="OPEN",
+                headRefOid="sha",
+                statusCheckRollup=[
+                    dict(__typename="StatusContext", state="SUCCESS" if green else "PENDING")
+                ],
+            )
+        )
+
+    monkeypatch.setattr("baton.forge.gh", gh)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    with pytest.raises(ForgeError, match="stop requested"):
+        merge_when_ready(tmp_path, "a/b", "url", "sha", stop_requested=lambda: stopped)
+    assert all(args[1] != "merge" for args in calls)

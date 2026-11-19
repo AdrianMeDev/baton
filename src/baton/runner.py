@@ -10,6 +10,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -38,16 +39,22 @@ class RunResult:
 
 def _terminate(proc: subprocess.Popen[Any]) -> None:
     """Stop the whole process group: SIGTERM first, SIGKILL after a grace period."""
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        proc.wait(timeout=KILL_GRACE_S)
+        return
+    deadline = time.monotonic() + KILL_GRACE_S
+    while time.monotonic() < deadline:
+        proc.poll()  # Reap the leader even when descendants remain.
         try:
-            os.killpg(proc.pid, sig)
+            os.killpg(proc.pid, 0)
         except ProcessLookupError:
             return
-        try:
-            proc.wait(timeout=KILL_GRACE_S)
-            return
-        except subprocess.TimeoutExpired:
-            continue
+        time.sleep(min(POLL_S, max(0, deadline - time.monotonic())))
+    with suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    proc.wait(timeout=KILL_GRACE_S)
 
 
 def _run_tty(
@@ -92,8 +99,6 @@ def _run_tty(
                 if not data:
                     break
                 chunks.append(data)
-            elif proc.poll() is not None:
-                break
         if not timed_out:
             try:
                 proc.wait(timeout=max(deadline - time.monotonic(), 0.0))
@@ -102,7 +107,8 @@ def _run_tty(
         if timed_out:
             _terminate(proc)
         # Drain whatever is still buffered.
-        while select.select([master], [], [], 0)[0]:
+        drain_deadline = time.monotonic() + POLL_S
+        while time.monotonic() < drain_deadline and select.select([master], [], [], 0)[0]:
             try:
                 data = os.read(master, READ_CHUNK)
             except OSError:
@@ -161,7 +167,13 @@ def run_command(
     except subprocess.TimeoutExpired:
         timed_out = True
         _terminate(proc)
-        stdout, stderr = proc.communicate()
+        try:
+            stdout, stderr = proc.communicate(timeout=KILL_GRACE_S)
+        except subprocess.TimeoutExpired as exc:
+            stdout = (exc.output or b"").decode("utf-8", errors="replace")
+            stderr = (exc.stderr or b"").decode("utf-8", errors="replace")
+            proc.stdout.close()
+            proc.stderr.close()
     return RunResult(
         stdout=stdout or "",
         stderr=stderr or "",
