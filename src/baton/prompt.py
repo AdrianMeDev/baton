@@ -98,8 +98,12 @@ def review_prompt(plan: Plan, step: Step, text: str, changes: str) -> str:
         "path and line are optional; line must be a positive integer with a path. "
         'Return {"findings": []} when there are no findings. No Markdown fences or prose.\n\n'
         f"Step:\n{text}\n\n"
-        "Candidate changes (JSON: final diff from HEAD and complete untracked files; "
-        "binary new files use base64):\n"
+        "Candidate changes (JSON: final diff from HEAD and untracked files; "
+        "binary new files use base64). The context is size-limited: a diff ending in a "
+        '"[baton: diff truncated" marker is incomplete, and an untracked entry with "omitted" '
+        "has only path, size and sha256 and its content was not sent. Do not report omitted "
+        "content as missing or empty; mention in an informational finding that it was not "
+        "reviewed:\n"
         f"{changes}\n"
     )
 

@@ -146,7 +146,10 @@ changes you trust. Baton starts the configured agent commands with your user per
 runs each plan's **Verify** command via `bash -c` in the checkout that contains the changes.
 A worktree keeps milestone changes separate from the base checkout. Agent access depends on
 the CLI's sandbox or permission mode. Keep unrelated credentials out of the environment.
-Independent review sends the final patch and new file contents to the configured reviewer.
+Independent review sends the final patch and new file contents to the configured reviewer. The
+context is bounded: a diff above 200,000 characters is truncated with a marker, untracked files
+above 64 KB (or beyond 400,000 characters in total) are sent only as path, size and sha256, and
+the reviewer is told which parts were not seen.
 
 ```bash
 baton doctor
