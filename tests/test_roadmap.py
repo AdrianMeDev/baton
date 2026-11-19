@@ -3,16 +3,20 @@ from pathlib import Path
 import pytest
 
 from baton.roadmap import (
+    DEFAULT_ANSWER,
     RoadmapError,
     append_changelog,
+    assemble_roadmap,
     find_roadmap,
     load_roadmap,
     milestone_text,
     next_milestone,
+    parse_questions,
     parse_roadmap,
     save_roadmap,
     section_text,
     set_milestone_status,
+    validate_roadmap,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "roadmaps"
@@ -152,3 +156,132 @@ def test_milestone_text_is_the_raw_section():
         "### M2 [ ] Gadgets\n- **Goal:** Gadgets exist.\n- **Depends on:** M1\n"
         "- **Size:** L, ~6 commits"
     )
+
+
+VALID_ROADMAP = """\
+# Roadmap: Todo
+Updated: 1999-01-01
+
+## Vision
+A todo app.
+
+## Milestones
+
+### M0 [ ] Walking skeleton
+- **Goal:** One page works.
+- **Includes:** scaffold
+- **Done when:** the page renders
+- **Depends on:** -
+- **Size:** S, ~4 commits
+
+### M1 [ ] Tasks
+- **Goal:** Add tasks.
+- **Includes:** api, ui
+- **Done when:** a task can be added
+- **Depends on:** M0
+- **Size:** M, ~6 commits
+
+## Definition of done (every milestone)
+- Builds, tests green
+
+## Changelog
+- 2026-11-19: roadmap created
+"""
+
+
+def test_valid_roadmap_has_no_errors_and_round_trips():
+    assert validate_roadmap(VALID_ROADMAP) == []
+    assert [m.id for m in parse_roadmap(VALID_ROADMAP).milestones] == ["M0", "M1"]
+
+
+def test_roadmap_may_start_at_m1():
+    text = VALID_ROADMAP.replace("### M1 [ ] Tasks", "### M2 [ ] Tasks")
+    text = text.replace("### M0 [ ]", "### M1 [ ]").replace("Depends on:** M0", "Depends on:** M1")
+
+    assert validate_roadmap(text) == []
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "expected"),
+    [
+        ("- **Goal:** One page works.\n", "", "M0: missing '**Goal:**'"),
+        ("- **Done when:** a task can be added\n", "", "M1: missing '**Done when:**'"),
+        ("S, ~4 commits", "~4 commits", "M0: '**Size:**' must start with S, M or L"),
+        ("### M0 [ ]", "### M0 [x]", "M0: must be open '[ ]', found done"),
+        (
+            "~6 commits",
+            "~12 commits",
+            "M1: a milestone is 3-8 commits, found ~12; split or merge it",
+        ),
+        ("~4 commits", "~1 commits", "M0: a milestone is 3-8 commits, found ~1; split or merge it"),
+        (
+            "## Definition of done (every milestone)",
+            "## Other",
+            "missing '## Definition of done' section",
+        ),
+        ("# Roadmap: Todo", "# Something", "missing '# Roadmap: <name>' heading"),
+        (
+            "### M1 [ ] Tasks",
+            "### M3 [ ] Tasks",
+            "milestones must be numbered M0.. or M1.. in order, found [0, 3]",
+        ),
+    ],
+)
+def test_invalid_roadmaps_report_specific_errors(old: str, new: str, expected: str):
+    text = VALID_ROADMAP.replace(old, new)
+
+    assert expected in validate_roadmap(text)
+
+
+def test_roadmap_without_milestones_is_reported_as_unparsable():
+    errors = validate_roadmap("# Roadmap: x\n\nnothing\n")
+
+    assert errors == ["roadmap does not parse: missing '## Milestones' section"]
+
+
+def test_assemble_roadmap_drops_prose_and_fence_and_sets_the_date():
+    reply = "Here you go:\n\n```markdown\n" + VALID_ROADMAP + "```\nEnjoy.\n"
+
+    text = assemble_roadmap(reply, "2026-11-19")
+
+    assert text.startswith("# Roadmap: Todo\nUpdated: 2026-11-19\n\n## Vision")
+    assert "1999-01-01" not in text and "Enjoy" not in text and "```" not in text
+    assert validate_roadmap(text) == []
+
+
+def test_assemble_roadmap_inserts_missing_date():
+    text = assemble_roadmap(VALID_ROADMAP.replace("Updated: 1999-01-01\n", ""), "2026-11-19")
+
+    assert text.splitlines()[:2] == ["# Roadmap: Todo", "Updated: 2026-11-19"]
+
+
+def test_assemble_roadmap_without_heading_is_left_for_validation():
+    text = assemble_roadmap("I cannot do that", "2026-11-19")
+
+    assert text == "I cannot do that\n"
+    assert validate_roadmap(text)[0].startswith("roadmap does not parse")
+
+
+def test_parse_questions_reads_defaults_and_fills_missing_ones():
+    reply = (
+        "Some thinking\n"
+        "BATON-QUESTION: Who uses it? | default: just me\n"
+        "BATON-QUESTION: Which stack?\n"
+        "  BATON-QUESTION:   Hosting? |  default:  none \n"
+        "see `BATON-QUESTION: x` inline\n"
+    )
+
+    questions = parse_questions(reply)
+
+    assert [(q.text, q.default) for q in questions] == [
+        ("Who uses it?", "just me"),
+        ("Which stack?", DEFAULT_ANSWER),
+        ("Hosting?", "none"),
+    ]
+
+
+def test_parse_questions_caps_at_six_and_accepts_none():
+    reply = "\n".join(f"BATON-QUESTION: q{n} | default: a{n}" for n in range(9))
+
+    assert [q.text for q in parse_questions(reply)] == [f"q{n}" for n in range(6)]
+    assert parse_questions("none") == []

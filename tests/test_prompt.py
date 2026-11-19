@@ -7,9 +7,12 @@ from baton.prompt import (
     plan_prompt,
     plan_retry_prompt,
     roadmap_problem,
+    roadmap_prompt,
+    roadmap_questions_prompt,
+    roadmap_retry_prompt,
     step_text,
 )
-from baton.roadmap import parse_roadmap
+from baton.roadmap import Question, parse_roadmap
 
 FIXTURES = Path(__file__).parent / "fixtures" / "plans"
 
@@ -156,3 +159,34 @@ def test_prompts_describe_the_marker():
     text = "# R\n\n## Milestones\n\n### M1 [ ] One\n- **Goal:** g\n- **Size:** S\n"
     milestone = parse_roadmap(text).milestones[0]
     assert ROADMAP_PROBLEM_MARKER in plan_prompt(text, milestone, "R.md", "tracked")
+
+
+def test_roadmap_questions_prompt_asks_for_marked_lines_with_defaults():
+    prompt = roadmap_questions_prompt("a todo app", "README: nothing")
+
+    assert "at most 6" in prompt
+    assert "BATON-QUESTION: <question> | default: <the answer you would assume>" in prompt
+    assert "a todo app" in prompt and "README: nothing" in prompt
+    assert "Do not edit" in prompt
+
+
+def test_roadmap_prompt_carries_idea_answers_and_format():
+    answers = [(Question("Who uses it?", "me"), "my team"), (Question("Stack?", "python"), "")]
+
+    prompt = roadmap_prompt("a todo app", answers, "")
+
+    assert "- Who uses it? -> my team" in prompt
+    assert "- Stack? -> decide yourself and list it as a decision" in prompt
+    assert "(empty repository)" in prompt
+    assert "### M0 [ ] <name>" in prompt
+    assert "## Definition of done (every milestone)" in prompt
+    assert "under ~150 lines" in prompt and "vertical slices" in prompt
+    assert "walking skeleton" in prompt
+
+
+def test_roadmap_retry_prompt_quotes_errors_and_previous_output():
+    prompt = roadmap_retry_prompt("BASE", "# Roadmap: old", ["M1: missing '**Goal:**'"])
+
+    assert prompt.startswith("BASE")
+    assert "- M1: missing '**Goal:**'" in prompt
+    assert "# Roadmap: old" in prompt
