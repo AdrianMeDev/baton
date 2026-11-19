@@ -3,7 +3,37 @@
 Command-line tool that distributes the steps of a commit plan (`.agent-plan.md`) across several
 coding agent CLIs (Claude Code, Codex, Antigravity, pi). See `docs/ROADMAP.md` for the plan.
 
+## Quick start
+
+Short path from zero to a finished roadmap. The [first run](#first-run-on-linux-or-wsl) below
+walks through the same flow in detail, with a disposable repository and a minimal config.
+
+1. **Install** Git, [uv](https://docs.astral.sh/uv/) and the GitHub CLI (`gh`), then baton:
+   `uv tool install --python 3.12 .` from a checkout of this repository.
+2. **Sign in** to at least one agent CLI with its own login (`claude auth login`, `codex login`,
+   ...) and to GitHub (`gh auth login`). baton never handles your credentials.
+3. **Configure.** Copy the bundled example and keep the agents you use in `[agents.*]` and in
+   every `[routes.*]` list (`plan_roadmap`, `plan_commits`, `implement`, `fix`, `review`):
+   `mkdir -p ~/.config/baton && cp src/baton/config.example.toml ~/.config/baton/config.toml`.
+4. **Check.** `baton doctor` shows whether each configured CLI is on your `PATH`;
+   `baton probe <agent>` confirms a login works headless (uses quota).
+5. **Roadmap.** In a clean git repository with an `origin` remote on its base branch, run
+   `baton roadmap "<what you want to build>" --commit` (or `--from idea.md`). The planner asks up
+   to six questions with a suggested default each; press Enter to accept, or pass `--yes` to
+   accept all. It writes and commits `docs/ROADMAP.md`. Review it and edit it if needed.
+6. **Run.** `baton auto` plans each milestone, implements every step, opens a pull request per
+   milestone, merges it when checks are green and moves on until the roadmap is done.
+
+When an agent hits its usage limit, `baton auto` switches to the next agent of the route; when
+every agent is in cooldown it waits for the earliest reset and continues the same step. It stops
+at `--max-steps N` or `--max-hours H`, with `baton stop`, or on a stop rule (see
+[`baton auto`](#baton-auto)). To set a cooldown by hand or to re-check an agent after signing in
+again, use `baton cooldown` and `baton recheck` (see [Cooldowns and recovery](#cooldowns-and-recovery)).
+
 ## First run on Linux or WSL
+
+The detailed variant of the [quick start](#quick-start): a disposable repository, a minimal
+config and a hand-written roadmap.
 
 ### 1. Install baton and sign in
 
@@ -269,6 +299,34 @@ an unreadable or malformed plan, configuration or cooldown state. Configured age
 even without a plan: each has either an active cooldown with a local reset time (including zone
 and UTC offset), or no active cooldown. This is local eligibility information, not a live account
 check. `status` never starts an agent or writes state.
+
+### `baton roadmap`
+
+```
+baton roadmap [idea] [--from FILE] [--path DIR] [--agent NAME] [--tier {S,M,L}] [--yes] [--commit] [--timeout S] [--dry-run]
+```
+
+Turns an idea into `docs/ROADMAP.md` headless, like `/plan-roadmap`. Pass the idea as text or
+with `--from FILE`.
+
+1. **Check.** An existing `docs/ROADMAP.md` or `ROADMAP.md` is never overwritten. With `--commit`
+   the working tree must be clean, because the roadmap is committed with `git add -A`.
+2. **Questions.** The `plan_roadmap` route (tier `L` unless `--tier` is given) reads the idea and
+   a read-only project summary (README, docs, manifests, file list, `git log`) and may ask up to
+   six questions, each with a suggested default. baton asks them in the terminal; Enter takes the
+   default. `--yes` and a non-interactive stdin take all defaults.
+3. **Roadmap.** A second call writes the roadmap in the `/plan-roadmap` format. baton validates
+   it (milestones numbered from M0 or M1, all open, Goal, Done when, Size S/M/L, 3–8 commits per
+   milestone, Definition of done) and gives the planner the errors once. A second failure writes
+   nothing.
+4. **Write.** baton writes `docs/ROADMAP.md`. `--commit` commits it as `docs: add roadmap`;
+   without it baton prints the commands, because `baton plan` needs a clean working tree.
+
+The planner must not change anything: a moved HEAD or a changed working tree rejects the run.
+A usage limit moves on to the next agent of the route. Exit code 0 means a roadmap was written,
+1 an agent, validation or config error, 2 nothing was started (no idea, existing roadmap, dirty
+tree), 3 every agent is in cooldown. `--dry-run` prints the command and the question prompt and
+changes nothing.
 
 ### `baton plan`
 
