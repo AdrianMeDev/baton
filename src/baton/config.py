@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import tomllib
@@ -52,6 +53,7 @@ class AutoConfig:
     merge: bool = True
     max_steps: int | None = None
     max_hours: float | None = None
+    recheck_interval_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -115,7 +117,14 @@ def _parse_auto(path: Path, raw: object) -> AutoConfig:
     where = f"{path}: [auto]"
     if not isinstance(raw, dict):
         raise ConfigError(f"{where} must be a table")
-    unknown = set(raw) - {"notify", "ntfy_url", "merge", "max_steps", "max_hours"}
+    unknown = set(raw) - {
+        "notify",
+        "ntfy_url",
+        "merge",
+        "max_steps",
+        "max_hours",
+        "recheck_interval_seconds",
+    }
     if unknown:
         raise ConfigError(f"{where}: unknown keys: {', '.join(sorted(unknown))}")
     notify = _require_str(raw, "notify", where) if "notify" in raw else "none"
@@ -139,7 +148,15 @@ def _parse_auto(path: Path, raw: object) -> AutoConfig:
         if isinstance(max_hours, bool) or not isinstance(max_hours, int | float) or max_hours <= 0:
             raise ConfigError(f"{where}: 'max_hours' must be a positive number")
         max_hours = float(max_hours)
-    return AutoConfig(notify, ntfy_url, merge, max_steps, max_hours)
+    interval = raw.get("recheck_interval_seconds")
+    if "recheck_interval_seconds" in raw and (
+        isinstance(interval, bool)
+        or not isinstance(interval, int | float)
+        or not math.isfinite(interval)
+        or interval <= 0
+    ):
+        raise ConfigError(f"{where}: 'recheck_interval_seconds' must be a positive finite number")
+    return AutoConfig(notify, ntfy_url, merge, max_steps, max_hours, interval)
 
 
 def _parse_agent(path: Path, name: str, raw: object) -> AgentConfig:

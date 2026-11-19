@@ -390,7 +390,15 @@ ntfy_url = "https://ntfy.sh/my-private-topic"   # required for notify = "ntfy"
 merge = true             # false: stop after the PR is published
 max_steps = 50
 max_hours = 12
+# recheck_interval_seconds = 300  # optional periodic cooldown probes
 ```
+
+Set `auto.recheck_interval_seconds` to a positive number to periodically probe cooling agents
+while waiting. A parsed successful probe clears the observed cooldown and resumes the run.
+Failed probes keep waiting. The interval defaults to disabled. Rechecks use the configured
+command and model, respect daily eligibility and the remaining run deadline, and check stop
+requests between probes. Each probe uses the existing read-only request and existing credentials.
+Probes retain the existing usage accounting.
 
 Notifications go out when a milestone is merged, the roadmap is complete, a PR awaits review and on
 every stop. They contain only the milestone, the stop reason and the PR URL, never diffs or agent

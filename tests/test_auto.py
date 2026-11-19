@@ -604,3 +604,98 @@ def test_last_allowed_step_finalizes_before_next_planning(world):
     result = world.run(budget=budget)
     assert "budget reached" in result.reason
     assert world.plan_calls == 0
+
+
+@pytest.mark.parametrize("role", ["implement", "plan_commits"])
+def test_periodic_recheck_uses_active_agent_config(world, monkeypatch, role):
+    from baton.auto import default_hooks
+    from baton.config import AgentConfig, AutoConfig, Config, ConfigLocation
+    from baton.limits import LimitStore
+    from baton.recording import Recording
+    from baton.runs import RunStore
+
+    agent = AgentConfig("custom", "claude", "custom-command", model="custom-model")
+    config = Config(
+        ConfigLocation(world.repo / "config.toml", "flag"),
+        agents={"custom": agent},
+        routes={role: {"M": ["custom"]}},
+        auto=AutoConfig(recheck_interval_seconds=30),
+    )
+    reset = NOW + timedelta(hours=2)
+    LimitStore().set("custom", reset)
+    probes = []
+
+    def probe(selected, **kwargs):
+        probes.append(selected)
+        return Recording(
+            adapter="claude",
+            agent="custom",
+            argv=[],
+            tty=False,
+            exit_code=0,
+            timed_out=False,
+            duration_s=0,
+            stdout='{"type":"result","subtype":"success","result":"OK","is_error":false}',
+            stderr="",
+            recorded_at=NOW.isoformat(),
+            cli_version="fake",
+        )
+
+    monkeypatch.setattr("baton.probe.run_probe", probe)
+
+    def sleep(seconds):
+        world.now += timedelta(seconds=seconds)
+
+    hooks = default_hooks(
+        world.repo,
+        config,
+        None,
+        agent_timeout=10,
+        verify_timeout=10,
+        now=lambda: world.now,
+        sleep=sleep,
+        store=world.store,
+        out=world.out,
+        budget=Budget(NOW, max_hours=1),
+    )
+    assert hooks.wait(role, "M") == "ready"
+    assert probes == [agent]
+    assert world.now == NOW + timedelta(seconds=30)
+    assert "custom" not in LimitStore().active(now=world.now)
+    assert RunStore().read() == []
+
+
+def test_periodic_recheck_skips_agent_capped_during_wait(world, monkeypatch):
+    from baton.auto import default_hooks
+    from baton.config import AgentConfig, AutoConfig, Config, ConfigLocation
+    from baton.limits import LimitStore
+    from baton.runs import RunStore
+
+    agent = AgentConfig("a", "claude", "fake", daily_run_budget=1)
+    config = Config(
+        ConfigLocation(world.repo / "config.toml", "flag"),
+        agents={"a": agent},
+        routes={"implement": {"M": ["a"]}},
+        auto=AutoConfig(recheck_interval_seconds=30),
+    )
+    LimitStore().set("a", NOW + timedelta(hours=1))
+    probes = []
+    monkeypatch.setattr("baton.probe.run_probe", lambda *a, **kw: probes.append(a))
+
+    def sleep(seconds):
+        world.now += timedelta(seconds=seconds)
+        RunStore().dispatch("a", now=world.now)
+
+    hooks = default_hooks(
+        world.repo,
+        config,
+        None,
+        agent_timeout=10,
+        verify_timeout=10,
+        now=lambda: world.now,
+        sleep=sleep,
+        store=world.store,
+        out=world.out,
+    )
+    assert "Daily run budget exhausted" in hooks.wait("implement", "M")
+    assert probes == []

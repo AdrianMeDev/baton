@@ -251,3 +251,15 @@ def test_invalid_weight(value, tmp_path):
             "a",
             {"adapter": "claude", "command": "claude", "weight": value},
         )
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "true", '"60"', "nan", "inf"])
+def test_invalid_periodic_recheck_interval(tmp_path, value):
+    with pytest.raises(ConfigError, match="recheck_interval_seconds"):
+        load_text(tmp_path, VALID + f"\n[auto]\nrecheck_interval_seconds = {value}\n")
+
+
+def test_periodic_recheck_is_opt_in(tmp_path):
+    assert load_text(tmp_path, VALID).auto.recheck_interval_seconds is None
+    cfg = load_text(tmp_path, VALID + "\n[auto]\nrecheck_interval_seconds = 60\n")
+    assert cfg.auto.recheck_interval_seconds == 60

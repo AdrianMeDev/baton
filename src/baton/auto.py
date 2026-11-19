@@ -33,7 +33,7 @@ from baton.git import (
     worktree_paths,
     worktree_remove,
 )
-from baton.limits import LimitStore
+from baton.limits import LimitStateError, LimitStore
 from baton.next import (
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_VERIFY_TIMEOUT,
@@ -228,7 +228,7 @@ def run_milestone(
         _finish_local_roadmap(repo, plan)
         store.update(repo, milestone="", step=0, branch="", pr_url="")
         return MilestoneResult("merged", milestone, pr_url=url)
-    except (PlanError, RoadmapError, GitError, OSError) as exc:
+    except (PlanError, RoadmapError, GitError, LimitStateError, OSError) as exc:
         return stop(f"{exc}")
 
 
@@ -359,9 +359,22 @@ def default_hooks(
         if capped and all(a in capped or a.name in cooling for a in agents):
             return budget_reset_message()
         names = [a.name for a in agents if a not in capped]
+
+        def recheck(name: str, timeout: float) -> str | None:
+            from baton.probe import recheck_agent
+
+            counts = daily_counts(RunStore().read(), now())
+            agent = config.agents[name]
+            if agent.daily_run_budget is not None and counts.get(name, 0) >= agent.daily_run_budget:
+                return budget_reset_message()
+            recheck_agent(agent, LimitStore(), timeout=timeout, out=out, now=now)
+            return None
+
         return wait_for_reset(
             names,
             LimitStore(),
+            recheck_interval_seconds=config.auto.recheck_interval_seconds,
+            recheck=recheck if config.auto.recheck_interval_seconds is not None else None,
             now=now,
             sleep=sleep,
             stop_requested=lambda: store.read(repo).stop_requested,

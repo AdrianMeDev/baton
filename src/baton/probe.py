@@ -6,6 +6,8 @@ import math
 import shlex
 import sys
 import tempfile
+import time
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -54,8 +56,14 @@ def run_probe(
     """Run the probe in an empty temporary directory; optionally save a redacted recording."""
     argv = probe_argv(agent, prompt)
     with tempfile.TemporaryDirectory(prefix="baton-probe-") as tmp:
-        version = run_command([agent.command, "--version"], tmp, VERSION_TIMEOUT)
-        result = run_command(argv, tmp, timeout, tty=tty)
+        started = time.monotonic()
+        version = run_command([agent.command, "--version"], tmp, min(VERSION_TIMEOUT, timeout))
+        remaining = timeout - (time.monotonic() - started)
+        result = (
+            run_command(argv, tmp, remaining, tty=tty)
+            if remaining > 0
+            else RunResult("", "", None, True, time.monotonic() - started)
+        )
         rec = Recording(
             adapter=agent.adapter,
             agent=agent.name,
@@ -123,6 +131,46 @@ def run_probe_command(
     return 0 if rec.exit_code == 0 and not rec.timed_out else 1
 
 
+def recheck_agent(
+    agent: AgentConfig,
+    store: LimitStore,
+    *,
+    timeout: float,
+    out: TextIO,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+) -> int:
+    """Parse a read-only probe and update only the observed agent's cooldown."""
+    name = agent.name
+    observed = store.read().get(name)
+    rec = run_probe(agent, timeout=timeout)
+    result = make_adapter(agent).parse(
+        RunResult(rec.stdout, rec.stderr, rec.exit_code, rec.timed_out, rec.duration_s)
+    )
+    if result.ok:
+        newer = (
+            store.read().get(name) is not None
+            if observed is None
+            else not store.clear_if(name, observed)
+        )
+        if newer:
+            print(f"Agent {name}: probe succeeded; a newer cooldown was preserved.", file=out)
+        else:
+            print(f"Agent {name}: probe succeeded; observed cooldown cleared.", file=out)
+        return 0
+    if result.limit is not None:
+        current = now()
+        deadline = result.limit.reset_at
+        fallback = deadline is None or deadline <= current
+        if fallback:
+            deadline = current + timedelta(hours=1)
+        store.set(name, deadline)
+        note = " (1h fallback: no usable reset time)" if fallback else ""
+        print(f"Agent {name}: usage limit; cooldown until {deadline.isoformat()}{note}.", file=out)
+    else:
+        print(f"Agent {name}: probe failed: {result.error}. Cooldown unchanged.", file=out)
+    return 1
+
+
 def run_recheck_command(
     name: str,
     *,
@@ -139,37 +187,7 @@ def run_recheck_command(
         agent = config.agents.get(name)
         if agent is None:
             raise ValueError(f"unknown agent {name!r}; choose a name from the config")
-        store = LimitStore()
-        observed = store.read().get(name)
-        rec = run_probe(agent, timeout=timeout)
-        result = make_adapter(agent).parse(
-            RunResult(rec.stdout, rec.stderr, rec.exit_code, rec.timed_out, rec.duration_s)
-        )
-        if result.ok:
-            newer = (
-                store.read().get(name) is not None
-                if observed is None
-                else not store.clear_if(name, observed)
-            )
-            if newer:
-                print(f"Agent {name}: probe succeeded; a newer cooldown was preserved.", file=out)
-            else:
-                print(f"Agent {name}: probe succeeded; observed cooldown cleared.", file=out)
-            return 0
-        if result.limit is not None:
-            now = datetime.now(UTC)
-            deadline = result.limit.reset_at
-            fallback = deadline is None or deadline <= now
-            if fallback:
-                deadline = now + timedelta(hours=1)
-            store.set(name, deadline)
-            note = " (1h fallback: no usable reset time)" if fallback else ""
-            print(
-                f"Agent {name}: usage limit; cooldown until {deadline.isoformat()}{note}.", file=out
-            )
-        else:
-            print(f"Agent {name}: probe failed: {result.error}. Cooldown unchanged.", file=out)
-        return 1
+        return recheck_agent(agent, LimitStore(), timeout=timeout, out=out)
     except (ConfigError, LimitStateError, OSError, ValueError) as exc:
         print(f"Cannot recheck {name}: {exc}", file=out)
         return 1
