@@ -328,16 +328,67 @@ A usage limit moves on to the next agent of the route. Exit code 0 means a roadm
 tree), 3 every agent is in cooldown. `--dry-run` prints the command and the question prompt and
 changes nothing.
 
+### `baton audit`
+
+```
+baton audit [--path DIR] [--agent NAME] [--tier {S,M,L}] [--max-batches N] [--commit] [--timeout S] [--dry-run]
+baton audit --fix [--path DIR] [--max-steps N] [--max-hours H] [--no-merge] [--timeout S] [--verify-timeout S]
+```
+
+Reviews the whole codebase for security problems and code smells, writes the result to
+`docs/AUDIT.md` and, after you have looked at it, fixes the findings like `baton auto`. It runs in
+two phases with a human checkpoint in between, like `baton roadmap` and `baton auto`.
+
+**Phase 1 – report (`baton audit`).**
+
+1. **Inventory.** Every file tracked at the current HEAD (the *Base* of the audit) is listed under
+   its folder. Never sent to an agent, listed as `[-]` with the reason: symlinks, submodules,
+   binary or non-UTF-8 files, files over about 60 000 characters, lockfiles and likely secrets
+   (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `*.p12`, `*.pfx`). Contents are read from the Base
+   commit, so a resumed audit stays consistent; a moved HEAD only prints a warning.
+2. **Scan.** The open files of one folder, up to about 60 000 characters, form a batch. The
+   `review` route (tier `M` unless `--tier`; `--agent` picks an agent) gets the contents inside
+   the prompt and runs read-only in an empty temporary directory. The reply is strict JSON; an
+   invalid reply is retried once with the error, then the run stops and the batch stays open.
+   After every batch the file is saved: `[x]` per file with its finding count and one line per
+   finding, `F<n> · severity · security|smell · path:line – message`.
+3. **Plan.** When every file is reviewed, the `plan_roadmap` route (tier `L`) turns the findings
+   into fix milestones (`### M1 [ ] Audit: <name>`, 3–8 commits each, security before smells) and
+   a list of suggestions for new features. baton validates the reply (every critical and warning
+   finding in exactly one milestone, no unknown ids) and allows one retry. The planner must not
+   change HEAD or the working tree. Suggestions are only written down; move the ones you want into
+   `docs/ROADMAP.md` (`/plan-roadmap`).
+
+`docs/AUDIT.md` has the sections Scope, Inventory, Findings, Milestones, Suggestions, Definition of
+done and Changelog, and is a valid roadmap. Review it, then commit it (`git add docs/AUDIT.md &&
+git commit -m "docs: add code audit"`) or let `--commit` do it (needs a clean working tree).
+
+**Resume.** The scan never waits for cooldowns: when every agent of the route is limited it stops
+with exit code 3; run `baton audit` again to continue at the next open batch. A finished audit is
+a no-op. `--max-batches N` stops after N batches. `--dry-run` prints file, skip and batch counts,
+the command and the first prompt and changes nothing.
+
+**Phase 2 – fix (`baton audit --fix`).** Requires a complete scan, a valid fix plan and a
+committed, unmodified `docs/AUDIT.md`; otherwise it names the missing phase and exits with 2. It
+then runs `baton auto --roadmap docs/AUDIT.md`: one branch and PR per audit milestone (named
+`baton/m1-audit-…`), merged or, with `--no-merge`, published for review. Without critical or
+warning findings there is nothing to fix and `--fix` exits with 0. Auto's budgets, cooldown waits
+and exit codes apply. `--fix` cannot be combined with the scan options.
+
+**Cost and privacy.** The scan sends the contents of all reviewable files to the configured
+providers and uses their quota; use `--dry-run` and `--max-batches` to see and limit it first.
+
 ### `baton plan`
 
 ```
-baton plan [--path DIR] [--milestone ID] [--agent NAME] [--tier {S,M,L}] [--timeout S] [--dry-run]
+baton plan [--path DIR] [--milestone ID] [--roadmap PATH] [--agent NAME] [--tier {S,M,L}] [--timeout S] [--dry-run]
 ```
 
 Plans a roadmap milestone headless, like `/plan-commits`, and writes `.agent-plan.md` for
 `baton next`.
 
-1. **Select.** baton reads `docs/ROADMAP.md` (or `ROADMAP.md`) and takes the first `[ ]`
+1. **Select.** baton reads `docs/ROADMAP.md` (or `ROADMAP.md`; `--roadmap PATH` names another file
+   inside the checkout, e.g. `docs/AUDIT.md`) and takes the first `[ ]`
    milestone whose dependencies are all `[x]`, or the one named by `--milestone`. A done,
    skipped or blocked milestone stops the run.
 2. **Check.** An existing `.agent-plan.md` with open or pending steps is never replaced; a plan
@@ -419,7 +470,7 @@ committing.
 ### `baton auto`
 
 ```
-baton auto [--path DIR] [--max-steps N] [--max-hours H] [--no-merge] [--timeout S] [--verify-timeout S]
+baton auto [--path DIR] [--roadmap PATH] [--max-steps N] [--max-hours H] [--no-merge] [--timeout S] [--verify-timeout S]
 baton stop [--path DIR]
 ```
 
@@ -680,6 +731,13 @@ baton automates coding agents; it is not a sandbox.
 - **Data sent out.** Prompts, plan steps, diffs and untracked file contents (bounded, see review)
   go to the configured providers. ntfy topics are readable by anyone who knows the name; keep
   messages and topic names free of secrets.
+- **Code audit.** `baton audit` sends the contents of every reviewable tracked file to the
+  providers of your `review` and `plan_roadmap` routes. Symlinks, binary and oversized files,
+  lockfiles and likely secrets (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `*.p12`, `*.pfx`) are never
+  sent, but the filter works on file names: a secret in an ordinary file is sent. File contents
+  are given to the reviewer as data and marked as not-instructions, which reduces but does not
+  rule out prompt injection from the audited code. The reviewer runs read-only in an empty
+  temporary directory; findings are written only to `docs/AUDIT.md`.
 - **Recommendation.** Run `baton auto` unattended only in a VM or container with a dedicated
   checkout and credentials that can do no more than push a branch and open a PR. An OS-level
   sandbox for implementing agents is not part of baton yet.
