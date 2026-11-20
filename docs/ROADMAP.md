@@ -153,6 +153,7 @@ Updated: 2026-11-19
 
 ## Changelog
 
+- 2026-11-20: `baton audit --jobs N` reviews up to N batches at the same time (one adapter per worker, results recorded in batch order, stops record every finished batch); default `--jobs 1` is unchanged.
 - 2026-11-20: `baton audit` reviews every tracked file batch by batch into `docs/AUDIT.md` (inventory, findings, fix milestones, suggestions; resumable, read-only reviewer); `baton audit --fix` works through the fix milestones via `baton auto --roadmap docs/AUDIT.md`; `baton plan` and `baton auto` accept `--roadmap PATH`.
 - 2026-11-19: Review fix loop: a critical review finding with a location is handed to the `fix` route (tier of the step, then L), the step is verified and reviewed again, and only the last review becomes the evidence; a finding that survives two rounds still blocks the auto-commit. Review prompt: concerns that cannot be shown in the diff are warnings, not critical.
 - 2026-11-19: Plan repair and `baton roadmap`: a `BATON-ROADMAP-PROBLEM` from an implementing step makes an L-tier read-only planner propose replacement steps that baton validates and writes (`repair.py`, logged and listed in the PR, one repair per step, `BATON-NEEDS-DECISION` stops); `baton roadmap "<idea>"` writes `docs/ROADMAP.md` after up to six questions with defaults; `baton next --resume`; README quick start from install to `baton auto`.
