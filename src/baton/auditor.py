@@ -11,7 +11,7 @@ import datetime
 import os
 import shlex
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TextIO
 
@@ -125,13 +125,24 @@ def _open_batch(repo: Path, text: str) -> list[tuple[InventoryFile, str]]:
     ]
 
 
-def _batches(repo: Path, text: str) -> list[list[tuple[InventoryFile, str]]]:
-    """All remaining batches, for ``--dry-run`` (the scan itself fetches one at a time)."""
-    batches = []
+def _pending_batches(repo: Path, text: str) -> Iterator[list[tuple[InventoryFile, str]]]:
+    """The remaining batches in order; contents are read lazily, one batch per step."""
     while batch := _open_batch(repo, text):
-        batches.append(batch)
-        text = set_file_status(text, [f.path for f, _ in batch], "done", "dry run")
-    return batches
+        yield batch
+        text = set_file_status(text, [f.path for f, _ in batch], "done", "scheduled")
+
+
+def _batches(repo: Path, text: str) -> list[list[tuple[InventoryFile, str]]]:
+    """All remaining batches, for ``--dry-run``."""
+    return list(_pending_batches(repo, text))
+
+
+def _scan_batch(
+    adapter: Adapter, batch: list[tuple[InventoryFile, str]], timeout: float, out: TextIO
+):
+    """Review one batch and return its parsed findings."""
+    prompt = audit_prompt([(f.path, c) for f, c in batch])
+    return _ask(adapter, prompt, [f.path for f, _ in batch], timeout, out)
 
 
 def _ask(adapter: Adapter, prompt: str, paths: list[str], timeout: float, out: TextIO):
@@ -220,18 +231,14 @@ def run_audit(
             _check_clean(repo)
         text = _load_or_create(repo, out, date)
         path = repo / AUDIT_FILE
-        done = 0
-        while batch := _open_batch(repo, text):
+        for done, batch in enumerate(_pending_batches(repo, text)):
             if max_batches is not None and done >= max_batches:
                 say(out, f"Stopped after {done} batches; rerun `baton audit` to continue.")
                 return EXIT_OK
-            paths = [f.path for f, _ in batch]
-            say(out, f"Batch {done + 1}: {len(batch)} files ({paths[0]} ...)")
-            prompt = audit_prompt([(f.path, c) for f, c in batch])
-            findings = _ask(adapter, prompt, paths, timeout, out)
+            say(out, f"Batch {done + 1}: {len(batch)} files ({batch[0][0].path} ...)")
+            findings = _scan_batch(adapter, batch, timeout, out)
             text = record_batch(text, [f for f, _ in batch], findings)
             _write(path, text)
-            done += 1
         files, found = len(parse_inventory(text)), len(parse_findings(text))
         say(out, f"Scan complete: {files} files, {found} findings.")
         if validate_audit_plan(text):

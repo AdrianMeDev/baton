@@ -7,8 +7,14 @@ from pathlib import Path
 import pytest
 
 from baton.adapter import AgentResult
-from baton.audit import MAX_FILE_CHARS, parse_findings, parse_inventory, validate_audit_plan
-from baton.auditor import run_audit, run_audit_fix
+from baton.audit import (
+    MAX_FILE_CHARS,
+    next_batch,
+    parse_findings,
+    parse_inventory,
+    validate_audit_plan,
+)
+from baton.auditor import _pending_batches, run_audit, run_audit_fix
 from baton.cli import main
 from baton.next import EXIT_EXHAUSTED, EXIT_FAILED, EXIT_OK, EXIT_STOPPED
 from baton.roadmap import next_milestone, parse_roadmap
@@ -159,6 +165,21 @@ def test_full_run_marks_every_reviewable_file_and_records_findings(repo: Path) -
     assert [f.id for f in parse_findings(audit_text(repo))] == [1, 2, 3, 4]
     assert len(scanner.prompts) == 3  # one batch per folder
     assert validate_audit_plan(audit_text(repo)) == []
+
+
+def test_pending_batches_match_repeated_next_batch_and_skip_closed_files(repo: Path) -> None:
+    run(repo, Scanner(CLEAN), max_batches=1)  # closes the first batch
+    text = audit_text(repo)
+    expected = []
+    files = parse_inventory(text)
+    while batch := next_batch(files):
+        expected.append([f.path for f in batch])
+        paths = {f.path for f in batch}
+        files = [f for f in files if f.path not in paths]
+    got = [[f.path for f, _ in b] for b in _pending_batches(repo, text)]
+    assert got == expected
+    assert "README.md" not in {p for b in got for p in b}
+    assert all(c for b in _pending_batches(repo, text) for _, c in b)
 
 
 def test_second_run_makes_no_scan_or_plan_call(repo: Path) -> None:
