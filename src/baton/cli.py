@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from baton import __version__
-from baton.auditor import run_audit_command
+from baton.auditor import run_audit_command, run_audit_fix
 from baton.autostate import run_stop_command
 from baton.config import ROUTE_TIERS, ConfigError, find_config_path, load_config
 from baton.doctor import run_doctor
@@ -233,6 +233,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print counts, command and first prompt, change nothing",
     )
+    audit.add_argument(
+        "--fix",
+        action="store_true",
+        help="work through the committed docs/AUDIT.md milestones like `baton auto`",
+    )
+    audit.add_argument("--max-steps", type=int, metavar="N", help="with --fix: stop after N steps")
+    audit.add_argument(
+        "--max-hours", type=float, metavar="H", help="with --fix: stop after H hours"
+    )
+    audit.add_argument(
+        "--no-merge", action="store_true", help="with --fix: stop after publishing the milestone PR"
+    )
+    audit.add_argument(
+        "--verify-timeout",
+        type=float,
+        default=DEFAULT_VERIFY_TIMEOUT,
+        metavar="S",
+        help="with --fix: seconds before a Verify command is killed (default: %(default)s)",
+    )
     return parser
 
 
@@ -328,6 +347,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             dry_run=args.dry_run,
         )
     if args.command == "audit":
+        if args.fix:
+            scan_only = {
+                "--agent": args.agent,
+                "--tier": args.tier,
+                "--max-batches": args.max_batches,
+                "--commit": args.commit,
+                "--dry-run": args.dry_run,
+            }
+            used = [flag for flag, value in scan_only.items() if value not in (None, False)]
+            if used:
+                parser.error(f"--fix cannot be combined with {', '.join(used)}")
+            return run_audit_fix(
+                Path(args.path),
+                config_path=args.config,
+                max_steps=args.max_steps,
+                max_hours=args.max_hours,
+                merge=False if args.no_merge else None,
+                agent_timeout=args.timeout,
+                verify_timeout=args.verify_timeout,
+            )
+        fix_only = {
+            "--max-steps": args.max_steps,
+            "--max-hours": args.max_hours,
+            "--no-merge": args.no_merge,
+        }
+        used = [flag for flag, value in fix_only.items() if value not in (None, False)]
+        if used:
+            parser.error(f"{', '.join(used)} only apply with --fix")
         return run_audit_command(
             Path(args.path),
             config_path=args.config,

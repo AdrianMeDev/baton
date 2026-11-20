@@ -34,11 +34,12 @@ from baton.audit import (
     validate_audit_plan,
 )
 from baton.config import ConfigError, find_config_path, load_config
-from baton.git import GitError, commit_all, dirty_paths, head, is_repo
+from baton.git import GitError, commit_all, dirty_paths, head, is_repo, is_tracked
 from baton.git import _git as git_output
 from baton.limits import LimitStateError, LimitStore
 from baton.next import (
     DEFAULT_AGENT_TIMEOUT,
+    DEFAULT_VERIFY_TIMEOUT,
     EXIT_EXHAUSTED,
     EXIT_FAILED,
     EXIT_OK,
@@ -51,6 +52,7 @@ from baton.prompt import (
     audit_retry_prompt,
 )
 from baton.review import run_isolated_review
+from baton.roadmap import section_text
 from baton.roadmapper import _guarded, _Stop, gather_context
 from baton.routed import RoutedAdapter, RoutedPlanner, say
 from baton.router import resolve_route
@@ -311,3 +313,75 @@ def run_audit_command(
     except _ERRORS as exc:
         say(out, f"Error: {exc}")
         return EXIT_FAILED
+
+
+def run_audit_fix(
+    repo: Path,
+    *,
+    config_path: str | None = None,
+    max_steps: int | None = None,
+    max_hours: float | None = None,
+    merge: bool | None = None,
+    agent_timeout: float = DEFAULT_AGENT_TIMEOUT,
+    verify_timeout: float = DEFAULT_VERIFY_TIMEOUT,
+    out: TextIO | None = None,
+    auto: Callable[..., int] | None = None,
+) -> int:
+    """``baton audit --fix``: work through the committed audit's milestones like ``baton auto``."""
+    out = out or sys.stdout
+    try:
+        _check_repo(repo)
+        path = repo / AUDIT_FILE
+        if not path.is_file():
+            raise _Stop(EXIT_STOPPED, f"No {AUDIT_FILE}; run `baton audit` first.")
+        text = path.read_text(encoding="utf-8")
+        open_files = sum(f.status == "open" for f in parse_inventory(text))
+        if open_files:
+            raise _Stop(
+                EXIT_STOPPED,
+                f"The scan is incomplete: {open_files} files are still open. "
+                "Run `baton audit` to finish it.",
+            )
+        errors = validate_audit_plan(text)
+        if errors:
+            listing = "".join(f"\n  {e}" for e in errors)
+            raise _Stop(
+                EXIT_STOPPED,
+                f"The fix plan is missing or invalid; run `baton audit` to plan it:{listing}",
+            )
+        if section_text(text, "Milestones") is None:
+            say(
+                out, f"Nothing to fix: no critical or warning findings. See {AUDIT_FILE} for ideas."
+            )
+            return EXIT_OK
+        if not is_tracked(repo, AUDIT_FILE):
+            raise _Stop(
+                EXIT_STOPPED,
+                f"{AUDIT_FILE} is not committed yet. Review and commit it first "
+                f"(`git add {AUDIT_FILE} && git commit -m {shlex.quote(COMMIT_MESSAGE)}`).",
+            )
+        if AUDIT_FILE in dirty_paths(repo):
+            raise _Stop(
+                EXIT_STOPPED, f"{AUDIT_FILE} has uncommitted changes; commit or revert them first."
+            )
+    except _Stop as stop:
+        say(out, str(stop))
+        return stop.code
+    except _ERRORS as exc:
+        say(out, f"Error: {exc}")
+        return EXIT_FAILED
+    if auto is None:
+        from baton.auto import run_auto_command
+
+        auto = run_auto_command
+    return auto(
+        repo,
+        config_path=config_path,
+        max_steps=max_steps,
+        max_hours=max_hours,
+        merge=merge,
+        agent_timeout=agent_timeout,
+        verify_timeout=verify_timeout,
+        roadmap=AUDIT_FILE,
+        out=out,
+    )

@@ -8,7 +8,7 @@ import pytest
 
 from baton.adapter import AgentResult
 from baton.audit import MAX_FILE_CHARS, parse_findings, parse_inventory, validate_audit_plan
-from baton.auditor import run_audit
+from baton.auditor import run_audit, run_audit_fix
 from baton.cli import main
 from baton.next import EXIT_EXHAUSTED, EXIT_FAILED, EXIT_OK, EXIT_STOPPED
 from baton.roadmap import next_milestone, parse_roadmap
@@ -393,3 +393,118 @@ def test_commit_flag_refuses_a_dirty_tree_before_scanning(repo: Path) -> None:
     code, out = run(repo, scanner, commit=True)
     assert code == EXIT_STOPPED and "notes.txt" in out
     assert scanner.prompts == [] and not (repo / "docs" / "AUDIT.md").exists()
+
+
+class AutoSpy:
+    def __init__(self, code: int = EXIT_OK) -> None:
+        self.code = code
+        self.calls: list[tuple[Path, dict]] = []
+
+    def __call__(self, repo: Path, **kw) -> int:
+        self.calls.append((repo, kw))
+        return self.code
+
+
+def fix(repo: Path, spy: AutoSpy, **kw) -> tuple[int, str]:
+    out = io.StringIO()
+    return run_audit_fix(repo, out=out, auto=spy, **kw), out.getvalue()
+
+
+def _committed_audit(repo: Path, scanner: Scanner | None = None) -> None:
+    assert run(repo, scanner or _scan_with_findings(), commit=True)[0] == EXIT_OK
+
+
+def test_fix_delegates_to_auto_over_the_audit_file(repo: Path) -> None:
+    _committed_audit(repo)
+    spy = AutoSpy(1)
+    code, _ = fix(
+        repo,
+        spy,
+        config_path="c.toml",
+        max_steps=4,
+        max_hours=1.5,
+        merge=False,
+        agent_timeout=60.0,
+        verify_timeout=30.0,
+    )
+    assert code == 1  # auto's exit code is passed through
+    assert len(spy.calls) == 1
+    called_repo, kw = spy.calls[0]
+    assert called_repo == repo
+    assert kw["roadmap"] == "docs/AUDIT.md"
+    assert (kw["config_path"], kw["max_steps"], kw["max_hours"], kw["merge"]) == (
+        "c.toml",
+        4,
+        1.5,
+        False,
+    )
+    assert (kw["agent_timeout"], kw["verify_timeout"]) == (60.0, 30.0)
+
+
+def test_fix_needs_the_audit_file(repo: Path) -> None:
+    spy = AutoSpy()
+    code, out = fix(repo, spy)
+    assert code == EXIT_STOPPED and "run `baton audit` first" in out and spy.calls == []
+
+
+def test_fix_refuses_an_incomplete_scan(repo: Path) -> None:
+    run(repo, Scanner(CLEAN), max_batches=1)
+    spy = AutoSpy()
+    code, out = fix(repo, spy)
+    assert code == EXIT_STOPPED
+    assert "scan is incomplete" in out and "Run `baton audit`" in out and spy.calls == []
+
+
+def test_fix_refuses_a_scan_without_a_plan(repo: Path) -> None:
+    planner = FixPlanner("## Suggestions\n- only ideas\n")
+    assert run(repo, _scan_with_findings(), planner)[0] == EXIT_FAILED
+    spy = AutoSpy()
+    code, out = fix(repo, spy)
+    assert code == EXIT_STOPPED and "fix plan is missing or invalid" in out
+    assert "finding F1 is not covered" in out and spy.calls == []
+
+
+def test_fix_with_nothing_to_fix_is_a_success_without_auto(repo: Path) -> None:
+    scanner = Scanner(CLEAN, CLEAN, reply(finding("src/a.py", severity="informational")))
+    _committed_audit(repo, scanner)
+    spy = AutoSpy()
+    code, out = fix(repo, spy)
+    assert code == EXIT_OK and "Nothing to fix" in out and spy.calls == []
+
+
+def test_fix_refuses_an_uncommitted_audit(repo: Path) -> None:
+    assert run(repo, _scan_with_findings())[0] == EXIT_OK  # written, not committed
+    spy = AutoSpy()
+    code, out = fix(repo, spy)
+    assert code == EXIT_STOPPED and "not committed yet" in out and spy.calls == []
+
+
+def test_fix_refuses_a_modified_audit(repo: Path) -> None:
+    _committed_audit(repo)
+    path = repo / "docs" / "AUDIT.md"
+    path.write_text(path.read_text() + "\n- edited\n")
+    spy = AutoSpy()
+    code, out = fix(repo, spy)
+    assert code == EXIT_STOPPED and "uncommitted changes" in out and spy.calls == []
+
+
+def test_fix_outside_a_repository(tmp_path: Path) -> None:
+    spy = AutoSpy()
+    code, out = fix(tmp_path, spy)
+    assert code == EXIT_STOPPED and "not a git repository" in out and spy.calls == []
+
+
+def test_cli_fix_and_scan_flags_do_not_mix(repo: Path, capsys: pytest.CaptureFixture) -> None:
+    for argv in (["--fix", "--dry-run"], ["--fix", "--tier", "S"], ["--fix", "--commit"]):
+        with pytest.raises(SystemExit) as exc:
+            main(["audit", "--path", str(repo), *argv])
+        assert exc.value.code == 2
+    assert "--fix cannot be combined with --dry-run" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        main(["audit", "--path", str(repo), "--max-steps", "3"])
+    assert "--max-steps only apply with --fix" in capsys.readouterr().err
+
+
+def test_cli_fix_reaches_the_precondition_checks(repo: Path, capsys: pytest.CaptureFixture) -> None:
+    assert main(["audit", "--path", str(repo), "--fix", "--max-steps", "2"]) == EXIT_STOPPED
+    assert "run `baton audit` first" in capsys.readouterr().out
