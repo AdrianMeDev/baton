@@ -151,6 +151,23 @@ def find_roadmap(root: Path) -> Path | None:
     return next((p for rel in ROADMAP_PATHS if (p := root / rel).is_file()), None)
 
 
+def resolve_roadmap(root: Path, path: str | None = None) -> Path | None:
+    """The roadmap file below ``root``: ``path`` if given, else ``find_roadmap``; None if absent.
+
+    An explicit ``path`` must be relative and stay inside the checkout (no ``..``, no symlink
+    that leaves it).
+    """
+    if path is None:
+        return find_roadmap(root)
+    relative = Path(path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise RoadmapError(f"roadmap {path!r} must be a relative path within the checkout")
+    target = root / relative
+    if not target.resolve().is_relative_to(root.resolve()):
+        raise RoadmapError(f"roadmap {path!r} escapes the checkout")
+    return target if target.is_file() else None
+
+
 def next_milestone(roadmap: Roadmap) -> Milestone | None:
     """First open milestone whose dependencies are all done."""
     done = {m.id for m in roadmap.milestones if m.status == "done"}

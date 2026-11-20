@@ -49,9 +49,9 @@ from baton.planner import run_plan_command
 from baton.pr import run_pr
 from baton.roadmap import (
     RoadmapError,
-    find_roadmap,
     next_milestone,
     parse_roadmap,
+    resolve_roadmap,
     save_roadmap,
     set_milestone_status,
 )
@@ -148,9 +148,10 @@ def run_milestone(
     budget: Budget,
     *,
     merge: bool = True,
+    roadmap: str | None = None,
     out: TextIO,
 ) -> MilestoneResult:
-    """Run the next milestone to a merged base, or stop with the reason."""
+    """Run the next milestone of ``roadmap`` (default: the project's) to a merged base, or stop."""
 
     def stop(reason: str, milestone: str = "") -> MilestoneResult:
         say(out, f"Stopped: {reason}")
@@ -161,8 +162,16 @@ def run_milestone(
 
     try:
         plan = _read_plan(repo)
-        if not _adoptable(repo, plan):
-            plan = _plan_next(repo, hooks, out, stop_requested, budget)
+        rel = _relative_roadmap(repo, roadmap)
+        if roadmap is not None and _is_open(plan) and plan is not None:
+            other = plan.milestone.roadmap
+            if other is not None and other != rel:
+                return stop(
+                    f"{PLAN_FILENAME} belongs to {other}, not {rel}; finish it with `baton auto` "
+                    "or remove it first"
+                )
+        if not _adoptable(repo, plan, roadmap):
+            plan = _plan_next(repo, hooks, out, stop_requested, budget, roadmap)
             if isinstance(plan, MilestoneResult):
                 return plan
         assert plan is not None
@@ -225,7 +234,7 @@ def run_milestone(
         failure = (hooks.after_merge or ff_base)(repo, plan)
         if failure is not None:
             return stop(failure, milestone)
-        _finish_local_roadmap(repo, plan)
+        _finish_local_roadmap(repo, plan, roadmap)
         store.update(repo, milestone="", step=0, branch="", pr_url="")
         return MilestoneResult("merged", milestone, pr_url=url)
     except (PlanError, RoadmapError, GitError, LimitStateError, OSError) as exc:
@@ -237,7 +246,13 @@ def _last_line(text: str) -> str:
     return lines[-1].strip() if lines else "no details"
 
 
-def _adoptable(repo: Path, plan: Plan | None) -> bool:
+def _relative_roadmap(repo: Path, roadmap: str | None) -> str | None:
+    """The roadmap in use as a path relative to ``repo``, or None if there is none."""
+    path = resolve_roadmap(repo, roadmap)
+    return path.relative_to(repo).as_posix() if path is not None else None
+
+
+def _adoptable(repo: Path, plan: Plan | None, roadmap: str | None = None) -> bool:
     """Whether the plan on disk is this run's current milestone rather than a merged leftover."""
     if plan is None:
         return False
@@ -246,19 +261,21 @@ def _adoptable(repo: Path, plan: Plan | None) -> bool:
     ref = plan.milestone
     if ref.id is None:
         return False
-    path = find_roadmap(repo)
+    path = resolve_roadmap(repo, roadmap)
     if path is None:
         return False
+    if ref.roadmap is not None and ref.roadmap != path.relative_to(repo).as_posix():
+        return False  # a finished plan of another roadmap
     found = parse_roadmap(path.read_text(encoding="utf-8")).get(ref.id)
     # Finished steps whose milestone the base still shows as not done: published or merged,
     # but not yet fast-forwarded. `baton pr` recognizes an already merged pull request.
     return found is not None and found.status != "done"
 
 
-def _finish_local_roadmap(repo: Path, plan: Plan) -> None:
+def _finish_local_roadmap(repo: Path, plan: Plan, roadmap: str | None = None) -> None:
     """A local (untracked) roadmap is not part of the merge; mark its milestone done here."""
     ref = plan.milestone
-    path = find_roadmap(repo)
+    path = resolve_roadmap(repo, roadmap)
     if ref.tracking != "local" or ref.id is None or path is None:
         return
     text = path.read_text(encoding="utf-8")
@@ -271,9 +288,10 @@ def _plan_next(
     out: TextIO,
     stop_requested: Callable[[], bool],
     budget: Budget,
+    roadmap: str | None = None,
 ) -> Plan | MilestoneResult:
     """Plan the next roadmap milestone; a result ends the milestone."""
-    roadmap_path = find_roadmap(repo)
+    roadmap_path = resolve_roadmap(repo, roadmap)
     if roadmap_path is None:
         return MilestoneResult("stopped", reason=f"no roadmap in {repo}")
     roadmap = parse_roadmap(roadmap_path.read_text(encoding="utf-8"))
@@ -332,6 +350,7 @@ def default_hooks(
     store: AutoStore,
     out: TextIO,
     budget: Budget | None = None,
+    roadmap: str | None = None,
 ) -> MilestoneHooks:
     """The real `baton plan`, `baton next --worktree --push` and `baton pr` as hooks."""
 
@@ -388,7 +407,7 @@ def default_hooks(
 
     return MilestoneHooks(
         plan=lambda: run_plan_command(
-            repo, config_path=config_path, timeout=agent_timeout, out=out
+            repo, config_path=config_path, roadmap=roadmap, timeout=agent_timeout, out=out
         ),
         next=lambda resume: run_next_command(
             repo,
@@ -415,6 +434,7 @@ def run_auto_command(
     merge: bool | None = None,
     agent_timeout: float = DEFAULT_AGENT_TIMEOUT,
     verify_timeout: float = DEFAULT_VERIFY_TIMEOUT,
+    roadmap: str | None = None,
     out: TextIO | None = None,
     hooks: MilestoneHooks | None = None,
     notifier: Callable[[str, str], None] | None = None,
@@ -434,6 +454,8 @@ def run_auto_command(
             raise ConfigError("--max-steps must be at least 1")
         if max_hours is not None and max_hours <= 0:
             raise ConfigError("--max-hours must be greater than 0")
+        if roadmap is not None and resolve_roadmap(repo, roadmap) is None:
+            raise ConfigError(f"roadmap {roadmap} not found in {repo}")
         config = load_config(find_config_path(config_path))
         store = AutoStore()
         # Refuse a second concurrent run before touching the shared state.
@@ -445,7 +467,7 @@ def run_auto_command(
         except BaseException:
             stack.close()
             raise
-    except (GitError, ConfigError, AutoStateError, OSError) as exc:
+    except (GitError, ConfigError, AutoStateError, RoadmapError, OSError) as exc:
         say(out, f"Cannot start: {exc}")
         return EXIT_NOT_STARTED
     with stack:
@@ -464,6 +486,7 @@ def run_auto_command(
             max_hours,
             agent_timeout,
             verify_timeout,
+            roadmap,
         )
 
 
@@ -482,6 +505,7 @@ def _auto_loop(
     max_hours,
     agent_timeout,
     verify_timeout,
+    roadmap=None,
 ) -> int:
 
     settings = config.auto
@@ -503,9 +527,10 @@ def _auto_loop(
         store=store,
         out=out,
         budget=budget,
+        roadmap=roadmap,
     )
     while True:
-        result = run_milestone(repo, hooks, store, budget, merge=merge, out=out)
+        result = run_milestone(repo, hooks, store, budget, merge=merge, roadmap=roadmap, out=out)
         link = f" {result.pr_url}" if result.pr_url else ""
         if result.outcome == "merged":
             say(out, f"Merged {result.milestone}.{link}")

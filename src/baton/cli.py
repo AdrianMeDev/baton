@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from baton import __version__
+from baton.auditor import run_audit_command, run_audit_fix
 from baton.autostate import run_stop_command
 from baton.config import ROUTE_TIERS, ConfigError, find_config_path, load_config
 from baton.doctor import run_doctor
@@ -122,6 +123,11 @@ def build_parser() -> argparse.ArgumentParser:
     auto.add_argument(
         "--path", default=".", metavar="DIR", help="repository root (default: current directory)"
     )
+    auto.add_argument(
+        "--roadmap",
+        metavar="PATH",
+        help="roadmap file inside the repository (default: docs/ROADMAP.md)",
+    )
     auto.add_argument("--max-steps", type=int, metavar="N", help="stop after N implemented steps")
     auto.add_argument("--max-hours", type=float, metavar="H", help="stop after H hours")
     auto.add_argument(
@@ -153,6 +159,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     plan.add_argument(
         "--milestone", metavar="ID", help="plan this milestone (e.g. M3) instead of the next one"
+    )
+    plan.add_argument(
+        "--roadmap",
+        metavar="PATH",
+        help="roadmap file inside the repository (default: docs/ROADMAP.md)",
     )
     plan.add_argument("--agent", metavar="NAME", help="use a named agent from the config")
     plan.add_argument(
@@ -195,6 +206,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     roadmap.add_argument(
         "--dry-run", action="store_true", help="print the command and prompt, change nothing"
+    )
+    audit = subparsers.add_parser(
+        "audit", help="review every tracked file batch by batch into docs/AUDIT.md"
+    )
+    audit.add_argument(
+        "--path", default=".", metavar="DIR", help="repository root (default: current directory)"
+    )
+    audit.add_argument("--agent", metavar="NAME", help="use a named agent from the config")
+    audit.add_argument("--tier", choices=ROUTE_TIERS, help="route tier of review (default: M)")
+    audit.add_argument(
+        "--max-batches", type=int, metavar="N", help="stop after N batches; rerun to continue"
+    )
+    audit.add_argument(
+        "--commit", action="store_true", help="commit docs/AUDIT.md as 'docs: add code audit'"
+    )
+    audit.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_AGENT_TIMEOUT,
+        metavar="S",
+        help="seconds before the agent is killed (default: %(default)s)",
+    )
+    audit.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print counts, command and first prompt, change nothing",
+    )
+    audit.add_argument(
+        "--fix",
+        action="store_true",
+        help="work through the committed docs/AUDIT.md milestones like `baton auto`",
+    )
+    audit.add_argument("--max-steps", type=int, metavar="N", help="with --fix: stop after N steps")
+    audit.add_argument(
+        "--max-hours", type=float, metavar="H", help="with --fix: stop after H hours"
+    )
+    audit.add_argument(
+        "--no-merge", action="store_true", help="with --fix: stop after publishing the milestone PR"
+    )
+    audit.add_argument(
+        "--verify-timeout",
+        type=float,
+        default=DEFAULT_VERIFY_TIMEOUT,
+        metavar="S",
+        help="with --fix: seconds before a Verify command is killed (default: %(default)s)",
     )
     return parser
 
@@ -260,6 +316,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_steps=args.max_steps,
             max_hours=args.max_hours,
             merge=False if args.no_merge else None,
+            roadmap=args.roadmap,
             agent_timeout=args.timeout,
             verify_timeout=args.verify_timeout,
         )
@@ -270,6 +327,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             Path(args.path),
             config_path=args.config,
             milestone_id=args.milestone,
+            roadmap=args.roadmap,
             agent_name=args.agent,
             tier=args.tier,
             timeout=args.timeout,
@@ -285,6 +343,45 @@ def main(argv: Sequence[str] | None = None) -> int:
             tier=args.tier,
             timeout=args.timeout,
             yes=args.yes,
+            commit=args.commit,
+            dry_run=args.dry_run,
+        )
+    if args.command == "audit":
+        if args.fix:
+            scan_only = {
+                "--agent": args.agent,
+                "--tier": args.tier,
+                "--max-batches": args.max_batches,
+                "--commit": args.commit,
+                "--dry-run": args.dry_run,
+            }
+            used = [flag for flag, value in scan_only.items() if value not in (None, False)]
+            if used:
+                parser.error(f"--fix cannot be combined with {', '.join(used)}")
+            return run_audit_fix(
+                Path(args.path),
+                config_path=args.config,
+                max_steps=args.max_steps,
+                max_hours=args.max_hours,
+                merge=False if args.no_merge else None,
+                agent_timeout=args.timeout,
+                verify_timeout=args.verify_timeout,
+            )
+        fix_only = {
+            "--max-steps": args.max_steps,
+            "--max-hours": args.max_hours,
+            "--no-merge": args.no_merge,
+        }
+        used = [flag for flag, value in fix_only.items() if value not in (None, False)]
+        if used:
+            parser.error(f"{', '.join(used)} only apply with --fix")
+        return run_audit_command(
+            Path(args.path),
+            config_path=args.config,
+            agent_name=args.agent,
+            tier=args.tier,
+            timeout=args.timeout,
+            max_batches=args.max_batches,
             commit=args.commit,
             dry_run=args.dry_run,
         )

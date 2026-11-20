@@ -41,9 +41,9 @@ from baton.roadmap import (
     Milestone,
     Roadmap,
     RoadmapError,
-    find_roadmap,
     next_milestone,
     parse_roadmap,
+    resolve_roadmap,
     save_roadmap,
     set_milestone_status,
 )
@@ -146,10 +146,11 @@ class _Target:
         return plan_prompt(self.roadmap_text, self.milestone, self.rel, self.tracking)
 
 
-def _target(repo: Path, milestone_id: str | None) -> _Target:
-    roadmap_path = find_roadmap(repo)
+def _target(repo: Path, milestone_id: str | None, roadmap: str | None = None) -> _Target:
+    roadmap_path = resolve_roadmap(repo, roadmap)
     if roadmap_path is None:
-        raise _Stop(EXIT_STOPPED, f"No docs/ROADMAP.md or ROADMAP.md in {repo}.")
+        missing = "No docs/ROADMAP.md or ROADMAP.md" if roadmap is None else f"No {roadmap}"
+        raise _Stop(EXIT_STOPPED, f"{missing} in {repo}.")
     text = roadmap_path.read_text(encoding="utf-8")
     milestone = _select(parse_roadmap(text), milestone_id)
     rel = roadmap_path.relative_to(repo).as_posix()
@@ -166,6 +167,7 @@ def run_plan(
     out: TextIO,
     *,
     milestone_id: str | None = None,
+    roadmap: str | None = None,
     today: str | None = None,
     timeout: float = DEFAULT_AGENT_TIMEOUT,
 ) -> int:
@@ -175,6 +177,7 @@ def run_plan(
         lambda milestone: adapter,
         out,
         milestone_id=milestone_id,
+        roadmap=roadmap,
         today=today,
         timeout=timeout,
     )
@@ -186,13 +189,14 @@ def _run_plan(
     out: TextIO,
     *,
     milestone_id: str | None,
+    roadmap: str | None,
     today: str | None,
     timeout: float,
 ) -> int:
     date = today or datetime.date.today().isoformat()
     plan_path = repo / PLAN_FILENAME
     try:
-        target = _target(repo, milestone_id)
+        target = _target(repo, milestone_id, roadmap)
         milestone = target.milestone
         _check_existing_plan(plan_path)
         dirty = dirty_paths(repo)
@@ -250,6 +254,7 @@ def run_plan_command(
     *,
     config_path: str | None = None,
     milestone_id: str | None = None,
+    roadmap: str | None = None,
     agent_name: str | None = None,
     tier: str | None = None,
     timeout: float = DEFAULT_AGENT_TIMEOUT,
@@ -268,10 +273,16 @@ def run_plan_command(
 
     if not dry_run:
         return _run_plan(
-            repo, select_adapter, out, milestone_id=milestone_id, today=None, timeout=timeout
+            repo,
+            select_adapter,
+            out,
+            milestone_id=milestone_id,
+            roadmap=roadmap,
+            today=None,
+            timeout=timeout,
         )
     try:
-        target = _target(repo, milestone_id)
+        target = _target(repo, milestone_id, roadmap)
         milestone = target.milestone
         say(out, f"Milestone: {milestone.id} – {milestone.name} ({target.rel}, {target.tracking})")
         adapter = select_adapter(milestone)

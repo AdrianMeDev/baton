@@ -13,6 +13,7 @@ from baton.roadmap import (
     next_milestone,
     parse_questions,
     parse_roadmap,
+    resolve_roadmap,
     save_roadmap,
     section_text,
     set_milestone_status,
@@ -285,3 +286,42 @@ def test_parse_questions_caps_at_six_and_accepts_none():
 
     assert [q.text for q in parse_questions(reply)] == [f"q{n}" for n in range(6)]
     assert parse_questions("none") == []
+
+
+def test_resolve_roadmap_default_and_explicit(tmp_path: Path) -> None:
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "ROADMAP.md").write_text("# Roadmap: a\n")
+    (tmp_path / "docs" / "AUDIT.md").write_text("# Audit: a\n")
+    assert resolve_roadmap(tmp_path) == tmp_path / "docs" / "ROADMAP.md"
+    assert resolve_roadmap(tmp_path, "docs/AUDIT.md") == tmp_path / "docs" / "AUDIT.md"
+    assert resolve_roadmap(tmp_path, "./docs/AUDIT.md") == tmp_path / "docs" / "AUDIT.md"
+    assert resolve_roadmap(tmp_path, "docs/NOPE.md") is None
+    assert resolve_roadmap(tmp_path, "docs") is None  # a directory is not a roadmap
+
+
+def test_resolve_roadmap_without_any_roadmap(tmp_path: Path) -> None:
+    assert resolve_roadmap(tmp_path) is None
+
+
+def test_resolve_roadmap_rejects_paths_leaving_the_checkout(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Roadmap: x\n")
+    (root / "link.md").symlink_to(outside)
+    (root / "dirlink").symlink_to(tmp_path)
+    for bad in (
+        str(outside),
+        "../outside.md",
+        "docs/../../outside.md",
+        "link.md",
+        "dirlink/outside.md",
+    ):
+        with pytest.raises(RoadmapError):
+            resolve_roadmap(root, bad)
+
+
+def test_resolve_roadmap_accepts_a_symlink_inside_the_checkout(tmp_path: Path) -> None:
+    (tmp_path / "real.md").write_text("# Roadmap: x\n")
+    (tmp_path / "alias.md").symlink_to(tmp_path / "real.md")
+    assert resolve_roadmap(tmp_path, "alias.md") == tmp_path / "alias.md"
