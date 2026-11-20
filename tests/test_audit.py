@@ -10,6 +10,7 @@ from baton.audit import (
     AuditError,
     AuditFinding,
     InventoryFile,
+    assemble_audit_plan,
     build_inventory,
     next_batch,
     parse_audit_reply,
@@ -21,7 +22,9 @@ from baton.audit import (
     record_batch,
     render_audit,
     set_file_status,
+    validate_audit_plan,
 )
+from baton.roadmap import next_milestone, parse_roadmap
 
 
 def git(repo: Path, *args: str) -> str:
@@ -322,3 +325,134 @@ def test_parse_findings_rejects_garbage_and_handles_colons() -> None:
     assert parse_findings(text) == [AuditFinding("smell", "warning", "odd:1.py", "too long", 2, 1)]
     with pytest.raises(AuditError, match="unreadable finding"):
         parse_findings(text + "F2 nonsense\n")
+
+
+def _scanned() -> str:
+    files = [InventoryFile("a.py"), InventoryFile("b.py")]
+    text = render_audit(files, base="abc", date="2026-11-19", title="demo")
+    found = parse_audit_reply(
+        _reply(
+            _item(severity="critical", category="security", message="eval"),
+            _item(message="long"),
+            _item(path="b.py", severity="informational", message="naming"),
+            _item(path="b.py", severity="warning", message="dup"),
+        ),
+        ["a.py", "b.py"],
+    )
+    return record_batch(text, files, found)
+
+
+GOOD_REPLY = """\
+Here is the plan:
+
+## Milestones
+
+### M1 [ ] Audit: Remove unsafe eval
+- **Goal:** No code evaluation of input.
+- **Includes:** F1 (eval), F3 (naming)
+- **Done when:** No eval left; tests cover the replacement.
+- **Depends on:** -
+- **Size:** S, ~3 commits
+
+### M2 [ ] Audit: Clean up smells
+- **Goal:** Shorter, deduplicated code.
+- **Includes:** F2, F4
+- **Done when:** Functions are split and duplicates removed.
+- **Depends on:** M1
+- **Size:** M, ~5 commits
+
+## Suggestions
+- Add a `--fix-dry-run` flag: preview before editing.
+```
+"""
+
+
+def _planned(reply: str = GOOD_REPLY, text: str | None = None) -> str:
+    return assemble_audit_plan(text or _scanned(), reply, "2026-11-20")
+
+
+def test_assembled_plan_parses_and_starts_at_m1() -> None:
+    text = _planned()
+    assert validate_audit_plan(text) == []
+    roadmap = parse_roadmap(text)
+    assert [m.id for m in roadmap.milestones] == ["M1", "M2"]
+    milestone = next_milestone(roadmap)
+    assert milestone is not None and milestone.id == "M1"
+    assert roadmap.title == "Audit: demo"
+    assert "Updated: 2026-11-20 · Base: abc" in text
+    assert "Here is the plan" not in text and "```" not in text
+    assert text.index("## Findings") < text.index("## Milestones") < text.index("## Suggestions")
+    assert text.index("## Suggestions") < text.index("## Definition of done")
+    assert text.rstrip().endswith("- 2026-11-20: audit planned")
+    assert [f.status for f in parse_inventory(text)] == ["done", "done"]
+    assert len(parse_findings(text)) == 4
+
+
+def test_replanning_replaces_the_sections_and_keeps_the_changelog() -> None:
+    first = _planned()
+    second = assemble_audit_plan(first, GOOD_REPLY.replace("Remove unsafe", "Drop"), "2026-11-21")
+    assert second.count("## Milestones") == 1 and second.count("## Suggestions") == 1
+    assert "Audit: Drop eval" in second and "Remove unsafe" not in second
+    assert "- 2026-11-20: audit planned\n- 2026-11-21: audit planned" in second
+    assert validate_audit_plan(second) == []
+    assert second.count("## Changelog") == 1 and second.count("## Definition of done") == 1
+
+
+def test_no_critical_or_warning_findings_need_only_suggestions() -> None:
+    files = [InventoryFile("a.py")]
+    text = render_audit(files, base="abc", date="2026-11-19", title="demo")
+    text = record_batch(
+        text, files, parse_audit_reply(_reply(_item(severity="informational")), ["a.py"])
+    )
+    planned = _planned("## Suggestions\n- add CI\n", text)
+    assert validate_audit_plan(planned) == []
+    assert "## Milestones" not in planned
+    with pytest.raises(Exception, match="Milestones"):
+        parse_roadmap(planned)
+    assert any("Suggestions" in e for e in validate_audit_plan(_planned("", text)))
+
+
+def _errors(reply: str) -> list[str]:
+    return validate_audit_plan(_planned(reply))
+
+
+def test_missing_finding_is_reported() -> None:
+    errors = _errors(GOOD_REPLY.replace("F2, F4", "F4"))
+    assert errors == ["finding F2 is not covered by any milestone"]
+
+
+def test_duplicate_and_unknown_findings_are_reported() -> None:
+    errors = _errors(GOOD_REPLY.replace("F2, F4", "F1, F2, F4, F9"))
+    assert "finding F1 is covered by M1, M2; use exactly one" in errors
+    assert "M2: unknown finding F9" in errors
+
+
+def test_informational_findings_are_optional() -> None:
+    assert _errors(GOOD_REPLY.replace(", F3 (naming)", "")) == []
+
+
+def test_oversized_and_malformed_milestones_are_reported() -> None:
+    assert any("3-8 commits" in e for e in _errors(GOOD_REPLY.replace("~5 commits", "~12 commits")))
+    assert any("Audit:" in e for e in _errors(GOOD_REPLY.replace("Audit: Clean", "Clean")))
+    assert any("Size" in e for e in _errors(GOOD_REPLY.replace("M, ~5 commits", "huge")))
+    assert any("Includes" in e for e in _errors(GOOD_REPLY.replace("F2, F4", "everything")))
+    assert any("must be open" in e for e in _errors(GOOD_REPLY.replace("M2 [ ]", "M2 [x]")))
+    shifted = GOOD_REPLY.replace("### M2 [", "### M3 [").replace("### M1 [", "### M2 [")
+    shifted = shifted.replace("**Depends on:** M1", "**Depends on:** M2")
+    assert any("M1.." in e for e in _errors(shifted))
+    assert any(
+        "Goal" in e
+        for e in _errors(GOOD_REPLY.replace("- **Goal:** Shorter, deduplicated code.\n", ""))
+    )
+
+
+def test_missing_sections_are_reported() -> None:
+    assert any("Milestones" in e for e in _errors("## Suggestions\n- x\n"))
+    errors = _errors(GOOD_REPLY.split("## Suggestions")[0])
+    assert any("Suggestions" in e for e in errors)
+    assert any("does not parse" in e for e in _errors("## Milestones\n\nnothing\n"))
+
+
+def test_findings_that_do_not_parse_are_reported() -> None:
+    broken = _scanned() + "\nF9 nonsense\n"
+    assert validate_audit_plan(broken)[0].startswith("findings do not parse")

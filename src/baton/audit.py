@@ -18,6 +18,7 @@ from typing import Literal, cast
 
 from baton.git import GitError
 from baton.review import SEVERITIES, Severity
+from baton.roadmap import parse_roadmap, section_text, validate_roadmap
 
 BATCH_CHARS = 60_000
 MAX_FILE_CHARS = 60_000
@@ -42,6 +43,13 @@ _LOCKFILE_NAMES = frozenset(
 _SECRET_PATTERNS = (".env*", "*.pem", "*.key", "id_rsa*", "*.p12", "*.pfx")
 
 _INVENTORY_HEADING = "## Inventory"
+_PLAN_HEADINGS = ("## Milestones", "## Suggestions", "## Definition of done", "## Changelog")
+_FINDING_ID_RE = re.compile(r"\bF(\d+)\b")
+MILESTONE_PREFIX = "Audit:"
+DEFINITION_OF_DONE = """\
+- Builds, tests green, lint clean
+- Every included finding is fixed, or explained as a false positive in the commit message
+- Fixes add or extend tests where the finding was about untested or unsafe logic"""
 _FINDINGS_HEADING = "## Findings"
 _FINDING_RE = re.compile(
     r"^F(\d+) · (critical|warning|informational) · (security|smell) · "
@@ -414,3 +422,97 @@ def record_batch(text: str, batch: list[InventoryFile], findings: Iterable[Audit
     if section == _FINDINGS_HEADING:
         section += "\n"
     return f"{head}{section}\n{lines}" + (f"\n{tail}" if tail else "")
+
+
+def _reply_section(reply: str, heading: str) -> str:
+    """The body of ``heading`` in an agent reply, without surrounding prose or fences."""
+    lines = reply.splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.strip() == heading), None)
+    if start is None:
+        return ""
+    body: list[str] = []
+    for line in lines[start + 1 :]:
+        if line.startswith("## ") or line.strip().startswith("```"):
+            break
+        body.append(line.rstrip())
+    return "\n".join(body).strip()
+
+
+def _drop_section(text: str, heading: str) -> str:
+    span = _section_span(text, heading)
+    if span is None:
+        return text
+    return text[: span[0]].rstrip("\n") + "\n" + (f"\n{text[span[1] :]}" if text[span[1] :] else "")
+
+
+def assemble_audit_plan(text: str, reply: str, date: str) -> str:
+    """``text`` plus the planner's Milestones and Suggestions, Definition of done and Changelog.
+
+    Sections from an earlier planning run are replaced; the Changelog keeps its old lines.
+    """
+    changelog = section_text(text, "Changelog") or ""
+    old_log = [ln for ln in changelog.splitlines()[1:] if ln.strip()]
+    for heading in _PLAN_HEADINGS:
+        text = _drop_section(text, heading)
+    text = re.sub(r"^Updated: \S+", f"Updated: {date}", text, count=1, flags=re.MULTILINE)
+    sections = [
+        ("## Milestones", _reply_section(reply, "## Milestones")),
+        ("## Suggestions", _reply_section(reply, "## Suggestions")),
+        ("## Definition of done", DEFINITION_OF_DONE),
+        ("## Changelog", "\n".join([*old_log, f"- {date}: audit planned"])),
+    ]
+    out = text.rstrip("\n") + "\n"
+    for heading, body in sections:
+        if body:
+            out += f"\n{heading}\n\n{body}\n"
+    return out
+
+
+def validate_audit_plan(text: str) -> list[str]:
+    """Readable reasons why the planned audit is not acceptable; empty means valid."""
+    errors: list[str] = []
+    try:
+        findings = parse_findings(text)
+    except AuditError as exc:
+        return [f"findings do not parse: {exc}"]
+    required = {f.id for f in findings if f.severity in ("critical", "warning")}
+    known = {f.id for f in findings}
+
+    covered: dict[int, list[str]] = {}
+    if section_text(text, "Milestones") is None:
+        if required:
+            errors.append("missing '## Milestones' section")
+    else:
+        errors += _milestone_errors(text, covered)
+    for number, where in sorted(covered.items()):
+        if number not in known:
+            errors.append(f"{', '.join(where)}: unknown finding F{number}")
+        elif len(where) > 1:
+            errors.append(f"finding F{number} is covered by {', '.join(where)}; use exactly one")
+    for number in sorted(required - set(covered)):
+        errors.append(f"finding F{number} is not covered by any milestone")
+
+    suggestions = section_text(text, "Suggestions")
+    if suggestions is None or not suggestions.splitlines()[1:]:
+        errors.append("missing '## Suggestions' section with at least one suggestion")
+    return errors
+
+
+def _milestone_errors(text: str, covered: dict[int, list[str]]) -> list[str]:
+    """Roadmap rules plus audit rules for the milestones; fills ``covered`` with finding ids."""
+    as_roadmap = re.sub(r"^# Audit:", "# Roadmap:", text, count=1, flags=re.MULTILINE)
+    errors = validate_roadmap(as_roadmap)
+    if any(error.startswith("roadmap does not parse") for error in errors):
+        return errors
+    first = parse_roadmap(text).milestones[0]
+    if first.id != "M1":
+        errors.append(f"milestones must be numbered M1.. in order, first is {first.id}")
+    for milestone in parse_roadmap(text).milestones:
+        if not milestone.name.startswith(MILESTONE_PREFIX):
+            errors.append(f"{milestone.id}: the name must start with '{MILESTONE_PREFIX}'")
+        ids = {int(n) for n in _FINDING_ID_RE.findall(milestone.includes)}
+        if not ids:
+            errors.append(f"{milestone.id}: '**Includes:**' lists no finding ids (F<n>)")
+        for number in ids:
+            covered.setdefault(number, []).append(milestone.id)
+    return errors
