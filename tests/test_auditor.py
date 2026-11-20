@@ -472,6 +472,16 @@ def test_fix_delegates_to_auto_over_the_audit_file(repo: Path) -> None:
     assert (kw["agent_timeout"], kw["verify_timeout"]) == (60.0, 30.0)
 
 
+def test_fix_continues_after_a_milestone_was_completed(repo: Path) -> None:
+    _committed_audit(repo)
+    audit = repo / "docs" / "AUDIT.md"
+    audit.write_text(audit.read_text().replace("### M1 [ ]", "### M1 [x]"), encoding="utf-8")
+    git(repo, "commit", "-q", "-am", "docs: close M1")
+    spy = AutoSpy(0)
+    code, out = fix(repo, spy)
+    assert code == 0 and len(spy.calls) == 1, out
+
+
 def test_fix_needs_the_audit_file(repo: Path) -> None:
     spy = AutoSpy()
     code, out = fix(repo, spy)

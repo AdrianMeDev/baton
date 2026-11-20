@@ -468,8 +468,11 @@ def assemble_audit_plan(text: str, reply: str, date: str) -> str:
     return out
 
 
-def validate_audit_plan(text: str) -> list[str]:
-    """Readable reasons why the planned audit is not acceptable; empty means valid."""
+def validate_audit_plan(text: str, *, fresh: bool = True) -> list[str]:
+    """Readable reasons why the planned audit is not acceptable; empty means valid.
+
+    ``fresh=False`` accepts milestones that ``baton audit --fix`` already worked on.
+    """
     errors: list[str] = []
     try:
         findings = parse_findings(text)
@@ -483,7 +486,7 @@ def validate_audit_plan(text: str) -> list[str]:
         if required:
             errors.append("missing '## Milestones' section")
     else:
-        errors += _milestone_errors(text, covered)
+        errors += _milestone_errors(text, covered, fresh)
     for number, where in sorted(covered.items()):
         if number not in known:
             errors.append(f"{', '.join(where)}: unknown finding F{number}")
@@ -498,10 +501,10 @@ def validate_audit_plan(text: str) -> list[str]:
     return errors
 
 
-def _milestone_errors(text: str, covered: dict[int, list[str]]) -> list[str]:
+def _milestone_errors(text: str, covered: dict[int, list[str]], fresh: bool) -> list[str]:
     """Roadmap rules plus audit rules for the milestones; fills ``covered`` with finding ids."""
     as_roadmap = re.sub(r"^# Audit:", "# Roadmap:", text, count=1, flags=re.MULTILINE)
-    errors = validate_roadmap(as_roadmap)
+    errors = validate_roadmap(as_roadmap, fresh=fresh)
     if any(error.startswith("roadmap does not parse") for error in errors):
         return errors
     first = parse_roadmap(text).milestones[0]

@@ -477,7 +477,7 @@ def run_audit_fix(
                 f"The scan is incomplete: {open_files} files are still open. "
                 "Run `baton audit` to finish it.",
             )
-        errors = validate_audit_plan(text)
+        errors = validate_audit_plan(text, fresh=False)  # --fix may have closed milestones
         if errors:
             listing = "".join(f"\n  {e}" for e in errors)
             raise _Stop(

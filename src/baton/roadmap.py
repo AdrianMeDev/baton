@@ -273,8 +273,11 @@ def assemble_roadmap(reply: str, date: str) -> str:
     return "\n".join([body[0].rstrip(), f"Updated: {date}", *rest]) + "\n"
 
 
-def validate_roadmap(text: str) -> list[str]:
-    """Readable reasons why ``text`` is not an acceptable fresh roadmap; empty means valid."""
+def validate_roadmap(text: str, *, fresh: bool = True) -> list[str]:
+    """Readable reasons why ``text`` is not an acceptable roadmap; empty means valid.
+
+    ``fresh`` (a roadmap that was just planned) also requires every milestone to be open.
+    """
     try:
         roadmap = parse_roadmap(text)
     except RoadmapError as exc:
@@ -289,7 +292,7 @@ def validate_roadmap(text: str) -> list[str]:
         errors.append(f"milestones must be numbered M0.. or M1.. in order, found {numbers}")
     for milestone in roadmap.milestones:
         where = milestone.id
-        if milestone.status != "open":
+        if fresh and milestone.status != "open":
             errors.append(f"{where}: must be open '[ ]', found {milestone.status}")
         if not milestone.name:
             errors.append(f"{where}: missing name")
