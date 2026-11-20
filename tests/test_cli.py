@@ -420,3 +420,14 @@ def test_auto_outside_a_repository_exits_2(tmp_path, monkeypatch, capsys) -> Non
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     assert main(["auto", "--path", str(tmp_path / "missing")]) == 2
     assert "Cannot start" in capsys.readouterr().out
+
+
+def test_audit_parser_options() -> None:
+    from baton.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["audit", "--max-batches", "2", "--agent", "a", "--tier", "L", "--dry-run"]
+    )
+    assert (args.max_batches, args.agent, args.tier, args.dry_run) == (2, "a", "L", True)
+    defaults = build_parser().parse_args(["audit"])
+    assert defaults.max_batches is None and defaults.tier is None and defaults.dry_run is False

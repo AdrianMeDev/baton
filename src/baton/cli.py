@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from baton import __version__
+from baton.auditor import run_audit_command
 from baton.autostate import run_stop_command
 from baton.config import ROUTE_TIERS, ConfigError, find_config_path, load_config
 from baton.doctor import run_doctor
@@ -196,6 +197,29 @@ def build_parser() -> argparse.ArgumentParser:
     roadmap.add_argument(
         "--dry-run", action="store_true", help="print the command and prompt, change nothing"
     )
+    audit = subparsers.add_parser(
+        "audit", help="review every tracked file batch by batch into docs/AUDIT.md"
+    )
+    audit.add_argument(
+        "--path", default=".", metavar="DIR", help="repository root (default: current directory)"
+    )
+    audit.add_argument("--agent", metavar="NAME", help="use a named agent from the config")
+    audit.add_argument("--tier", choices=ROUTE_TIERS, help="route tier of review (default: M)")
+    audit.add_argument(
+        "--max-batches", type=int, metavar="N", help="stop after N batches; rerun to continue"
+    )
+    audit.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_AGENT_TIMEOUT,
+        metavar="S",
+        help="seconds before the agent is killed (default: %(default)s)",
+    )
+    audit.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print counts, command and first prompt, change nothing",
+    )
     return parser
 
 
@@ -286,6 +310,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             timeout=args.timeout,
             yes=args.yes,
             commit=args.commit,
+            dry_run=args.dry_run,
+        )
+    if args.command == "audit":
+        return run_audit_command(
+            Path(args.path),
+            config_path=args.config,
+            agent_name=args.agent,
+            tier=args.tier,
+            timeout=args.timeout,
+            max_batches=args.max_batches,
             dry_run=args.dry_run,
         )
     if args.command == "recheck":
