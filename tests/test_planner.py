@@ -368,3 +368,29 @@ def test_roles_request_read_only_adapters(repo: Path, monkeypatch):
     RoutedAdapter(route, LimitStore(), out, review=True).argv("p")
     RoutedAdapter(route, LimitStore(), out).argv("p")
     assert seen == [True, True, False]
+
+
+AUDIT = ROADMAP.replace("# Roadmap:", "# Audit:").replace("Widgets", "Audit: Widgets")
+
+
+def test_plan_over_another_roadmap_file_leaves_the_default_alone(repo: Path):
+    (repo / "docs" / "AUDIT.md").write_text(AUDIT, encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "audit")
+    planner = FakePlanner(VALID.replace("(docs/ROADMAP.md, tracked)", "(docs/AUDIT.md, tracked)"))
+    code, out = plan_in(repo, planner, roadmap="docs/AUDIT.md")
+    assert code == EXIT_OK, out
+    assert "### M1 [ ] Audit: Widgets" in planner.prompts[0]
+    assert "(docs/AUDIT.md, tracked)" in planner.prompts[0]
+    plan = parse_plan((repo / ".agent-plan.md").read_text(encoding="utf-8"))
+    assert plan.milestone.roadmap == "docs/AUDIT.md"
+    assert (repo / "docs" / "ROADMAP.md").read_text(encoding="utf-8") == ROADMAP
+
+
+def test_plan_with_a_missing_or_escaping_roadmap_stops(repo: Path):
+    planner = FakePlanner(VALID)
+    code, out = plan_in(repo, planner, roadmap="docs/NOPE.md")
+    assert code == EXIT_STOPPED and "No docs/NOPE.md" in out
+    code, out = plan_in(repo, planner, roadmap="../ROADMAP.md")
+    assert code == EXIT_FAILED and "relative path within the checkout" in out
+    assert planner.prompts == [] and not (repo / ".agent-plan.md").exists()

@@ -123,6 +123,11 @@ def build_parser() -> argparse.ArgumentParser:
     auto.add_argument(
         "--path", default=".", metavar="DIR", help="repository root (default: current directory)"
     )
+    auto.add_argument(
+        "--roadmap",
+        metavar="PATH",
+        help="roadmap file inside the repository (default: docs/ROADMAP.md)",
+    )
     auto.add_argument("--max-steps", type=int, metavar="N", help="stop after N implemented steps")
     auto.add_argument("--max-hours", type=float, metavar="H", help="stop after H hours")
     auto.add_argument(
@@ -154,6 +159,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     plan.add_argument(
         "--milestone", metavar="ID", help="plan this milestone (e.g. M3) instead of the next one"
+    )
+    plan.add_argument(
+        "--roadmap",
+        metavar="PATH",
+        help="roadmap file inside the repository (default: docs/ROADMAP.md)",
     )
     plan.add_argument("--agent", metavar="NAME", help="use a named agent from the config")
     plan.add_argument(
@@ -287,6 +297,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_steps=args.max_steps,
             max_hours=args.max_hours,
             merge=False if args.no_merge else None,
+            roadmap=args.roadmap,
             agent_timeout=args.timeout,
             verify_timeout=args.verify_timeout,
         )
@@ -297,6 +308,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             Path(args.path),
             config_path=args.config,
             milestone_id=args.milestone,
+            roadmap=args.roadmap,
             agent_name=args.agent,
             tier=args.tier,
             timeout=args.timeout,
