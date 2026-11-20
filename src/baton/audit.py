@@ -8,19 +8,23 @@ by batch, so an interrupted audit resumes at the next open batch.
 from __future__ import annotations
 
 import fnmatch
+import json
 import re
 import subprocess
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import Literal, cast
 
 from baton.git import GitError
+from baton.review import SEVERITIES, Severity
 
 BATCH_CHARS = 60_000
 MAX_FILE_CHARS = 60_000
 
 Status = Literal["open", "done", "skipped"]
+Category = Literal["security", "smell"]
+CATEGORIES = ("security", "smell")
 
 _MARKER: dict[Status, str] = {"open": " ", "done": "x", "skipped": "-"}
 _STATUS = {marker: status for status, marker in _MARKER.items()}
@@ -38,6 +42,11 @@ _LOCKFILE_NAMES = frozenset(
 _SECRET_PATTERNS = (".env*", "*.pem", "*.key", "id_rsa*", "*.p12", "*.pfx")
 
 _INVENTORY_HEADING = "## Inventory"
+_FINDINGS_HEADING = "## Findings"
+_FINDING_RE = re.compile(
+    r"^F(\d+) · (critical|warning|informational) · (security|smell) · "
+    r"(.+?)(?::(\d+))? – (.+)$"
+)
 _TITLE_RE = re.compile(r"^# Audit: (.+)$", re.MULTILINE)
 _BASE_RE = re.compile(r"^Updated: \S+ · Base: (\S+)$", re.MULTILINE)
 _FOLDER_RE = re.compile(r"^### (\S.*/) \[[ ~x]\]$")
@@ -216,13 +225,20 @@ def parse_title(text: str) -> str:
     return match.group(1)
 
 
-def _inventory_span(text: str) -> tuple[int, int]:
-    """Character offsets of the ``## Inventory`` section (up to the next ``## `` heading)."""
-    match = re.search(rf"^{re.escape(_INVENTORY_HEADING)}$", text, re.MULTILINE)
+def _section_span(text: str, heading: str) -> tuple[int, int] | None:
+    """Character offsets of a ``## `` section (up to the next ``## `` heading), if present."""
+    match = re.search(rf"^{re.escape(heading)}$", text, re.MULTILINE)
     if match is None:
-        raise AuditError("audit file has no '## Inventory' section")
+        return None
     nxt = re.search(r"^## ", text[match.end() :], re.MULTILINE)
     return match.start(), match.end() + nxt.start() if nxt else len(text)
+
+
+def _inventory_span(text: str) -> tuple[int, int]:
+    span = _section_span(text, _INVENTORY_HEADING)
+    if span is None:
+        raise AuditError("audit file has no '## Inventory' section")
+    return span
 
 
 def parse_inventory(text: str) -> list[InventoryFile]:
@@ -282,3 +298,119 @@ def next_batch(
         batch.append(f)
         used += size
     return batch
+
+
+@dataclass(frozen=True)
+class AuditFinding:
+    category: Category
+    severity: Severity
+    path: str
+    message: str
+    line: int | None = None
+    id: int = 0
+
+    def render(self) -> str:
+        location = self.path if self.line is None else f"{self.path}:{self.line}"
+        return f"F{self.id} · {self.severity} · {self.category} · {location} – {self.message}"
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise AuditError(f"Duplicate audit field: {key}")
+        result[key] = value
+    return result
+
+
+def parse_audit_reply(text: str, batch_paths: Iterable[str]) -> tuple[AuditFinding, ...]:
+    """Accept only ``{"findings": [...]}`` about files of the batch; ids are assigned on record."""
+    allowed = set(batch_paths)
+    try:
+        data = json.loads(text, object_pairs_hook=_unique_object)
+    except (ValueError, RecursionError) as exc:
+        raise AuditError(f"Invalid audit JSON: {exc}") from exc
+    if not isinstance(data, dict) or set(data) != {"findings"}:
+        raise AuditError("Audit reply must be an object containing only 'findings'")
+    if not isinstance(data["findings"], list):
+        raise AuditError("Audit 'findings' must be an array")
+    findings = []
+    for item in data["findings"]:
+        if not isinstance(item, dict) or set(item) - {
+            "severity",
+            "category",
+            "message",
+            "path",
+            "line",
+        }:
+            raise AuditError(
+                "Each finding must contain severity, category, message, path and optional line"
+            )
+        severity, category = item.get("severity"), item.get("category")
+        message, path, line = item.get("message"), item.get("path"), item.get("line")
+        if severity not in SEVERITIES:
+            raise AuditError("Finding severity must be critical, warning or informational")
+        if category not in CATEGORIES:
+            raise AuditError("Finding category must be security or smell")
+        if not isinstance(message, str) or not message.strip():
+            raise AuditError("Finding message must be a non-empty string")
+        if not isinstance(path, str) or path not in allowed:
+            raise AuditError(f"Finding path is not a file of this batch: {path!r}")
+        if line is not None and (type(line) is not int or line < 1):
+            raise AuditError("Finding line must be a positive integer or null")
+        findings.append(AuditFinding(category, severity, path, " ".join(message.split()), line))
+    return tuple(findings)
+
+
+def parse_findings(text: str) -> list[AuditFinding]:
+    """The ``F<n>`` lines of the ``## Findings`` section, in file order."""
+    span = _section_span(text, _FINDINGS_HEADING)
+    if span is None:
+        return []
+    findings: list[AuditFinding] = []
+    for line in text[span[0] : span[1]].splitlines()[1:]:
+        if not line.strip():
+            continue
+        m = _FINDING_RE.match(line)
+        if m is None:
+            raise AuditError(f"unreadable finding line: {line!r}")
+        findings.append(
+            AuditFinding(
+                cast(Category, m.group(3)),
+                cast(Severity, m.group(2)),
+                m.group(4),
+                m.group(6),
+                int(m.group(5)) if m.group(5) else None,
+                int(m.group(1)),
+            )
+        )
+    return findings
+
+
+def record_batch(text: str, batch: list[InventoryFile], findings: Iterable[AuditFinding]) -> str:
+    """Append ``findings`` as ``F<n>`` lines and mark the batch files done with their counts."""
+    findings = list(findings)
+    paths = {f.path for f in batch}
+    foreign = {f.path for f in findings} - paths
+    if foreign:
+        raise AuditError(f"findings for files outside the batch: {', '.join(sorted(foreign))}")
+    next_id = max((f.id for f in parse_findings(text)), default=0) + 1
+    numbered = [
+        AuditFinding(f.category, f.severity, f.path, f.message, f.line, next_id + i)
+        for i, f in enumerate(findings)
+    ]
+    for file in batch:
+        count = sum(f.path == file.path for f in numbered)
+        text = set_file_status(
+            text, [file.path], "done", f"{count} finding{'' if count == 1 else 's'}"
+        )
+    if not numbered:
+        return text
+    lines = "".join(f"{f.render()}\n" for f in numbered)
+    span = _section_span(text, _FINDINGS_HEADING)
+    if span is None:
+        return f"{text.rstrip(chr(10))}\n\n{_FINDINGS_HEADING}\n\n{lines}"
+    head, section, tail = text[: span[0]], text[span[0] : span[1]].rstrip("\n"), text[span[1] :]
+    if section == _FINDINGS_HEADING:
+        section += "\n"
+    return f"{head}{section}\n{lines}" + (f"\n{tail}" if tail else "")

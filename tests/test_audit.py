@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -7,13 +8,17 @@ import pytest
 from baton.audit import (
     MAX_FILE_CHARS,
     AuditError,
+    AuditFinding,
     InventoryFile,
     build_inventory,
     next_batch,
+    parse_audit_reply,
     parse_base,
+    parse_findings,
     parse_inventory,
     parse_title,
     read_file,
+    record_batch,
     render_audit,
     set_file_status,
 )
@@ -213,3 +218,107 @@ def test_batches_cover_the_whole_inventory(repo: Path) -> None:
     assert sorted(seen) == sorted(f.path for f in files if f.status == "done")
     assert "src/app.py" in seen
     assert ".env" not in seen
+
+
+def _reply(*items: dict) -> str:
+    return json.dumps({"findings": list(items)})
+
+
+def _item(**over: object) -> dict:
+    item = {"severity": "warning", "category": "smell", "message": "too long", "path": "a.py"}
+    return {**item, **over}
+
+
+def test_parse_audit_reply_accepts_valid_findings() -> None:
+    reply = _reply(
+        _item(line=7, message="  too\nlong  "),
+        _item(severity="critical", category="security", message="eval", path="b.py"),
+    )
+    assert parse_audit_reply(reply, ["a.py", "b.py"]) == (
+        AuditFinding("smell", "warning", "a.py", "too long", 7),
+        AuditFinding("security", "critical", "b.py", "eval"),
+    )
+    assert parse_audit_reply('{"findings": []}', ["a.py"]) == ()
+
+
+@pytest.mark.parametrize(
+    ("reply", "error"),
+    [
+        ("nope", "Invalid audit JSON"),
+        ("[]", "only 'findings'"),
+        ('{"findings": {}}', "must be an array"),
+        ('{"findings": [], "findings": []}', "Duplicate"),
+        (_reply(_item(severity="high")), "severity"),
+        (_reply(_item(category="style")), "category"),
+        (_reply(_item(message=" ")), "message"),
+        (_reply(_item(path="other.py")), "not a file of this batch"),
+        (_reply({k: v for k, v in _item().items() if k != "path"}), "not a file of this batch"),
+        (_reply(_item(line=0)), "line"),
+        (_reply(_item(line="3")), "line"),
+        (_reply(_item(line=True)), "line"),
+        (_reply(_item(extra=1)), "Each finding"),
+        ("[1]".join(['{"findings": ', "}"]), "Each finding"),
+    ],
+)
+def test_parse_audit_reply_rejects(reply: str, error: str) -> None:
+    with pytest.raises(AuditError, match=error):
+        parse_audit_reply(reply, ["a.py", "b.py"])
+
+
+def test_record_batch_numbers_findings_and_marks_files() -> None:
+    files = [InventoryFile("a.py"), InventoryFile("b.py"), InventoryFile("c/d.py")]
+    text = render_audit(files, base="abc", date="2026-11-20", title="t")
+    first = parse_audit_reply(
+        _reply(_item(line=3), _item(category="security", severity="critical", message="eval")),
+        ["a.py", "b.py"],
+    )
+    text = record_batch(text, files[:2], first)
+    assert "- [x] `a.py` – 2 findings" in text
+    assert "- [x] `b.py` – 0 findings" in text
+    assert "- [ ] `c/d.py`" in text
+    assert "## Findings\n\nF1 · warning · smell · a.py:3 – too long\n" in text
+    assert text.endswith("F2 · critical · security · a.py – eval\n")
+
+    more = parse_audit_reply(_reply(_item(path="c/d.py", message="dup")), ["c/d.py"])
+    text = record_batch(text, files[2:], more)
+    assert [f.id for f in parse_findings(text)] == [1, 2, 3]
+    assert parse_findings(text)[2] == AuditFinding("smell", "warning", "c/d.py", "dup", None, 3)
+    assert parse_findings(text)[0].line == 3
+    assert all(f.status == "done" for f in parse_inventory(text))
+
+
+def test_record_batch_without_findings_creates_no_section() -> None:
+    files = [InventoryFile("a.py")]
+    text = render_audit(files, base="abc", date="2026-11-20", title="t")
+    text = record_batch(text, files, ())
+    assert "- [x] `a.py` – 0 findings" in text
+    assert "## Findings" not in text
+    assert parse_findings(text) == []
+
+
+def test_record_batch_keeps_later_sections_after_findings() -> None:
+    files = [InventoryFile("a.py"), InventoryFile("b.py")]
+    text = render_audit(files, base="abc", date="2026-11-20", title="t")
+    text = record_batch(text, files[:1], parse_audit_reply(_reply(_item()), ["a.py"]))
+    text += "\n## Milestones\n\n### M1 [ ] Audit: x\n"
+    text = record_batch(text, files[1:], parse_audit_reply(_reply(_item(path="b.py")), ["b.py"]))
+    assert [f.id for f in parse_findings(text)] == [1, 2]
+    assert text.endswith("\n## Milestones\n\n### M1 [ ] Audit: x\n")
+    assert text.index("F2 ·") < text.index("## Milestones")
+
+
+def test_record_batch_rejects_foreign_paths() -> None:
+    files = [InventoryFile("a.py"), InventoryFile("b.py")]
+    text = render_audit(files, base="abc", date="2026-11-20", title="t")
+    with pytest.raises(AuditError, match="outside the batch: b.py"):
+        record_batch(text, files[:1], [AuditFinding("smell", "warning", "b.py", "x")])
+
+
+def test_parse_findings_rejects_garbage_and_handles_colons() -> None:
+    files = [InventoryFile("odd:1.py")]
+    text = render_audit(files, base="abc", date="2026-11-20", title="t")
+    found = parse_audit_reply(_reply(_item(path="odd:1.py", line=2)), ["odd:1.py"])
+    text = record_batch(text, files, found)
+    assert parse_findings(text) == [AuditFinding("smell", "warning", "odd:1.py", "too long", 2, 1)]
+    with pytest.raises(AuditError, match="unreadable finding"):
+        parse_findings(text + "F2 nonsense\n")
