@@ -2,6 +2,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -525,7 +526,12 @@ def test_fix_outside_a_repository(tmp_path: Path) -> None:
 
 
 def test_cli_fix_and_scan_flags_do_not_mix(repo: Path, capsys: pytest.CaptureFixture) -> None:
-    for argv in (["--fix", "--dry-run"], ["--fix", "--tier", "S"], ["--fix", "--commit"]):
+    for argv in (
+        ["--fix", "--dry-run"],
+        ["--fix", "--tier", "S"],
+        ["--fix", "--commit"],
+        ["--fix", "--jobs", "2"],
+    ):
         with pytest.raises(SystemExit) as exc:
             main(["audit", "--path", str(repo), *argv])
         assert exc.value.code == 2
@@ -715,3 +721,56 @@ def test_every_worker_has_its_own_adapter_and_never_shares_it(repo: Path) -> Non
 def test_jobs_above_one_needs_an_adapter_factory(repo: Path) -> None:
     with pytest.raises(ValueError, match="new_adapter"):
         run_audit(repo, Scanner(CLEAN), io.StringIO(), planner=lambda: FixPlanner(), jobs=2)
+
+
+def _fake_claude_config(directory: Path) -> Path:
+    script = directory / "fake-claude"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "prompt = sys.stdin.read()\n"
+        "path = next(p for p in ('README.md', 'docs/guide.md', 'src/a.py') if p in prompt)\n"
+        "finding = {'severity': 'warning', 'category': 'smell', 'message': 'x', 'path': path}\n"
+        "print(json.dumps({'is_error': False, 'result': json.dumps({'findings': [finding]})}))\n"
+    )
+    script.chmod(0o755)
+    config = directory / "config.toml"
+    config.write_text(
+        f'[agents.rev]\nadapter = "claude"\ncommand = "{script}"\n[routes.review]\nM = ["rev"]\n'
+        f'[routes.plan_roadmap]\nL = ["rev"]\n',
+        encoding="utf-8",
+    )
+    return config
+
+
+def test_cli_jobs_scans_every_file_once_through_the_real_route(
+    repo: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    elsewhere = tmp_path_factory.mktemp("config")
+    monkeypatch.setenv("XDG_STATE_HOME", str(elsewhere / "state"))
+    config = _fake_claude_config(elsewhere)
+    main(
+        ["--config", str(config), "audit", "--path", str(repo), "--jobs", "2", "--max-batches", "3"]
+    )
+    files = parse_inventory(audit_text(repo))
+    assert {f.path for f in files if f.status == "done"} == {
+        "README.md",
+        "docs/guide.md",
+        "src/a.py",
+        "src/b.py",
+    }
+    assert sorted(f.path for f in parse_findings(audit_text(repo))) == sorted(REVIEWED)
+
+
+def test_dry_run_with_jobs_names_the_workers(
+    repo: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    elsewhere = tmp_path_factory.mktemp("config")
+    monkeypatch.setenv("XDG_STATE_HOME", str(elsewhere / "state"))
+    config = _fake_claude_config(elsewhere)
+    code = main(["--config", str(config), "audit", "--path", str(repo), "--dry-run", "--jobs", "3"])
+    assert code == EXIT_OK and "3 workers" in capsys.readouterr().out
+    assert not (repo / "docs" / "AUDIT.md").exists()

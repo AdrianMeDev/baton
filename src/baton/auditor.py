@@ -388,6 +388,7 @@ def run_audit_command(
     tier: str | None = None,
     timeout: float = DEFAULT_AGENT_TIMEOUT,
     max_batches: int | None = None,
+    jobs: int = 1,
     commit: bool = False,
     dry_run: bool = False,
     out: TextIO | None = None,
@@ -419,6 +420,8 @@ def run_audit_command(
             max_batches=max_batches,
             timeout=timeout,
             commit=commit,
+            jobs=jobs,
+            new_adapter=select_adapter,
         )
 
     try:
@@ -428,6 +431,8 @@ def run_audit_command(
         batches = _batches(repo, text)
         skipped = sum(f.status == "skipped" for f in files)
         say(out, f"{len(files)} files, {skipped} skipped, {len(batches)} batches still open.")
+        if jobs > 1:
+            say(out, f"{jobs} workers")
         adapter = select_adapter()
         say(out, "Command (cwd = empty temp dir):")
         say(out, "  " + " ".join(shlex.quote(a) for a in adapter.argv("<prompt>")))
