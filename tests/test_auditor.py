@@ -2,13 +2,21 @@ import io
 import json
 import os
 import subprocess
+import sys
+import threading
 from pathlib import Path
 
 import pytest
 
 from baton.adapter import AgentResult
-from baton.audit import MAX_FILE_CHARS, parse_findings, parse_inventory, validate_audit_plan
-from baton.auditor import run_audit, run_audit_fix
+from baton.audit import (
+    MAX_FILE_CHARS,
+    next_batch,
+    parse_findings,
+    parse_inventory,
+    validate_audit_plan,
+)
+from baton.auditor import _pending_batches, run_audit, run_audit_fix
 from baton.cli import main
 from baton.next import EXIT_EXHAUSTED, EXIT_FAILED, EXIT_OK, EXIT_STOPPED
 from baton.roadmap import next_milestone, parse_roadmap
@@ -159,6 +167,21 @@ def test_full_run_marks_every_reviewable_file_and_records_findings(repo: Path) -
     assert [f.id for f in parse_findings(audit_text(repo))] == [1, 2, 3, 4]
     assert len(scanner.prompts) == 3  # one batch per folder
     assert validate_audit_plan(audit_text(repo)) == []
+
+
+def test_pending_batches_match_repeated_next_batch_and_skip_closed_files(repo: Path) -> None:
+    run(repo, Scanner(CLEAN), max_batches=1)  # closes the first batch
+    text = audit_text(repo)
+    expected = []
+    files = parse_inventory(text)
+    while batch := next_batch(files):
+        expected.append([f.path for f in batch])
+        paths = {f.path for f in batch}
+        files = [f for f in files if f.path not in paths]
+    got = [[f.path for f, _ in b] for b in _pending_batches(repo, text)]
+    assert got == expected
+    assert "README.md" not in {p for b in got for p in b}
+    assert all(c for b in _pending_batches(repo, text) for _, c in b)
 
 
 def test_second_run_makes_no_scan_or_plan_call(repo: Path) -> None:
@@ -503,7 +526,12 @@ def test_fix_outside_a_repository(tmp_path: Path) -> None:
 
 
 def test_cli_fix_and_scan_flags_do_not_mix(repo: Path, capsys: pytest.CaptureFixture) -> None:
-    for argv in (["--fix", "--dry-run"], ["--fix", "--tier", "S"], ["--fix", "--commit"]):
+    for argv in (
+        ["--fix", "--dry-run"],
+        ["--fix", "--tier", "S"],
+        ["--fix", "--commit"],
+        ["--fix", "--jobs", "2"],
+    ):
         with pytest.raises(SystemExit) as exc:
             main(["audit", "--path", str(repo), *argv])
         assert exc.value.code == 2
@@ -516,3 +544,233 @@ def test_cli_fix_and_scan_flags_do_not_mix(repo: Path, capsys: pytest.CaptureFix
 def test_cli_fix_reaches_the_precondition_checks(repo: Path, capsys: pytest.CaptureFixture) -> None:
     assert main(["audit", "--path", str(repo), "--fix", "--max-steps", "2"]) == EXIT_STOPPED
     assert "run `baton audit` first" in capsys.readouterr().out
+
+
+REVIEWED = ("README.md", "docs/guide.md", "src/a.py")  # first file of each of the three batches
+
+
+class Fleet:
+    """Thread-safe fake agents that answer by the file in the prompt; one instance per worker."""
+
+    def __init__(self, *, wait_for: dict[str, threading.Event] | None = None) -> None:
+        self.adapters: list[FleetAgent] = []
+        self.calls: dict[str, int] = {}
+        self.lock = threading.Lock()
+        self.fail: dict[str, AgentResult] = {}
+        self.exhaust: set[str] = set()
+        self.invalid_first = False
+        self.barrier: threading.Barrier | None = None
+        self.hold: dict[str, threading.Event] = {}  # path -> event the agent waits for
+        self.done: dict[str, threading.Event] = {}  # path -> set once the agent answered
+        self.wait_for = wait_for or {}
+
+    def new(self) -> "FleetAgent":
+        agent = FleetAgent(self)
+        self.adapters.append(agent)
+        return agent
+
+
+class FleetAgent:
+    def __init__(self, fleet: Fleet) -> None:
+        self.fleet = fleet
+        self.exhausted = False
+        self.busy = False
+        self.overlap = False
+
+    def argv(self, prompt: str) -> list[str]:
+        return ["fake-agent", prompt]
+
+    def run(self, prompt: str, cwd: Path, timeout: float) -> AgentResult:
+        fleet = self.fleet
+        self.overlap = self.overlap or self.busy
+        self.busy = True
+        try:
+            path = next(p for p in REVIEWED if p in prompt)
+            self.exhausted = False
+            with fleet.lock:
+                fleet.calls[path] = fleet.calls.get(path, 0) + 1
+                first = fleet.calls[path] == 1
+            if fleet.barrier:
+                fleet.barrier.wait(timeout=5)
+            if path in fleet.hold:
+                assert fleet.hold[path].wait(timeout=5)
+            if path in fleet.fail:
+                self.exhausted = path in fleet.exhaust
+                return fleet.fail[path]
+            if fleet.invalid_first and first:
+                return AgentResult(ok=True, text="not json")
+            if path in fleet.done:
+                fleet.done[path].set()
+            return AgentResult(ok=True, text=reply(finding(path)))
+        finally:
+            self.busy = False
+
+
+def run_parallel(repo: Path, fleet: Fleet, jobs: int = 3, **kw) -> tuple[int, str]:
+    out = io.StringIO()
+    planner = FixPlanner()
+    code = run_audit(
+        repo,
+        fleet.new(),
+        out,
+        planner=lambda: planner,
+        today="2026-11-20",
+        jobs=jobs,
+        new_adapter=fleet.new,
+        **kw,
+    )
+    return code, out.getvalue()
+
+
+def test_parallel_scan_runs_batches_at_the_same_time(repo: Path) -> None:
+    fleet = Fleet()
+    fleet.barrier = threading.Barrier(3)  # only passes when three agents run together
+    code, _ = run_parallel(repo, fleet)
+    assert code == EXIT_OK
+    assert sorted(fleet.calls) == sorted(REVIEWED)
+
+
+def test_parallel_result_equals_the_sequential_one_even_when_later_batches_finish_first(
+    repo: Path,
+) -> None:
+    fleet = Fleet()
+    fleet.hold = {"README.md": threading.Event()}
+    fleet.done = {"docs/guide.md": threading.Event(), "src/a.py": threading.Event()}
+
+    def release() -> None:
+        for event in fleet.done.values():
+            assert event.wait(timeout=5)
+        fleet.hold["README.md"].set()
+
+    releaser = threading.Thread(target=release)
+    releaser.start()
+    code, _ = run_parallel(repo, fleet)
+    releaser.join()
+    assert code == EXIT_OK
+    parallel = audit_text(repo)
+
+    (repo / "docs" / "AUDIT.md").unlink()
+    code, _ = run_parallel(repo, Fleet(), jobs=1)
+    assert code == EXIT_OK
+    assert audit_text(repo) == parallel
+    assert [f.id for f in parse_findings(parallel)] == [1, 2, 3]
+    assert [f.path for f in parse_findings(parallel)] == list(REVIEWED)
+
+
+def test_a_failed_batch_does_not_lose_the_finished_ones_and_a_rerun_finishes(repo: Path) -> None:
+    fleet = Fleet()
+    fleet.fail = {"docs/guide.md": AgentResult(ok=False, text="", error="boom")}
+    code, out = run_parallel(repo, fleet)
+    assert code == EXIT_FAILED and "boom" in out
+    statuses = {f.path: f.status for f in parse_inventory(audit_text(repo))}
+    assert statuses["docs/guide.md"] == "open"
+    assert statuses["README.md"] == statuses["src/a.py"] == "done"
+    assert [f.path for f in parse_findings(audit_text(repo))] == ["README.md", "src/a.py"]
+    again = Scanner(CLEAN)
+    assert run(repo, again)[0] == EXIT_OK
+    assert len(again.prompts) == 1 and "docs/guide.md" in again.prompts[0]
+    assert all(
+        f.status == "done" for f in parse_inventory(audit_text(repo)) if f.status != "skipped"
+    )
+    assert [f.id for f in parse_findings(audit_text(repo))] == [1, 2]  # no double recording
+
+
+def test_exhausted_beats_failed_and_the_rest_is_recorded(repo: Path) -> None:
+    fleet = Fleet()
+    fleet.fail = {
+        "README.md": AgentResult(ok=False, text="", error="boom"),
+        "docs/guide.md": AgentResult(ok=False, text="", error="quota"),
+    }
+    fleet.exhaust = {"docs/guide.md"}
+    code, out = run_parallel(repo, fleet)
+    assert code == EXIT_EXHAUSTED
+    assert "boom" in out and "quota" in out
+    assert [f.path for f in parse_findings(audit_text(repo))] == ["src/a.py"]
+    statuses = {f.path: f.status for f in parse_inventory(audit_text(repo))}
+    assert statuses["README.md"] == statuses["docs/guide.md"] == "open"
+
+
+def test_invalid_reply_is_retried_inside_the_worker(repo: Path) -> None:
+    fleet = Fleet()
+    fleet.invalid_first = True
+    code, out = run_parallel(repo, fleet)
+    assert code == EXIT_OK
+    assert sum(fleet.calls.values()) == 6 and out.count("was rejected") == 3
+    assert len(parse_findings(audit_text(repo))) == 3
+
+
+def test_max_batches_counts_started_batches_with_jobs(repo: Path) -> None:
+    fleet = Fleet()
+    code, out = run_parallel(repo, fleet, max_batches=2)
+    assert code == EXIT_OK and "Stopped after 2 batches" in out
+    assert sum(fleet.calls.values()) == 2
+    assert len([f for f in parse_inventory(audit_text(repo)) if f.status == "done"]) == 2
+    again = Scanner(CLEAN)
+    assert run(repo, again)[0] == EXIT_OK
+    assert len(again.prompts) == 1
+
+
+def test_every_worker_has_its_own_adapter_and_never_shares_it(repo: Path) -> None:
+    fleet = Fleet()
+    fleet.barrier = threading.Barrier(3)
+    run_parallel(repo, fleet)
+    assert len(fleet.adapters) == 3 and len(set(map(id, fleet.adapters))) == 3
+    assert not any(agent.overlap for agent in fleet.adapters)
+
+
+def test_jobs_above_one_needs_an_adapter_factory(repo: Path) -> None:
+    with pytest.raises(ValueError, match="new_adapter"):
+        run_audit(repo, Scanner(CLEAN), io.StringIO(), planner=lambda: FixPlanner(), jobs=2)
+
+
+def _fake_claude_config(directory: Path) -> Path:
+    script = directory / "fake-claude"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "prompt = sys.stdin.read()\n"
+        "path = next(p for p in ('README.md', 'docs/guide.md', 'src/a.py') if p in prompt)\n"
+        "finding = {'severity': 'warning', 'category': 'smell', 'message': 'x', 'path': path}\n"
+        "print(json.dumps({'is_error': False, 'result': json.dumps({'findings': [finding]})}))\n"
+    )
+    script.chmod(0o755)
+    config = directory / "config.toml"
+    config.write_text(
+        f'[agents.rev]\nadapter = "claude"\ncommand = "{script}"\n[routes.review]\nM = ["rev"]\n'
+        f'[routes.plan_roadmap]\nL = ["rev"]\n',
+        encoding="utf-8",
+    )
+    return config
+
+
+def test_cli_jobs_scans_every_file_once_through_the_real_route(
+    repo: Path, tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    elsewhere = tmp_path_factory.mktemp("config")
+    monkeypatch.setenv("XDG_STATE_HOME", str(elsewhere / "state"))
+    config = _fake_claude_config(elsewhere)
+    main(
+        ["--config", str(config), "audit", "--path", str(repo), "--jobs", "2", "--max-batches", "3"]
+    )
+    files = parse_inventory(audit_text(repo))
+    assert {f.path for f in files if f.status == "done"} == {
+        "README.md",
+        "docs/guide.md",
+        "src/a.py",
+        "src/b.py",
+    }
+    assert sorted(f.path for f in parse_findings(audit_text(repo))) == sorted(REVIEWED)
+
+
+def test_dry_run_with_jobs_names_the_workers(
+    repo: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    elsewhere = tmp_path_factory.mktemp("config")
+    monkeypatch.setenv("XDG_STATE_HOME", str(elsewhere / "state"))
+    config = _fake_claude_config(elsewhere)
+    code = main(["--config", str(config), "audit", "--path", str(repo), "--dry-run", "--jobs", "3"])
+    assert code == EXIT_OK and "3 workers" in capsys.readouterr().out
+    assert not (repo / "docs" / "AUDIT.md").exists()

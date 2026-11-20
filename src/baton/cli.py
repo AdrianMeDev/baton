@@ -219,6 +219,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-batches", type=int, metavar="N", help="stop after N batches; rerun to continue"
     )
     audit.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        metavar="N",
+        help="review up to N batches at the same time (default: %(default)s)",
+    )
+    audit.add_argument(
         "--commit", action="store_true", help="commit docs/AUDIT.md as 'docs: add code audit'"
     )
     audit.add_argument(
@@ -347,11 +354,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             dry_run=args.dry_run,
         )
     if args.command == "audit":
+        if args.jobs < 1:
+            parser.error("--jobs must be at least 1")
         if args.fix:
             scan_only = {
                 "--agent": args.agent,
                 "--tier": args.tier,
                 "--max-batches": args.max_batches,
+                "--jobs": None if args.jobs == 1 else args.jobs,
                 "--commit": args.commit,
                 "--dry-run": args.dry_run,
             }
@@ -382,6 +392,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             tier=args.tier,
             timeout=args.timeout,
             max_batches=args.max_batches,
+            jobs=args.jobs,
             commit=args.commit,
             dry_run=args.dry_run,
         )

@@ -432,6 +432,13 @@ def test_audit_parser_options() -> None:
     defaults = build_parser().parse_args(["audit"])
     assert defaults.max_batches is None and defaults.tier is None and defaults.dry_run is False
     assert defaults.commit is False and build_parser().parse_args(["audit", "--commit"]).commit
+    assert defaults.jobs == 1 and build_parser().parse_args(["audit", "--jobs", "4"]).jobs == 4
+
+
+def test_audit_rejects_jobs_below_one(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    with pytest.raises(SystemExit):
+        main(["audit", "--path", str(tmp_path), "--jobs", "0"])
+    assert "--jobs must be at least 1" in capsys.readouterr().err
 
 
 def test_audit_fix_parser_options() -> None:

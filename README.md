@@ -331,7 +331,7 @@ changes nothing.
 ### `baton audit`
 
 ```
-baton audit [--path DIR] [--agent NAME] [--tier {S,M,L}] [--max-batches N] [--commit] [--timeout S] [--dry-run]
+baton audit [--path DIR] [--agent NAME] [--tier {S,M,L}] [--max-batches N] [--jobs N] [--commit] [--timeout S] [--dry-run]
 baton audit --fix [--path DIR] [--max-steps N] [--max-hours H] [--no-merge] [--timeout S] [--verify-timeout S]
 ```
 
@@ -351,7 +351,8 @@ two phases with a human checkpoint in between, like `baton roadmap` and `baton a
    the prompt and runs read-only in an empty temporary directory. The reply is strict JSON; an
    invalid reply is retried once with the error, then the run stops and the batch stays open.
    After every batch the file is saved: `[x]` per file with its finding count and one line per
-   finding, `F<n> · severity · security|smell · path:line – message`.
+   finding, `F<n> · severity · security|smell · path:line – message`. `--jobs N` reviews up to N
+   batches at the same time (default 1); see **Parallel scan** below.
 3. **Plan.** When every file is reviewed, the `plan_roadmap` route (tier `L`) turns the findings
    into fix milestones (`### M1 [ ] Audit: <name>`, 3–8 commits each, security before smells) and
    a list of suggestions for new features. baton validates the reply (every critical and warning
@@ -365,8 +366,17 @@ git commit -m "docs: add code audit"`) or let `--commit` do it (needs a clean wo
 
 **Resume.** The scan never waits for cooldowns: when every agent of the route is limited it stops
 with exit code 3; run `baton audit` again to continue at the next open batch. A finished audit is
-a no-op. `--max-batches N` stops after N batches. `--dry-run` prints file, skip and batch counts,
-the command and the first prompt and changes nothing.
+a no-op. `--max-batches N` stops after N started batches. `--dry-run` prints file, skip and batch
+counts, the command and the first prompt (with `--jobs`, the number of workers) and changes nothing.
+
+**Parallel scan (`--jobs N`).** Only the scan runs in parallel; the plan and `--fix` stay
+sequential, and `--jobs` cannot be combined with `--fix`. Each worker has its own agent, but
+`docs/AUDIT.md` is written by one thread, in batch order, so the file and the `F<n>` ids are the
+same as with `--jobs 1`. If a batch fails or the route is exhausted, no new batch is started, the
+running ones finish and every finished batch is recorded; the exit code is 3 if any worker was
+exhausted, else 1, and a rerun continues at the open batches. The speed-up depends on the provider:
+subscription quotas are the bottleneck and more workers reach a usage limit sooner, while
+high-limit API routes gain most.
 
 **Phase 2 – fix (`baton audit --fix`).** Requires a complete scan, a valid fix plan and a
 committed, unmodified `docs/AUDIT.md`; otherwise it names the missing phase and exits with 2. It

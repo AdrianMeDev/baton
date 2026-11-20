@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import datetime
 import os
+import queue
 import shlex
 import sys
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import TextIO
 
@@ -125,13 +128,126 @@ def _open_batch(repo: Path, text: str) -> list[tuple[InventoryFile, str]]:
     ]
 
 
-def _batches(repo: Path, text: str) -> list[list[tuple[InventoryFile, str]]]:
-    """All remaining batches, for ``--dry-run`` (the scan itself fetches one at a time)."""
-    batches = []
+def _pending_batches(repo: Path, text: str) -> Iterator[list[tuple[InventoryFile, str]]]:
+    """The remaining batches in order; contents are read lazily, one batch per step."""
     while batch := _open_batch(repo, text):
-        batches.append(batch)
-        text = set_file_status(text, [f.path for f, _ in batch], "done", "dry run")
-    return batches
+        yield batch
+        text = set_file_status(text, [f.path for f, _ in batch], "done", "scheduled")
+
+
+def _batches(repo: Path, text: str) -> list[list[tuple[InventoryFile, str]]]:
+    """All remaining batches, for ``--dry-run``."""
+    return list(_pending_batches(repo, text))
+
+
+def _scan_batch(
+    adapter: Adapter, batch: list[tuple[InventoryFile, str]], timeout: float, out: TextIO
+):
+    """Review one batch and return its parsed findings."""
+    prompt = audit_prompt([(f.path, c) for f, c in batch])
+    return _ask(adapter, prompt, [f.path for f, _ in batch], timeout, out)
+
+
+class _LineOut:
+    """Thread-safe ``TextIO`` stand-in: each thread's output reaches ``out`` as whole lines."""
+
+    def __init__(self, out: TextIO) -> None:
+        self._out = out
+        self._lock = threading.Lock()
+        self._local = threading.local()
+
+    def write(self, text: str) -> int:
+        pending = getattr(self._local, "pending", "") + text
+        *lines, pending = pending.split("\n")
+        self._local.pending = pending
+        if lines:
+            with self._lock:
+                self._out.write("\n".join(lines) + "\n")
+        return len(text)
+
+    def flush(self) -> None:
+        with self._lock:
+            self._out.flush()
+
+
+def _scan_parallel(
+    repo: Path,
+    text: str,
+    path: Path,
+    adapters: list[Adapter],
+    out: TextIO,
+    *,
+    max_batches: int | None,
+    timeout: float,
+) -> tuple[str, bool]:
+    """Scan with one worker per adapter; results are recorded in batch order by this thread.
+
+    A stop ends new submissions; batches already running finish and every finished batch is
+    recorded (in order) before the strongest stop (exhausted beats failed) is raised. Returns the
+    new text and whether ``max_batches`` left batches open.
+    """
+    line_out = _LineOut(out)
+    free: queue.Queue[Adapter] = queue.Queue()
+    for adapter in adapters:
+        free.put(adapter)
+
+    def work(batch: list[tuple[InventoryFile, str]]):
+        adapter = free.get()
+        try:
+            return _scan_batch(adapter, batch, timeout, line_out)
+        finally:
+            free.put(adapter)
+
+    batches = _pending_batches(repo, text)
+    running: dict[Future, int] = {}
+    queued: dict[int, list[tuple[InventoryFile, str]]] = {}
+    results: dict[int, object] = {}
+    stops: list[_Stop] = []
+    started = recorded = 0
+    capped = False
+
+    def record(index: int) -> str:
+        findings = results.pop(index)
+        return record_batch(text, [f for f, _ in queued.pop(index)], findings)
+
+    with ThreadPoolExecutor(len(adapters)) as pool:
+        while True:
+            while not stops and not capped and len(running) < len(adapters):
+                if max_batches is not None and started >= max_batches:
+                    capped = next(batches, None) is not None
+                    break
+                batch = next(batches, None)
+                if batch is None:
+                    break
+                started += 1
+                say(out, f"Batch {started}: {len(batch)} files ({batch[0][0].path} ...)")
+                queued[started - 1] = batch
+                running[pool.submit(work, batch)] = started - 1
+            if not running:
+                break
+            finished, _ = wait(running, return_when=FIRST_COMPLETED)
+            for future in finished:
+                index = running.pop(future)
+                try:
+                    results[index] = future.result()
+                except _Stop as stop:
+                    stops.append(stop)
+                except _ERRORS as exc:
+                    stops.append(_Stop(EXIT_FAILED, f"Error: {exc}"))
+            while recorded in results:
+                text = record(recorded)
+                _write(path, text)
+                recorded += 1
+    for index in sorted(results):  # after a stop: whatever finished, still in order
+        text = record(index)
+        _write(path, text)
+    if stops:
+        strongest = max(stops, key=lambda stop: stop.code)
+        for stop in stops:
+            if stop is not strongest:
+                say(out, str(stop))
+        raise strongest
+    return text, capped
 
 
 def _ask(adapter: Adapter, prompt: str, paths: list[str], timeout: float, out: TextIO):
@@ -208,11 +324,19 @@ def run_audit(
     max_batches: int | None = None,
     timeout: float = DEFAULT_AGENT_TIMEOUT,
     commit: bool = False,
+    jobs: int = 1,
+    new_adapter: Callable[[], Adapter] | None = None,
 ) -> int:
     """Scan every open batch of ``docs/AUDIT.md`` (created if missing), then plan the fixes.
 
     ``planner`` is only called when the scan is complete and the fix plan is missing or invalid.
+    ``jobs > 1`` reviews that many batches at once; each extra worker gets its own adapter from
+    ``new_adapter``.
     """
+    if jobs < 1:
+        raise ValueError("jobs must be at least 1")
+    if jobs > 1 and new_adapter is None:
+        raise ValueError("jobs > 1 needs new_adapter")
     date = today or datetime.date.today().isoformat()
     try:
         _check_repo(repo)
@@ -220,18 +344,24 @@ def run_audit(
             _check_clean(repo)
         text = _load_or_create(repo, out, date)
         path = repo / AUDIT_FILE
-        done = 0
-        while batch := _open_batch(repo, text):
-            if max_batches is not None and done >= max_batches:
-                say(out, f"Stopped after {done} batches; rerun `baton audit` to continue.")
+        if jobs > 1:
+            assert new_adapter is not None
+            adapters = [adapter, *(new_adapter() for _ in range(jobs - 1))]
+            text, capped = _scan_parallel(
+                repo, text, path, adapters, out, max_batches=max_batches, timeout=timeout
+            )
+            if capped:
+                say(out, f"Stopped after {max_batches} batches; rerun `baton audit` to continue.")
                 return EXIT_OK
-            paths = [f.path for f, _ in batch]
-            say(out, f"Batch {done + 1}: {len(batch)} files ({paths[0]} ...)")
-            prompt = audit_prompt([(f.path, c) for f, c in batch])
-            findings = _ask(adapter, prompt, paths, timeout, out)
-            text = record_batch(text, [f for f, _ in batch], findings)
-            _write(path, text)
-            done += 1
+        else:
+            for done, batch in enumerate(_pending_batches(repo, text)):
+                if max_batches is not None and done >= max_batches:
+                    say(out, f"Stopped after {done} batches; rerun `baton audit` to continue.")
+                    return EXIT_OK
+                say(out, f"Batch {done + 1}: {len(batch)} files ({batch[0][0].path} ...)")
+                findings = _scan_batch(adapter, batch, timeout, out)
+                text = record_batch(text, [f for f, _ in batch], findings)
+                _write(path, text)
         files, found = len(parse_inventory(text)), len(parse_findings(text))
         say(out, f"Scan complete: {files} files, {found} findings.")
         if validate_audit_plan(text):
@@ -258,6 +388,7 @@ def run_audit_command(
     tier: str | None = None,
     timeout: float = DEFAULT_AGENT_TIMEOUT,
     max_batches: int | None = None,
+    jobs: int = 1,
     commit: bool = False,
     dry_run: bool = False,
     out: TextIO | None = None,
@@ -289,6 +420,8 @@ def run_audit_command(
             max_batches=max_batches,
             timeout=timeout,
             commit=commit,
+            jobs=jobs,
+            new_adapter=select_adapter,
         )
 
     try:
@@ -298,6 +431,8 @@ def run_audit_command(
         batches = _batches(repo, text)
         skipped = sum(f.status == "skipped" for f in files)
         say(out, f"{len(files)} files, {skipped} skipped, {len(batches)} batches still open.")
+        if jobs > 1:
+            say(out, f"{jobs} workers")
         adapter = select_adapter()
         say(out, "Command (cwd = empty temp dir):")
         say(out, "  " + " ".join(shlex.quote(a) for a in adapter.argv("<prompt>")))
