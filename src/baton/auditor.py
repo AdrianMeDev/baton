@@ -11,6 +11,7 @@ import datetime
 import os
 import shlex
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO
 
@@ -19,6 +20,7 @@ from baton.audit import (
     BATCH_CHARS,
     AuditError,
     InventoryFile,
+    assemble_audit_plan,
     build_inventory,
     next_batch,
     parse_audit_reply,
@@ -29,9 +31,10 @@ from baton.audit import (
     record_batch,
     render_audit,
     set_file_status,
+    validate_audit_plan,
 )
 from baton.config import ConfigError, find_config_path, load_config
-from baton.git import GitError, head, is_repo
+from baton.git import GitError, commit_all, dirty_paths, head, is_repo
 from baton.git import _git as git_output
 from baton.limits import LimitStateError, LimitStore
 from baton.next import (
@@ -41,22 +44,21 @@ from baton.next import (
     EXIT_OK,
     EXIT_STOPPED,
 )
-from baton.prompt import audit_prompt, audit_retry_prompt
+from baton.prompt import (
+    audit_plan_prompt,
+    audit_plan_retry_prompt,
+    audit_prompt,
+    audit_retry_prompt,
+)
 from baton.review import run_isolated_review
-from baton.routed import RoutedAdapter, say
+from baton.roadmapper import _guarded, _Stop, gather_context
+from baton.routed import RoutedAdapter, RoutedPlanner, say
 from baton.router import resolve_route
 
 AUDIT_FILE = "docs/AUDIT.md"
 ATTEMPTS = 2  # the first reply plus one retry with the validation error
+COMMIT_MESSAGE = "docs: add code audit"
 _ERRORS = (AuditError, ConfigError, GitError, LimitStateError, OSError)
-
-
-class _Stop(Exception):
-    """End the run with ``code`` after ``message`` was reported."""
-
-    def __init__(self, code: int, message: str) -> None:
-        self.code = code
-        super().__init__(message)
 
 
 def _write(path: Path, text: str) -> None:
@@ -149,19 +151,71 @@ def _ask(adapter: Adapter, prompt: str, paths: list[str], timeout: float, out: T
     )
 
 
+def _check_clean(repo: Path) -> None:
+    """``--commit`` stages everything, so it needs a tree where only the report is new."""
+    others = [p for p in dirty_paths(repo) if p != AUDIT_FILE]
+    if others:
+        listing = "".join(f"\n  {p}" for p in others)
+        raise _Stop(
+            EXIT_STOPPED,
+            f"--commit needs a clean working tree, but there are uncommitted changes:{listing}",
+        )
+
+
+def _plan(repo: Path, text: str, adapter: Adapter, out: TextIO, date: str, timeout: float) -> str:
+    """Fix milestones and suggestions for the findings; ``text`` is returned unchanged on a stop."""
+    findings = parse_findings(text)
+    say(out, f"Planning fixes for {len(findings)} findings ...")
+    prompt = audit_plan_prompt(findings, gather_context(repo))
+    current, errors = prompt, []
+    for attempt in range(1, ATTEMPTS + 1):
+        result = _guarded(adapter, current, repo, timeout)
+        candidate = assemble_audit_plan(text, result.text, date)
+        errors = validate_audit_plan(candidate)
+        if not errors:
+            return candidate
+        say(out, f"Attempt {attempt}: the plan was rejected:")
+        for error in errors:
+            say(out, f"  {error}")
+        current = audit_plan_retry_prompt(prompt, result.text, errors)
+    raise _Stop(
+        EXIT_FAILED,
+        f"No valid fix plan after {ATTEMPTS} attempts. The scan is saved; rerun to plan again.",
+    )
+
+
+def _finish(repo: Path, out: TextIO, *, commit: bool) -> None:
+    uncommitted = AUDIT_FILE in dirty_paths(repo)
+    if commit and uncommitted:
+        _check_clean(repo)
+        say(out, f"Committed: {commit_all(repo, COMMIT_MESSAGE)} {COMMIT_MESSAGE}")
+    elif uncommitted:
+        say(out, "Review it, then commit it (`baton audit --fix` needs it committed):")
+        say(out, f"  git add {AUDIT_FILE}")
+        say(out, f"  git commit -m {shlex.quote(COMMIT_MESSAGE)}")
+    say(out, "Then `baton audit --fix` works through the fix milestones.")
+
+
 def run_audit(
     repo: Path,
     adapter: Adapter,
     out: TextIO,
     *,
+    planner: Callable[[], Adapter],
     today: str | None = None,
     max_batches: int | None = None,
     timeout: float = DEFAULT_AGENT_TIMEOUT,
+    commit: bool = False,
 ) -> int:
-    """Scan every open batch of ``docs/AUDIT.md``, creating the file first if it is missing."""
+    """Scan every open batch of ``docs/AUDIT.md`` (created if missing), then plan the fixes.
+
+    ``planner`` is only called when the scan is complete and the fix plan is missing or invalid.
+    """
     date = today or datetime.date.today().isoformat()
     try:
         _check_repo(repo)
+        if commit:
+            _check_clean(repo)
         text = _load_or_create(repo, out, date)
         path = repo / AUDIT_FILE
         done = 0
@@ -171,14 +225,20 @@ def run_audit(
                 return EXIT_OK
             paths = [f.path for f, _ in batch]
             say(out, f"Batch {done + 1}: {len(batch)} files ({paths[0]} ...)")
-            findings = _ask(
-                adapter, audit_prompt([(f.path, c) for f, c in batch]), paths, timeout, out
-            )
+            prompt = audit_prompt([(f.path, c) for f, c in batch])
+            findings = _ask(adapter, prompt, paths, timeout, out)
             text = record_batch(text, [f for f, _ in batch], findings)
             _write(path, text)
             done += 1
-        total = len(parse_findings(text))
-        say(out, f"Scan complete: {len(parse_inventory(text))} files, {total} findings.")
+        files, found = len(parse_inventory(text)), len(parse_findings(text))
+        say(out, f"Scan complete: {files} files, {found} findings.")
+        if validate_audit_plan(text):
+            text = _plan(repo, text, planner(), out, date, timeout)
+            _write(path, text)
+            say(out, f"Wrote the fix plan to {AUDIT_FILE}.")
+        else:
+            say(out, "The fix plan is already in place.")
+        _finish(repo, out, commit=commit)
         return EXIT_OK
     except _Stop as stop:
         say(out, str(stop))
@@ -196,10 +256,11 @@ def run_audit_command(
     tier: str | None = None,
     timeout: float = DEFAULT_AGENT_TIMEOUT,
     max_batches: int | None = None,
+    commit: bool = False,
     dry_run: bool = False,
     out: TextIO | None = None,
 ) -> int:
-    """CLI entry: route ``review`` (tier M unless ``tier``) and scan the repository."""
+    """CLI entry: scan with the ``review`` route (tier M unless ``tier``), plan with tier L."""
     out = out or sys.stdout
 
     def select_adapter() -> RoutedAdapter:
@@ -207,13 +268,26 @@ def run_audit_command(
         route = resolve_route(config, "review", tier=tier, agent_name=agent_name)
         return RoutedAdapter(route, LimitStore(), out, review=True)
 
+    def select_planner() -> RoutedPlanner:
+        config = load_config(find_config_path(config_path))
+        route = resolve_route(config, "plan_roadmap", tier="L")
+        return RoutedPlanner(route, LimitStore(), out)
+
     if not dry_run:
         try:
             adapter = select_adapter()
         except _ERRORS as exc:
             say(out, f"Error: {exc}")
             return EXIT_FAILED
-        return run_audit(repo, adapter, out, max_batches=max_batches, timeout=timeout)
+        return run_audit(
+            repo,
+            adapter,
+            out,
+            planner=select_planner,
+            max_batches=max_batches,
+            timeout=timeout,
+            commit=commit,
+        )
 
     try:
         _check_repo(repo)

@@ -209,6 +209,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-batches", type=int, metavar="N", help="stop after N batches; rerun to continue"
     )
     audit.add_argument(
+        "--commit", action="store_true", help="commit docs/AUDIT.md as 'docs: add code audit'"
+    )
+    audit.add_argument(
         "--timeout",
         type=float,
         default=DEFAULT_AGENT_TIMEOUT,
@@ -320,6 +323,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             tier=args.tier,
             timeout=args.timeout,
             max_batches=args.max_batches,
+            commit=args.commit,
             dry_run=args.dry_run,
         )
     if args.command == "recheck":

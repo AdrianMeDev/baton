@@ -431,3 +431,4 @@ def test_audit_parser_options() -> None:
     assert (args.max_batches, args.agent, args.tier, args.dry_run) == (2, "a", "L", True)
     defaults = build_parser().parse_args(["audit"])
     assert defaults.max_batches is None and defaults.tier is None and defaults.dry_run is False
+    assert defaults.commit is False and build_parser().parse_args(["audit", "--commit"]).commit

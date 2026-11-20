@@ -7,10 +7,11 @@ from pathlib import Path
 import pytest
 
 from baton.adapter import AgentResult
-from baton.audit import MAX_FILE_CHARS, parse_findings, parse_inventory
+from baton.audit import MAX_FILE_CHARS, parse_findings, parse_inventory, validate_audit_plan
 from baton.auditor import run_audit
 from baton.cli import main
 from baton.next import EXIT_EXHAUSTED, EXIT_FAILED, EXIT_OK, EXIT_STOPPED
+from baton.roadmap import next_milestone, parse_roadmap
 
 
 def git(repo: Path, *args: str) -> str:
@@ -82,9 +83,45 @@ def repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def run(repo: Path, scanner: Scanner, **kw) -> tuple[int, str]:
+class FixPlanner:
+    """Plans one milestone that covers every critical and warning finding of the audit file."""
+
+    def __init__(self, *replies: str | None, action=None) -> None:
+        self.replies = list(replies)  # None: plan every finding; the last reply repeats
+        self.prompts: list[str] = []
+        self.action = action
+        self.exhausted = False
+
+    def argv(self, prompt: str) -> list[str]:
+        return ["fake-planner", prompt]
+
+    def run(self, prompt: str, cwd: Path, timeout: float) -> AgentResult:
+        self.prompts.append(prompt)
+        if self.action:
+            self.action(cwd)
+        reply = (
+            (self.replies.pop(0) if len(self.replies) > 1 else self.replies[0])
+            if self.replies
+            else None
+        )
+        if reply is not None:
+            return AgentResult(ok=True, text=reply)
+        found = parse_findings((cwd / "docs" / "AUDIT.md").read_text(encoding="utf-8"))
+        ids = ", ".join(f"F{f.id}" for f in found if f.severity != "informational")
+        milestones = (
+            "## Milestones\n\n### M1 [ ] Audit: Fix findings\n- **Goal:** Fix them.\n"
+            f"- **Includes:** {ids}\n- **Done when:** All fixed.\n- **Depends on:** -\n"
+            "- **Size:** M, ~4 commits\n\n"
+            if ids
+            else ""
+        )
+        return AgentResult(ok=True, text=f"{milestones}## Suggestions\n- Add CI.\n")
+
+
+def run(repo: Path, scanner: Scanner, planner: FixPlanner | None = None, **kw) -> tuple[int, str]:
     out = io.StringIO()
-    code = run_audit(repo, scanner, out, today="2026-11-20", **kw)
+    planner = planner or FixPlanner()
+    code = run_audit(repo, scanner, out, planner=lambda: planner, today="2026-11-20", **kw)
     return code, out.getvalue()
 
 
@@ -113,15 +150,18 @@ def test_full_run_marks_every_reviewable_file_and_records_findings(repo: Path) -
     }
     assert [f.id for f in parse_findings(audit_text(repo))] == [1, 2, 3, 4]
     assert len(scanner.prompts) == 3  # one batch per folder
+    assert validate_audit_plan(audit_text(repo)) == []
 
 
-def test_second_run_makes_no_scan_call(repo: Path) -> None:
+def test_second_run_makes_no_scan_or_plan_call(repo: Path) -> None:
     run(repo, Scanner(CLEAN))
-    again = Scanner(CLEAN)
-    code, out = run(repo, again)
+    again, replan = Scanner(CLEAN), FixPlanner()
+    before = audit_text(repo)
+    code, out = run(repo, again, replan)
     assert code == EXIT_OK
-    assert again.prompts == []
-    assert "Scan complete" in out
+    assert again.prompts == [] and replan.prompts == []
+    assert "already in place" in out
+    assert audit_text(repo) == before
 
 
 def test_skipped_files_never_reach_a_prompt(repo: Path) -> None:
@@ -134,7 +174,7 @@ def test_skipped_files_never_reach_a_prompt(repo: Path) -> None:
 
 
 def test_repo_is_untouched_apart_from_the_audit_file(repo: Path) -> None:
-    scanner = Scanner(CLEAN)
+    scanner = Scanner(reply(finding("README.md")))
     run(repo, scanner)
     assert git(repo, "status", "--porcelain", "--untracked-files=all") == "?? docs/AUDIT.md"
     assert all(cwd != repo for cwd in scanner.cwds)
@@ -173,9 +213,11 @@ def test_two_invalid_replies_stop_and_leave_the_batch_open(repo: Path) -> None:
 
 
 def test_failed_agent_stops_with_its_error(repo: Path) -> None:
-    code, out = run(repo, Scanner(AgentResult(ok=False, error="boom")))
+    planner = FixPlanner()
+    code, out = run(repo, Scanner(AgentResult(ok=False, error="boom")), planner)
     assert code == EXIT_FAILED
     assert "The agent failed: boom" in out
+    assert planner.prompts == []
 
 
 def test_exhausted_route_exits_3_and_a_rerun_continues(repo: Path) -> None:
@@ -192,8 +234,10 @@ def test_exhausted_route_exits_3_and_a_rerun_continues(repo: Path) -> None:
     assert code == EXIT_EXHAUSTED
     assert "Rerun `baton audit` to continue" in out
     assert sum(f.status == "done" for f in parse_inventory(audit_text(repo))) == 1
-    assert run(repo, Scanner(CLEAN))[0] == EXIT_OK
+    planner = FixPlanner()
+    assert run(repo, Scanner(CLEAN), planner)[0] == EXIT_OK
     assert not any(f.status == "open" for f in parse_inventory(audit_text(repo)))
+    assert len(planner.prompts) == 1
 
 
 def test_warns_when_head_moved_and_still_reads_the_base(repo: Path) -> None:
@@ -245,3 +289,107 @@ def test_dry_run_prints_counts_command_and_first_prompt_and_writes_nothing(
     assert "hunter2" not in out
     assert not (repo / "docs" / "AUDIT.md").exists()
     assert git(repo, "status", "--porcelain") == ""
+
+
+def _scan_with_findings() -> Scanner:
+    return Scanner(
+        reply(finding("README.md", severity="critical", category="security")),
+        reply(finding("docs/guide.md")),
+        reply(finding("src/a.py", severity="informational")),
+    )
+
+
+def test_planning_writes_milestones_that_parse_roadmap_accepts(repo: Path) -> None:
+    planner = FixPlanner()
+    code, out = run(repo, _scan_with_findings(), planner)
+    assert code == EXIT_OK
+    text = audit_text(repo)
+    assert validate_audit_plan(text) == []
+    milestone = next_milestone(parse_roadmap(text))
+    assert milestone is not None and milestone.id == "M1" and "F1, F2" in milestone.includes
+    assert "## Suggestions\n\n- Add CI." in text
+    assert "F1 · critical · security · README.md – too long" in planner.prompts[0]
+    assert "Planning fixes for 3 findings" in out
+    assert "git commit -m 'docs: add code audit'" in out
+    assert "baton audit --fix" in out
+    assert git(repo, "status", "--porcelain", "--untracked-files=all") == "?? docs/AUDIT.md"
+
+
+def test_invalid_plan_is_retried_once_with_the_errors(repo: Path) -> None:
+    planner = FixPlanner("## Suggestions\n- only ideas\n", None)
+    code, out = run(repo, _scan_with_findings(), planner)
+    assert code == EXIT_OK
+    assert "Attempt 1: the plan was rejected" in out
+    assert "finding F1 is not covered by any milestone" in planner.prompts[1]
+    assert validate_audit_plan(audit_text(repo)) == []
+
+
+def test_two_rejected_plans_leave_the_scan_saved_and_no_plan(repo: Path) -> None:
+    planner = FixPlanner("## Suggestions\n- only ideas\n")
+    code, out = run(repo, _scan_with_findings(), planner)
+    assert code == EXIT_FAILED
+    assert "No valid fix plan after 2 attempts" in out
+    assert len(planner.prompts) == 2
+    text = audit_text(repo)
+    assert "## Milestones" not in text and "## Suggestions" not in text
+    assert len(parse_findings(text)) == 3
+    fixed = FixPlanner()
+    assert run(repo, Scanner(CLEAN), fixed)[0] == EXIT_OK  # rerun plans without scanning
+    assert validate_audit_plan(audit_text(repo)) == []
+
+
+def test_planner_that_edits_the_tree_is_rejected(repo: Path) -> None:
+    planner = FixPlanner(action=lambda cwd: (cwd / "src" / "a.py").write_text("hacked\n"))
+    code, out = run(repo, _scan_with_findings(), planner)
+    assert code == EXIT_FAILED
+    assert "changed the working tree" in out
+    assert "## Milestones" not in audit_text(repo)
+
+
+def test_planner_that_commits_is_rejected(repo: Path) -> None:
+    def commit(cwd: Path) -> None:
+        (cwd / "x.txt").write_text("x\n")
+        git(cwd, "add", "-A")
+        git(cwd, "commit", "-qm", "sneaky")
+
+    code, out = run(repo, _scan_with_findings(), FixPlanner(action=commit))
+    assert code == EXIT_FAILED and "the agent committed" in out
+
+
+def test_exhausted_planner_exits_3(repo: Path) -> None:
+    planner = FixPlanner()
+    planner.run = lambda *a: (  # type: ignore[method-assign]
+        setattr(planner, "exhausted", True) or AgentResult(ok=False, error="no agents")
+    )
+    code, out = run(repo, _scan_with_findings(), planner)
+    assert code == EXIT_EXHAUSTED and "no agents" in out
+
+
+def test_no_critical_or_warning_findings_plan_suggestions_only(repo: Path) -> None:
+    planner = FixPlanner()
+    scanner = Scanner(CLEAN, CLEAN, reply(finding("src/a.py", severity="informational")))
+    code, _ = run(repo, scanner, planner)
+    assert code == EXIT_OK
+    text = audit_text(repo)
+    assert "## Milestones" not in text and "## Suggestions" in text
+    assert validate_audit_plan(text) == []
+
+
+def test_commit_flag_commits_the_finished_audit(repo: Path) -> None:
+    code, out = run(repo, _scan_with_findings(), commit=True)
+    assert code == EXIT_OK
+    assert git(repo, "log", "--format=%s", "-1") == "docs: add code audit"
+    assert git(repo, "status", "--porcelain") == ""
+    assert "Committed:" in out
+    again, replan = Scanner(CLEAN), FixPlanner()
+    code, out = run(repo, again, replan, commit=True)
+    assert code == EXIT_OK and again.prompts == [] and replan.prompts == []
+    assert "Committed" not in out
+
+
+def test_commit_flag_refuses_a_dirty_tree_before_scanning(repo: Path) -> None:
+    (repo / "notes.txt").write_text("wip\n")
+    scanner = Scanner(CLEAN)
+    code, out = run(repo, scanner, commit=True)
+    assert code == EXIT_STOPPED and "notes.txt" in out
+    assert scanner.prompts == [] and not (repo / "docs" / "AUDIT.md").exists()
