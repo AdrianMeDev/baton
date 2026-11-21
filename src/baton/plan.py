@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
 
+from baton.limits import parse_duration
+
 Status = Literal["open", "pending", "done", "skipped"]
 Tracking = Literal["tracked", "local", "none"]
 
@@ -28,6 +30,7 @@ _BULLET_FIELDS = {
     "done when": "done_when",
     "verify": "verify",
     "size": "size",
+    "verify-timeout": "verify_timeout",
 }
 
 
@@ -59,6 +62,7 @@ class Step:
     done_when: str = ""
     verify: str = ""
     size: str | None = None
+    verify_timeout: float | None = None  # seconds, from the ``Verify-Timeout`` bullet
     commit: str | None = None  # hash after ``[x] –``
     pending_on: str | None = None  # hash after ``[~] (on …)``
     start_line: int = 0  # 1-based, inclusive: the ``### n.`` heading
@@ -75,6 +79,7 @@ class Plan:
     steps: tuple[Step, ...]
     log: tuple[str, ...] = field(default=())
     baseline: str | None = None  # ``Baseline:`` header command
+    verify_timeout: float | None = None  # seconds, from the ``Verify-Timeout:`` header field
 
 
 def parse_milestone(value: str) -> MilestoneRef:
@@ -94,6 +99,13 @@ def _clean_command(value: str) -> str:
     return value
 
 
+def _seconds(value: str, line: int) -> float:
+    try:
+        return parse_duration(value.strip()).total_seconds()
+    except ValueError as exc:
+        raise PlanError(f"invalid Verify-Timeout {value.strip()!r}: {exc}", line) from None
+
+
 def _parse_header(lines: list[str]) -> tuple[str, dict[str, str]]:
     title = ""
     fields: dict[str, str] = {}
@@ -105,7 +117,14 @@ def _parse_header(lines: list[str]) -> tuple[str, dict[str, str]]:
         else:
             for part in line.split(" · "):
                 key, sep, value = part.partition(":")
-                if sep and key.strip() in ("Created", "Branch", "Base", "Milestone", "Baseline"):
+                if sep and key.strip() in (
+                    "Created",
+                    "Branch",
+                    "Base",
+                    "Milestone",
+                    "Baseline",
+                    "Verify-Timeout",
+                ):
                     fields[key.strip().lower()] = value.strip()
     return title, fields
 
@@ -121,11 +140,15 @@ def _parse_step(number: int, marker: str, rest: str, start: int, body: list[str]
         commit, rest = m[1], rest[m.end() :]
     values: dict[str, str] = {}
     current: str | None = None
-    for line in body:
+    timeout: float | None = None
+    for offset, line in enumerate(body, start + 1):
         b = _BULLET_RE.match(line)
         if b:
             current = _BULLET_FIELDS.get(b[1].strip().lower())
-            if current:
+            if current == "verify_timeout":
+                timeout = _seconds(b[2], offset)
+                current = None
+            elif current:
                 values[current] = b[2].strip()
         elif current and line.startswith((" ", "\t")) and line.strip():
             values[current] += "\n" + line.strip()
@@ -141,6 +164,7 @@ def _parse_step(number: int, marker: str, rest: str, start: int, body: list[str]
         status=status,
         message=rest.strip(),
         size=size,
+        verify_timeout=timeout,
         commit=commit,
         pending_on=pending_on,
         start_line=start,
@@ -193,6 +217,11 @@ def parse_plan(text: str) -> Plan:
             if line.strip():
                 log.append(line.strip().removeprefix("- ").strip())
 
+    header_timeout = None
+    if "verify-timeout" in fields:
+        at = next(i for i, ln in enumerate(lines[:steps_at], 1) if "Verify-Timeout:" in ln)
+        header_timeout = _seconds(fields["verify-timeout"], at)
+
     return Plan(
         title=title,
         created=fields.get("created"),
@@ -202,6 +231,7 @@ def parse_plan(text: str) -> Plan:
         steps=tuple(steps),
         log=tuple(log),
         baseline=_clean_command(fields.get("baseline", "")) or None,
+        verify_timeout=header_timeout,
     )
 
 

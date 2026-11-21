@@ -363,10 +363,26 @@ def _run_verify(step: Step, repo: Path, timeout: float) -> VerifyResult:
     return run_verify(step.verify, repo, timeout)
 
 
-def _verify_timed_out(out: TextIO, plan_path: Path, step: Step, timeout: float, date: str) -> int:
+def _verify_timeout(plan: Plan, step: Step, flag: float) -> float:
+    """The Verify timeout in seconds: the step's field, else the plan header's, else the flag."""
+    for value in (step.verify_timeout, plan.verify_timeout):
+        if value is not None:
+            return value
+    return flag
+
+
+def _verify_timed_out(
+    out: TextIO, plan_path: Path, plan: Plan, step: Step, timeout: float, date: str
+) -> int:
     """Stop on a Verify timeout: repairing would only wait out the same timeout again."""
     say(out, f"Verify timed out after {timeout:g}s")
-    say(out, "Raise the Verify timeout (--verify-timeout) and run again.")
+    if step.verify_timeout is not None:
+        hint = f"the step's Verify-Timeout field (step {step.number})"
+    elif plan.verify_timeout is not None:
+        hint = "the plan header's Verify-Timeout field"
+    else:
+        hint = "--verify-timeout"
+    say(out, f"Raise the Verify timeout ({hint}) and run again.")
     say(out, "Changes stay in the working tree; the step stays open.")
     _log(plan_path, f"step {step.number}: verify timed out", date)
     return EXIT_VERIFY_TIMEOUT
@@ -495,6 +511,7 @@ def _run_next(
         stop = _check_baseline(repo, plan, plan_path, verify_timeout, out, date)
         if stop is not None:
             return stop
+        step_timeout = _verify_timeout(plan, step, verify_timeout)
         adapter = select_adapter(step)
         raw_step = step_text(plan_path.read_text("utf-8"), step)
         prompt = implement_prompt(plan, step, raw_step)
@@ -548,7 +565,7 @@ def _run_next(
         if commit:
             sync_milestone(repo, plan, step, date)
         with _protect_plan(plan_path):
-            verify = _run_verify(step, repo, verify_timeout)
+            verify = _run_verify(step, repo, step_timeout)
         repairs = 0
         for escalated in (False, True):
             if not verify.verified or verify.passed or verify.timed_out:
@@ -574,7 +591,7 @@ def _run_next(
                 _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
                 return EXIT_FAILED
             with _protect_plan(plan_path):
-                verify = _run_verify(step, repo, verify_timeout)
+                verify = _run_verify(step, repo, step_timeout)
             cost = (
                 result.cost + repair.cost
                 if result.cost is not None and repair.cost is not None
@@ -582,7 +599,7 @@ def _run_next(
             )
             result = replace(result, cost=cost)
         if verify.timed_out:
-            return _verify_timed_out(out, plan_path, step, verify_timeout, date)
+            return _verify_timed_out(out, plan_path, plan, step, step_timeout, date)
         if verify.verified and not verify.passed:
             say(out, f"Verify failed ({_verify_failure(verify)}): {verify.command}")
             say(out, verify.output_tail)
@@ -651,9 +668,9 @@ def _run_next(
                     _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
                     return EXIT_FAILED
                 with _protect_plan(plan_path):
-                    verify = _run_verify(step, repo, verify_timeout)
+                    verify = _run_verify(step, repo, step_timeout)
                 if verify.timed_out:
-                    return _verify_timed_out(out, plan_path, step, verify_timeout, date)
+                    return _verify_timed_out(out, plan_path, plan, step, step_timeout, date)
                 if verify.verified and not verify.passed:
                     say(out, f"Verify failed after the review fix ({_verify_failure(verify)}).")
                     say(out, verify.output_tail)

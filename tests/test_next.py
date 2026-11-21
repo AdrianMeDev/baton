@@ -2297,3 +2297,37 @@ def test_dry_run_prints_baseline_without_running_it(repo, chain, routed_executio
     code, out = invoke_chain(repo, chain, dry_run=True)
     assert code == EXIT_OK
     assert f"Baseline: touch {marker}" in out and not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("header", "step", "flag", "expected", "hint"),
+    [
+        (None, None, 7, "7s", "--verify-timeout"),
+        ("20m", None, 7, "1200s", "plan header"),
+        ("20m", "1h", 7, "3600s", "step 1"),
+    ],
+)
+def test_verify_timeout_precedence_step_over_header_over_flag(
+    repo, monkeypatch, header, step, flag, expected, hint
+):
+    from baton.verify import VerifyResult
+
+    text = (repo / ".agent-plan.md").read_text()
+    if header:
+        text = text.replace("Milestone: none", f"Milestone: none\nVerify-Timeout: {header}")
+    if step:
+        text = text.replace(
+            "- **Verify:** `true`", f"- **Verify:** `true`\n- **Verify-Timeout:** {step}", 1
+        )
+    (repo / ".agent-plan.md").write_text(text)
+    seen = []
+
+    def verify(command, cwd, timeout):
+        seen.append(timeout)
+        return VerifyResult(True, False, None, True, "hung", command)
+
+    monkeypatch.setattr("baton.next.run_verify", verify)
+    code, out = run(repo, FakeAdapter(action=edit), verify_timeout=flag)
+    assert code == EXIT_VERIFY_TIMEOUT
+    assert seen == [float(expected[:-1])]
+    assert f"timed out after {expected}" in out and hint in out

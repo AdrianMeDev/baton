@@ -137,3 +137,16 @@ def test_assemble_plan_keeps_the_planners_baseline():
 
 def _valid_reply() -> str:
     return (FIXTURES / "generated_valid.md").read_text(encoding="utf-8")
+
+
+def test_validate_plan_reports_a_bad_verify_timeout():
+    text = (FIXTURES / "generated_valid.md").read_text(encoding="utf-8")
+    text = text.replace("\n## Goal", "\nVerify-Timeout: soon\n\n## Goal", 1)
+    assert "Verify-Timeout" in validate_plan(text, "M2")[0]
+
+
+def test_assemble_plan_keeps_the_planners_verify_timeout():
+    reply = (FIXTURES / "generated_valid.md").read_text(encoding="utf-8")
+    reply = reply.replace("\n## Goal", "\nVerify-Timeout: 20m\n\n## Goal", 1)
+    plan = parse_plan(assemble_plan(reply, HEADER))
+    assert plan.verify_timeout == 1200

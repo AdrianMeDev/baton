@@ -103,7 +103,11 @@ def assemble_plan(output: str, header: PlanHeader) -> str:
     body = body[:end]
     section = next((i for i, ln in enumerate(body) if ln.startswith("## ")), len(body))
     rest = body[section:]
-    baseline = [ln.strip() for ln in body[1:section] if ln.strip().startswith("Baseline:")][:1]
+    baseline = [
+        ln.strip()
+        for ln in body[1:section]
+        if ln.strip().startswith(("Baseline:", "Verify-Timeout:"))
+    ]
     while rest and not rest[-1].strip():
         rest.pop()
     return "\n".join([body[0].rstrip(), *header.lines(), *baseline, "", *rest, "", "## Log", ""])
