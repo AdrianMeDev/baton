@@ -265,3 +265,15 @@ def test_plan_prompt_limits_verify_to_one_short_command():
     prompt = _plan_prompt()
     assert "exactly\n  one shell command in backticks" in prompt.replace("\n  one", "\n  one")
     assert "container matrices" in prompt and "belong to CI" in prompt
+
+
+def test_implement_fix_and_handoff_prompts_carry_the_verify_and_container_rules():
+    from baton.prompt import fix_prompt, handoff_prompt
+    from baton.verify import VerifyResult
+
+    original, _ = _build()
+    failure = VerifyResult(True, False, 1, False, "boom", "pytest -q")
+    for prompt in (original, fix_prompt(original, failure), handoff_prompt(original, "a", "diff")):
+        assert "baton runs the step's Verify command itself" in prompt
+        assert "Never run container builds or matrices" in prompt
+        assert "`container-matrix.sh`, `docker`, `podman`" in prompt

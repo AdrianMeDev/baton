@@ -46,6 +46,10 @@ Rules:
 - Include the tests this step asks for and follow the project's existing conventions.
 - Re-read the files you touch before editing; do not rely on assumptions.
 - If the step cannot be done as written, stop and explain why instead of widening the scope.
+- baton runs the step's Verify command itself after you finish. Do not run that command or
+  repeat the full check suite; quick targeted tests while you work are fine.
+- Never run container builds or matrices (`container-matrix.sh`, `docker`, `podman`). CI runs
+  them; the container-side checks are written as code.
 - When finished, reply with a short summary of what you changed.
 """
     + ROADMAP_PROBLEM_RULE
