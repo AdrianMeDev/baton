@@ -281,6 +281,9 @@ Rules:
   concrete command) and Size (S, M or L: how hard the step is for an agent).
 - The milestone's Goal, Includes and Done when are the task and the acceptance criteria. The last
   step's Done when includes the milestone's Done when and the roadmap's Definition of done.
+- Baseline is the project's full check (tests, lint, type check). It must already pass on the base
+  commit and must not use commands, files or tests that the steps create. Leave the line out if
+  the project has no such command.
 - State assumptions in the plan instead of asking questions.
 """
     + ROADMAP_PROBLEM_RULE
@@ -289,6 +292,7 @@ Rules:
 PLAN_FORMAT = """\
 # Plan: <short title>
 Milestone: {milestone}
+Baseline: `<command>`
 
 ## Goal
 <2-3 sentences: what will work at the end, and for whom>
