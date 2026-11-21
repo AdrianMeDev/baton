@@ -252,3 +252,25 @@ def test_changed_paths_takes_backticked_paths_only():
         ),
     )
     assert changed_paths(step) == ["src/a.py", "Foo.bar"]
+
+
+def test_verify_timeout_header_and_step_field():
+    text = _plan_with_header("Created: 2026-11-21 · Verify-Timeout: 30m").replace(
+        "- **Verify:** `true`\n", "- **Verify:** `true`\n- **Verify-Timeout:** 1h\n"
+    )
+    plan = parse_plan(text)
+    assert plan.verify_timeout == 1800 and plan.steps[0].verify_timeout == 3600
+    assert plan.steps[0].verify == "`true`"
+
+
+def test_no_verify_timeout_is_none():
+    plan = parse_plan(_plan_with_header("Created: 2026-11-21"))
+    assert plan.verify_timeout is None and plan.steps[0].verify_timeout is None
+
+
+def test_bad_verify_timeout_is_a_plan_error_with_the_line():
+    with pytest.raises(PlanError, match=r"line 2: invalid Verify-Timeout 'soon'"):
+        parse_plan(_plan_with_header("Verify-Timeout: soon"))
+    bad = _plan_with_header("Created: x").replace("`true`\n", "`true`\n- **Verify-Timeout:** 0m\n")
+    with pytest.raises(PlanError, match=r"line 8: invalid Verify-Timeout '0m'"):
+        parse_plan(bad)

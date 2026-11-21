@@ -14,6 +14,7 @@ from baton.next import (
     EXIT_OK,
     EXIT_ROADMAP_PROBLEM,
     EXIT_STOPPED,
+    EXIT_VERIFY_TIMEOUT,
     run_next,
     run_next_command,
 )
@@ -740,22 +741,25 @@ def test_fix_quota_handoff_keeps_all_participants(repo, repair_chain, routed_exe
     assert "repair-needed" in agents["third"].prompts[0]
 
 
-def test_timed_out_verify_repairs_and_reruns_original_command(repo, repair_chain, monkeypatch):
-    from baton.verify import VerifyResult, run_verify
+def test_timed_out_verify_stops_without_starting_a_fix_agent(repo, repair_chain, monkeypatch):
+    from baton.verify import VerifyResult
 
     calls = []
 
     def verify(command, cwd, timeout):
-        calls.append((command, cwd, timeout))
-        if len(calls) == 1:
-            return VerifyResult(True, False, None, True, "test hung", command)
-        return run_verify(command, cwd, timeout)
+        calls.append(command)
+        return VerifyResult(True, False, None, True, "test hung", command)
 
     monkeypatch.setattr("baton.next.run_verify", verify)
-    assert invoke_chain(repo, repair_chain, verify_timeout=3)[0] == EXIT_OK
-    assert len(calls) == 2 and calls[0] == calls[1]
-    assert "Outcome: timed out" in repair_chain[1]["second"].prompts[0]
-    assert "test hung" in repair_chain[1]["second"].prompts[0]
+    before = head(repo)
+    code, out = invoke_chain(repo, repair_chain, verify_timeout=3)
+    assert code == EXIT_VERIFY_TIMEOUT
+    assert len(calls) == 1
+    assert repair_chain[1]["second"].prompts == []
+    assert "Verify timed out after 3s" in out and "--verify-timeout" in out
+    assert head(repo) == before
+    assert "[ ]" in (repo / ".agent-plan.md").read_text()
+    assert "verify timed out" in (repo / ".agent-plan.md").read_text()
 
 
 @pytest.mark.parametrize("tier", ["S", "M", "L"])
@@ -2293,3 +2297,82 @@ def test_dry_run_prints_baseline_without_running_it(repo, chain, routed_executio
     code, out = invoke_chain(repo, chain, dry_run=True)
     assert code == EXIT_OK
     assert f"Baseline: touch {marker}" in out and not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("header", "step", "flag", "expected", "hint"),
+    [
+        (None, None, 7, "7s", "--verify-timeout"),
+        ("20m", None, 7, "1200s", "plan header"),
+        ("20m", "1h", 7, "3600s", "step 1"),
+    ],
+)
+def test_verify_timeout_precedence_step_over_header_over_flag(
+    repo, monkeypatch, header, step, flag, expected, hint
+):
+    from baton.verify import VerifyResult
+
+    text = (repo / ".agent-plan.md").read_text()
+    if header:
+        text = text.replace("Milestone: none", f"Milestone: none\nVerify-Timeout: {header}")
+    if step:
+        text = text.replace(
+            "- **Verify:** `true`", f"- **Verify:** `true`\n- **Verify-Timeout:** {step}", 1
+        )
+    (repo / ".agent-plan.md").write_text(text)
+    seen = []
+
+    def verify(command, cwd, timeout):
+        seen.append(timeout)
+        return VerifyResult(True, False, None, True, "hung", command)
+
+    monkeypatch.setattr("baton.next.run_verify", verify)
+    code, out = run(repo, FakeAdapter(action=edit), verify_timeout=flag)
+    assert code == EXIT_VERIFY_TIMEOUT
+    assert seen == [float(expected[:-1])]
+    assert f"timed out after {expected}" in out and hint in out
+
+
+def test_verify_run_is_journaled_with_duration_and_timeout_flag(repo, monkeypatch):
+    from baton.runs import RunStore
+    from baton.verify import VerifyResult
+
+    monkeypatch.setattr(
+        "baton.next.run_verify",
+        lambda command, cwd, timeout: VerifyResult(True, False, None, True, "hung", command),
+    )
+    assert run(repo, FakeAdapter(action=edit))[0] == EXIT_VERIFY_TIMEOUT
+    (row,) = RunStore().read_verify()
+    assert (row["milestone"], row["step"], row["passed"], row["timed_out"]) == ("", 1, False, True)
+    assert row["duration_s"] >= 0
+
+
+def test_passing_verify_is_journaled_and_empty_verify_is_not(repo):
+    from baton.runs import RunStore
+
+    assert run(repo, FakeAdapter(action=edit))[0] == EXIT_OK
+    assert [r["passed"] for r in RunStore().read_verify()] == [True]
+
+
+@pytest.mark.parametrize("verify", ["`bash a.sh` (locally); `pwsh b.ps1` (CI)", "`if then fi (`"])
+def test_unusable_verify_stops_before_any_agent(repo, verify):
+    (repo / ".agent-plan.md").write_text(
+        (repo / ".agent-plan.md").read_text().replace("`true`", verify, 1)
+    )
+    adapter = FakeAdapter(action=edit)
+    code, out = run(repo, adapter)
+    assert code == EXIT_STOPPED
+    assert adapter.prompts == []
+    assert "Step 1: the Verify cannot work" in out
+    assert "verify unusable" in (repo / ".agent-plan.md").read_text()
+
+
+def test_container_verify_only_warns(repo):
+    (repo / ".agent-plan.md").write_text(
+        (repo / ".agent-plan.md").read_text().replace("`true`", "`true # container-matrix`", 1)
+    )
+    adapter = FakeAdapter(action=edit)
+    code, out = run(repo, adapter)
+    assert code == EXIT_OK
+    assert len(adapter.prompts) == 1
+    assert "Warning: step 1's Verify is slow" in out

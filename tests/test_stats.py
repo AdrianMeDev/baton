@@ -61,3 +61,22 @@ def test_weighted_cli_sequence(tmp_path, monkeypatch, capsys):
     pinned = RoutedAdapter(Route("M", (a,)), LimitStore(), io.StringIO())
     assert not pinned.run("prompt", tmp_path, 10).ok
     assert "UTC" in pinned._exhaustion_message()
+
+
+def test_stats_lists_verify_runs_after_the_agent_table(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    store = RunStore()
+    store.complete(store.dispatch("a"), AgentResult(ok=True, tokens=1, duration_s=2))
+    store.record_verify("M15", 1, 4.5, True, False)
+    store.record_verify("M15", 1, 30.0, False, True)
+    assert main(["stats"]) == 0
+    output = capsys.readouterr().out
+    assert "a  1  2.000  1\n" in output
+    assert "Verify  Runs  Seconds  Timeouts\nM15 step 1  2  34.500  1\n" in output
+
+
+def test_stats_without_verify_events_has_no_verify_table(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    RunStore().dispatch("a")
+    assert main(["stats"]) == 0
+    assert "Verify" not in capsys.readouterr().out

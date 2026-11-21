@@ -160,7 +160,7 @@ Updated: 2026-11-19
 - **Depends on:** M13
 - **Size:** L, ~6 commits
 
-### M15 [ ] Tempo
+### M15 [x] Tempo
 - **Goal:** `baton auto` arbeitet Meilensteine ohne lange Wartezeiten ab: Verify bleibt kurz, ein Timeout löst keine Reparatur aus und Zeiten sind messbar.
 - **Includes:** (1) Der Planer erzeugt keinen Verify über etwa 5 Minuten, Container-Matrizen gehören in CI (Hinweis im Planer-Prompt und Warnung bei `container-matrix` im Verify); (2) ein Verify-Timeout startet keine Reparaturversuche, sondern stoppt mit einer `Next:`-Zeile (`--verify-timeout` erhöhen); (3) Plan-Feld `Verify-Timeout` im Kopf und je Schritt; (4) der Implementierungs-Prompt sagt, dass baton den Verify selbst ausführt und der Agent ihn nicht wiederholt; (5) die Verify-Dauer je Schritt steht in `runs.jsonl` und in `baton stats`; (6) der Implementierungs-Prompt verbietet dem Agenten Container-Läufe (`container-matrix.sh`, Container-Builds), CI übernimmt sie
 - **Done when:** ein Plan mit `container-matrix` im Verify löst die Warnung aus; ein Verify-Timeout endet mit Stopp statt Reparatur; `Verify-Timeout` wird gelesen und gilt; `baton stats` zeigt die Verify-Dauer; jeder Fall hat einen Test mit Fake-Adaptern
@@ -174,6 +174,7 @@ Updated: 2026-11-19
 
 ## Changelog
 
+- 2026-11-21: M15 Tempo: a Verify timeout stops with exit code 6 and a `Next:` line instead of starting repairs, `Verify-Timeout` in the plan header and per step, every Verify run is journaled and shown by `baton stats`, a Verify that is prose, several commands or a container matrix is rejected or warned about before any agent runs, and the agent prompt says baton runs Verify and CI runs containers.
 - 2026-11-21: M13 Auto-Robustheit: an agent failing without a limit hands over to the next agent (15 minute cooldown), unparsable reviews try the next reviewer, `baton next`/`status` reuse the milestone worktree and every command resolves the main root, git-ignored files named in a step's Changes fail Verify, and every `baton auto` stop has a class (`recoverable`/`needs-human`), one `Next:` line and a `stop` event in `runs.jsonl`.
 - 2026-11-20: `baton audit --jobs N` reviews up to N batches at the same time (one adapter per worker, results recorded in batch order, stops record every finished batch); default `--jobs 1` is unchanged.
 - 2026-11-20: `baton audit` reviews every tracked file batch by batch into `docs/AUDIT.md` (inventory, findings, fix milestones, suggestions; resumable, read-only reviewer); `baton audit --fix` works through the fix milestones via `baton auto --roadmap docs/AUDIT.md`; `baton plan` and `baton auto` accept `--roadmap PATH`.

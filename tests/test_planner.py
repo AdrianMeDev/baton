@@ -394,3 +394,12 @@ def test_plan_with_a_missing_or_escaping_roadmap_stops(repo: Path):
     code, out = plan_in(repo, planner, roadmap="../ROADMAP.md")
     assert code == EXIT_FAILED and "relative path within the checkout" in out
     assert planner.prompts == [] and not (repo / ".agent-plan.md").exists()
+
+
+def test_container_matrix_verify_is_retried_with_the_error(repo: Path):
+    bad = VALID.replace("`pytest -q`", "`bash container-matrix.sh`", 1)
+    assert bad != VALID
+    planner = FakePlanner(bad, VALID)
+    code, out = plan_in(repo, planner)
+    assert code == EXIT_OK, out
+    assert "container-matrix" in planner.prompts[1]

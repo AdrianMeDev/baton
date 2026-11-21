@@ -119,3 +119,18 @@ def test_stop_events_are_journaled_and_ignored_by_readers(tmp_path):
     store.record_stop("budget reached", "recoverable")
     assert '"event": "stop"' in store.path.read_text()
     assert summarize(store.read()) == before and len(store.read()) == 2
+
+
+def test_verify_events_are_written_and_ignored_by_attempt_readers(tmp_path):
+    from baton.runs import summarize_verify
+
+    store = RunStore(tmp_path / "runs.jsonl")
+    store.record_verify("M1", 2, 1.23456, True, False)
+    store.record_verify("M1", 2, 9.0, False, True)
+    store.dispatch("agent")
+    assert len(store.read()) == 1
+    rows = store.read_verify()
+    assert rows[0]["duration_s"] == 1.235 and rows[0]["milestone"] == "M1"
+    assert summarize_verify(rows) == {
+        ("M1", 2): dict(runs=2, seconds=pytest.approx(10.235), timeouts=1)
+    }

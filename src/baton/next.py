@@ -13,8 +13,9 @@ import difflib
 import shlex
 import sys
 import tempfile
+import time
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
@@ -50,6 +51,7 @@ from baton.plan import (
     save_plan,
     set_step_status,
 )
+from baton.plan_check import verify_problems
 from baton.prompt import (
     fix_prompt,
     handoff_prompt,
@@ -73,6 +75,7 @@ from baton.review import (
 from baton.roadmap import RoadmapError
 from baton.routed import RoutedAdapter, RoutedPlanner, say
 from baton.router import resolve_route
+from baton.runs import RunStore
 from baton.verify import VerifyResult, _clean, run_verify, run_verify_at_head
 from baton.worktree import ensure_worktree, find_worktree, mirror_plan
 
@@ -82,6 +85,7 @@ EXIT_STOPPED = 2  # nothing was started (gate, no open step, dirty tree)
 EXIT_ROADMAP_PROBLEM = 4  # the agent reported BATON-ROADMAP-PROBLEM; nothing was marked
 EXIT_EXHAUSTED = 3  # every agent of the route is in cooldown; the partial diff stays in the tree
 EXIT_BASE_FAILING = 5  # the plan's Baseline command already fails on HEAD; no agent was started
+EXIT_VERIFY_TIMEOUT = 6  # the step's Verify timed out; no repair was started, the diff stays
 
 DEFAULT_AGENT_TIMEOUT = 1800.0
 DEFAULT_VERIFY_TIMEOUT = 900.0
@@ -338,7 +342,7 @@ def _critical(review: ReviewResult | None) -> list[Finding]:
     return [] if review is None else [f for f in review.findings if f.severity == "critical"]
 
 
-def _run_verify(step: Step, repo: Path, timeout: float) -> VerifyResult:
+def _run_verify(plan: Plan, step: Step, repo: Path, timeout: float) -> VerifyResult:
     """Run the step's Verify, but first fail when git ignores a file the step names in Changes.
 
     Such a file would be missing from the commit, so a green local Verify would be misleading.
@@ -359,7 +363,43 @@ def _run_verify(step: Step, repo: Path, timeout: float) -> VerifyResult:
             ),
             command="git check-ignore -v (paths named in Changes)",
         )
-    return run_verify(step.verify, repo, timeout)
+    started = time.monotonic()
+    result = run_verify(step.verify, repo, timeout)
+    if result.verified:
+        with suppress(LimitStateError, OSError):  # measuring must never fail a step
+            RunStore().record_verify(
+                plan.milestone.id or "",
+                step.number,
+                time.monotonic() - started,
+                result.passed,
+                result.timed_out,
+            )
+    return result
+
+
+def _verify_timeout(plan: Plan, step: Step, flag: float) -> float:
+    """The Verify timeout in seconds: the step's field, else the plan header's, else the flag."""
+    for value in (step.verify_timeout, plan.verify_timeout):
+        if value is not None:
+            return value
+    return flag
+
+
+def _verify_timed_out(
+    out: TextIO, plan_path: Path, plan: Plan, step: Step, timeout: float, date: str
+) -> int:
+    """Stop on a Verify timeout: repairing would only wait out the same timeout again."""
+    say(out, f"Verify timed out after {timeout:g}s")
+    if step.verify_timeout is not None:
+        hint = f"the step's Verify-Timeout field (step {step.number})"
+    elif plan.verify_timeout is not None:
+        hint = "the plan header's Verify-Timeout field"
+    else:
+        hint = "--verify-timeout"
+    say(out, f"Raise the Verify timeout ({hint}) and run again.")
+    say(out, "Changes stay in the working tree; the step stays open.")
+    _log(plan_path, f"step {step.number}: verify timed out", date)
+    return EXIT_VERIFY_TIMEOUT
 
 
 def _verify_failure(verify: VerifyResult) -> str:
@@ -482,9 +522,20 @@ def _run_next(
         if commit and not _clean(step.verify):
             say(out, "Automatic commits require a Verify command; the step stays open.")
             return EXIT_FAILED
+        unusable, container = verify_problems(step.verify)
+        if unusable:
+            say(out, f"Step {step.number}: the Verify cannot work: {unusable}.")
+            say(
+                out, "Fix the step's Verify (one shell command in backticks); no agent was started."
+            )
+            _log(plan_path, f"step {step.number}: verify unusable ({unusable})", date)
+            return EXIT_STOPPED
+        if container:
+            say(out, f"Warning: step {step.number}'s Verify is slow: {container}.")
         stop = _check_baseline(repo, plan, plan_path, verify_timeout, out, date)
         if stop is not None:
             return stop
+        step_timeout = _verify_timeout(plan, step, verify_timeout)
         adapter = select_adapter(step)
         raw_step = step_text(plan_path.read_text("utf-8"), step)
         prompt = implement_prompt(plan, step, raw_step)
@@ -538,10 +589,10 @@ def _run_next(
         if commit:
             sync_milestone(repo, plan, step, date)
         with _protect_plan(plan_path):
-            verify = _run_verify(step, repo, verify_timeout)
+            verify = _run_verify(plan, step, repo, step_timeout)
         repairs = 0
         for escalated in (False, True):
-            if not verify.verified or verify.passed:
+            if not verify.verified or verify.passed or verify.timed_out:
                 break
             say(out, f"Verify failed ({_verify_failure(verify)}): {verify.command}")
             say(out, verify.output_tail)
@@ -564,13 +615,15 @@ def _run_next(
                 _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
                 return EXIT_FAILED
             with _protect_plan(plan_path):
-                verify = _run_verify(step, repo, verify_timeout)
+                verify = _run_verify(plan, step, repo, step_timeout)
             cost = (
                 result.cost + repair.cost
                 if result.cost is not None and repair.cost is not None
                 else None
             )
             result = replace(result, cost=cost)
+        if verify.timed_out:
+            return _verify_timed_out(out, plan_path, plan, step, step_timeout, date)
         if verify.verified and not verify.passed:
             say(out, f"Verify failed ({_verify_failure(verify)}): {verify.command}")
             say(out, verify.output_tail)
@@ -639,7 +692,9 @@ def _run_next(
                     _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
                     return EXIT_FAILED
                 with _protect_plan(plan_path):
-                    verify = _run_verify(step, repo, verify_timeout)
+                    verify = _run_verify(plan, step, repo, step_timeout)
+                if verify.timed_out:
+                    return _verify_timed_out(out, plan_path, plan, step, step_timeout, date)
                 if verify.verified and not verify.passed:
                     say(out, f"Verify failed after the review fix ({_verify_failure(verify)}).")
                     say(out, verify.output_tail)

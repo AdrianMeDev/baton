@@ -43,6 +43,7 @@ from baton.next import (
     EXIT_OK,
     EXIT_ROADMAP_PROBLEM,
     EXIT_STOPPED,
+    EXIT_VERIFY_TIMEOUT,
     run_next_command,
 )
 from baton.notify import notify
@@ -243,6 +244,13 @@ def run_milestone(
                     milestone,
                     next_action=f"fix the base branch, fast-forward the milestone branch, "
                     f"then {AGAIN}",
+                )
+            if code == EXIT_VERIFY_TIMEOUT:
+                return stop(
+                    f"step {step.number}: Verify timed out",
+                    milestone,
+                    "recoverable",
+                    f"raise the Verify timeout (--verify-timeout), then {AGAIN}",
                 )
             if code not in (EXIT_OK, EXIT_STOPPED):
                 return stop(

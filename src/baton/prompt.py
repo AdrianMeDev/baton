@@ -46,6 +46,10 @@ Rules:
 - Include the tests this step asks for and follow the project's existing conventions.
 - Re-read the files you touch before editing; do not rely on assumptions.
 - If the step cannot be done as written, stop and explain why instead of widening the scope.
+- baton runs the step's Verify command itself after you finish. Do not run that command or
+  repeat the full check suite; quick targeted tests while you work are fine.
+- Never run container builds or matrices (`container-matrix.sh`, `docker`, `podman`). CI runs
+  them; the container-side checks are written as code.
 - When finished, reply with a short summary of what you changed.
 """
     + ROADMAP_PROBLEM_RULE
@@ -277,8 +281,10 @@ Rules:
 - Plan 3 to 8 steps. Number them 1..n, all with the open marker `[ ]`.
 - Every step has a Conventional Commits message `<type>(<scope>): <description>` (type one of
   feat, fix, refactor, test, docs, chore, perf, build, ci; English, imperative, lowercase, no
-  trailing period, at most 72 characters) and the bullets Why, Changes, Done when, Verify (a
-  concrete command) and Size (S, M or L: how hard the step is for an agent).
+  trailing period, at most 72 characters) and the bullets Why, Changes, Done when, Verify (exactly
+  one shell command in backticks that finishes within about 5 minutes, no prose and no second
+  command; container matrices and `docker`/`podman` belong to CI, not to Verify)
+  and Size (S, M or L: how hard the step is for an agent).
 - The milestone's Goal, Includes and Done when are the task and the acceptance criteria. The last
   step's Done when includes the milestone's Done when and the roadmap's Definition of done.
 - Baseline is the project's full check (tests, lint, type check). It must already pass on the base

@@ -137,3 +137,68 @@ def test_assemble_plan_keeps_the_planners_baseline():
 
 def _valid_reply() -> str:
     return (FIXTURES / "generated_valid.md").read_text(encoding="utf-8")
+
+
+def test_validate_plan_reports_a_bad_verify_timeout():
+    text = (FIXTURES / "generated_valid.md").read_text(encoding="utf-8")
+    text = text.replace("\n## Goal", "\nVerify-Timeout: soon\n\n## Goal", 1)
+    assert "Verify-Timeout" in validate_plan(text, "M2")[0]
+
+
+def test_assemble_plan_keeps_the_planners_verify_timeout():
+    reply = (FIXTURES / "generated_valid.md").read_text(encoding="utf-8")
+    reply = reply.replace("\n## Goal", "\nVerify-Timeout: 20m\n\n## Goal", 1)
+    plan = parse_plan(assemble_plan(reply, HEADER))
+    assert plan.verify_timeout == 1200
+
+
+@pytest.mark.parametrize(
+    "verify",
+    [
+        "`uv run pytest -q && uv run ruff check`",
+        "`pytest -q tests/a.py`",
+        "make check",
+        "",
+    ],
+)
+def test_usable_verify_has_no_problems(verify):
+    from baton.plan_check import verify_problems
+
+    assert verify_problems(verify) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "verify",
+    [
+        "`bash scripts/check.sh` (locally); `pwsh check.ps1` (Windows/CI)",
+        "`a` then `b`",
+        "`if then fi (`",
+    ],
+)
+def test_prose_or_unparsable_verify_is_unusable(verify):
+    from baton.plan_check import verify_problems
+
+    unusable, container = verify_problems(verify)
+    assert unusable and container is None
+
+
+@pytest.mark.parametrize(
+    "verify",
+    ["`bash scripts/container-matrix.sh`", "`docker run --rm x`", "`podman build .`"],
+)
+def test_container_verify_is_reported_separately(verify):
+    from baton.plan_check import verify_problems
+
+    unusable, container = verify_problems(verify)
+    assert unusable is None and "CI" in container
+
+
+def test_validate_plan_rejects_unusable_and_container_verify():
+    text = (FIXTURES / "generated_valid.md").read_text(encoding="utf-8")
+    verify = next(ln for ln in text.splitlines() if ln.startswith("- **Verify:**"))
+    prose = validate_plan(text.replace(verify, "- **Verify:** `a` (locally); `b` (CI)", 1), "M2")
+    assert len(prose) == 1 and prose[0].startswith("step 1: Verify must be one shell command")
+    matrix = validate_plan(
+        text.replace(verify, "- **Verify:** `bash container-matrix.sh`", 1), "M2"
+    )
+    assert len(matrix) == 1 and "container" in matrix[0]

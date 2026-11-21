@@ -491,6 +491,19 @@ before starting an agent because of the gate, a dirty tree, a missing plan or no
 `--timeout` (default 1800 s) limits each implementation, fix or review agent call;
 `--verify-timeout` (default 900 s) limits the Verify command. `--dry-run` prints the step, the command and the prompt and changes nothing.
 
+A Verify that times out does not start repair or fix agents (each would wait out the same timeout
+again): `baton next` exits with code 6, the diff stays in the tree and the step stays open;
+`baton auto` stops as `recoverable` with a `Next:` line. The timeout comes from the step's
+`- **Verify-Timeout:** 30m` bullet, else the plan header's `Verify-Timeout: 30m` line, else
+`--verify-timeout` (units `s`, `m`, `h`). A Verify must be exactly one shell command in backticks
+that bash can parse (no prose, no second command) and should finish within about 5 minutes: an
+unparsable one stops `baton next` with exit code 2 before any agent runs, and `baton plan` makes
+the planner retry. A Verify that runs `container-matrix`, `docker` or `podman` only prints a
+warning in `baton next` but is rejected in fresh plans; container checks belong to CI. The agent
+prompts say that baton runs Verify itself and that the agent must not repeat it or start
+containers. After pulling this change, reinstall the uv tool copy
+(`uv tool install --python 3.12 --reinstall .`).
+
 The agent can edit your working tree and may use your account quota. Review the diff before
 committing.
 
@@ -530,7 +543,8 @@ branch (e.g. `main`) with an `origin` remote; a dirty or diverged base is a stop
 - **Exit codes:** `baton auto` 0 = roadmap complete (or PR published with `--no-merge`),
   1 = stopped by a rule, 2 = not started (not a repository, invalid config, bad flag).
   `baton next` and `baton plan` additionally use 3 = every agent of the route is in cooldown and
-  4 = roadmap problem reported; `baton next` also 5 = the plan's baseline already fails.
+  4 = roadmap problem reported; `baton next` also 5 = the plan's baseline already fails and
+  6 = the step's Verify timed out (no repair is started).
 
 Optional defaults in the config (flags win):
 
@@ -744,7 +758,8 @@ waiting for the commit, `[x] – <hash>` committed, `[-]` skipped. Writes are in
 suffixes, Log and Changelog lines only), so hand edits survive. Each step may carry an optional
 `- **Size:** S|M|L` bullet; unknown bullets are ignored. An optional header line
 ``Baseline: `<command>` `` names the project's full check, which must already pass on the base
-commit (see [`baton next`](#baton-next)); `baton plan` asks the planner for it. Structural errors (no `## Steps`, unknown
+commit (see [`baton next`](#baton-next)); an optional `Verify-Timeout: 30m` header line (and a
+`Verify-Timeout` step bullet) sets the Verify timeout; `baton plan` asks the planner for it. Structural errors (no `## Steps`, unknown
 marker, duplicate step numbers) are reported with the line number. A repair appends a
 `plan repaired:` line to the `## Log` and rewrites the open steps; see [Plan repair](#plan-repair).
 
@@ -850,6 +865,10 @@ Probes, rechecks, previews and cooldown skips do not count.
 Agent  Attempts  Seconds  Tokens
 claude  3  45.100  12000 (partial; 1 unknown)
 ```
+
+When `baton next` has run a Verify, a second table follows with the runs, seconds and timeouts per
+milestone step (`Verify  Runs  Seconds  Timeouts`, e.g. `M15 step 1  2  34.500  1`); it is absent
+without such runs, and the agent table is unchanged.
 
 Seconds are summed process durations; tokens are provider-reported totals. Cache
 and reasoning breakdowns are counted once. Unknown measurements are explicit;
