@@ -5,7 +5,11 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import subprocess
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from baton.plan import Plan
@@ -215,3 +219,19 @@ def ff_merge(repo: Path, ref: str) -> None:
 def worktree_remove(repo: Path, path: Path) -> None:
     """``git worktree remove`` without ``--force``: git refuses when the worktree has changes."""
     _git(repo, "worktree", "remove", str(path))
+
+
+@contextmanager
+def head_checkout(repo: Path) -> Iterator[Path]:
+    """A temporary detached worktree of HEAD; removed on exit, also after errors."""
+    tmp = Path(tempfile.mkdtemp(prefix="baton-head-"))
+    path = tmp / "checkout"
+    try:
+        _git(repo, "worktree", "add", "-q", "--detach", str(path), "HEAD")
+        yield path
+    finally:
+        with suppress(GitError):
+            _git(repo, "worktree", "remove", "--force", str(path))
+        shutil.rmtree(tmp, ignore_errors=True)
+        with suppress(GitError):
+            _git(repo, "worktree", "prune")
