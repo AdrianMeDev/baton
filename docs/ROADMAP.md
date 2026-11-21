@@ -160,6 +160,13 @@ Updated: 2026-11-19
 - **Depends on:** M13
 - **Size:** L, ~6 commits
 
+### M15 [ ] Tempo
+- **Goal:** `baton auto` arbeitet Meilensteine ohne lange Wartezeiten ab: Verify bleibt kurz, ein Timeout löst keine Reparatur aus und Zeiten sind messbar.
+- **Includes:** (1) Der Planer erzeugt keinen Verify über etwa 5 Minuten, Container-Matrizen gehören in CI (Hinweis im Planer-Prompt und Warnung bei `container-matrix` im Verify); (2) ein Verify-Timeout startet keine Reparaturversuche, sondern stoppt mit einer `Next:`-Zeile (`--verify-timeout` erhöhen); (3) Plan-Feld `Verify-Timeout` im Kopf und je Schritt; (4) der Implementierungs-Prompt sagt, dass baton den Verify selbst ausführt und der Agent ihn nicht wiederholt; (5) die Verify-Dauer je Schritt steht in `runs.jsonl` und in `baton stats`
+- **Done when:** ein Plan mit `container-matrix` im Verify löst die Warnung aus; ein Verify-Timeout endet mit Stopp statt Reparatur; `Verify-Timeout` wird gelesen und gilt; `baton stats` zeigt die Verify-Dauer; jeder Fall hat einen Test mit Fake-Adaptern
+- **Depends on:** M13
+- **Size:** M, ~5 commits
+
 ## Definition of done (every milestone)
 - Baut, Tests grün, `ruff check` und `ruff format --check` sauber, CI grün
 - Neue Logik hat Tests; CLIs in Tests nur über Fake-Adapter oder aufgezeichnete Ausgaben, nie live
