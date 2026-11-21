@@ -27,6 +27,7 @@ from baton.git import (
     dirty_paths,
     fetch,
     ff_merge,
+    head,
     is_repo,
     milestone_branch,
     worktree_path_for,
@@ -37,6 +38,7 @@ from baton.limits import LimitStateError, LimitStore
 from baton.next import (
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_VERIFY_TIMEOUT,
+    EXIT_BASE_FAILING,
     EXIT_EXHAUSTED,
     EXIT_OK,
     EXIT_ROADMAP_PROBLEM,
@@ -202,6 +204,15 @@ def run_milestone(
                 continue
             if code == EXIT_ROADMAP_PROBLEM:
                 return stop(f"roadmap problem reported at step {step.number}", milestone)
+            if code == EXIT_BASE_FAILING:
+                at = ""
+                with suppress(GitError):
+                    at = f" at {head(repo)}"
+                return stop(
+                    f"base already failing{at}, not caused by step {step.number}; fix it on the "
+                    "base branch, then fast-forward the milestone branch",
+                    milestone,
+                )
             if code not in (EXIT_OK, EXIT_STOPPED):
                 return stop(
                     f"step {step.number} failed after escalation (exit code {code}); "

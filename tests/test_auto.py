@@ -7,7 +7,14 @@ import pytest
 
 from baton.auto import Budget, MilestoneHooks, ff_base, run_milestone
 from baton.autostate import AutoStore
-from baton.next import EXIT_EXHAUSTED, EXIT_FAILED, EXIT_OK, EXIT_ROADMAP_PROBLEM, EXIT_STOPPED
+from baton.next import (
+    EXIT_BASE_FAILING,
+    EXIT_EXHAUSTED,
+    EXIT_FAILED,
+    EXIT_OK,
+    EXIT_ROADMAP_PROBLEM,
+    EXIT_STOPPED,
+)
 from baton.plan import parse_plan
 
 ROADMAP = (Path(__file__).parent / "fixtures" / "roadmaps" / "planning.md").read_text("utf-8")
@@ -177,6 +184,17 @@ def test_stop_escalation_exhausted(world):
     result = world.run()
     assert result.outcome == "stopped"
     assert "step 2 failed after escalation" in result.reason
+    assert world.pr_calls == []
+
+
+def test_stop_base_failing_keeps_the_step_for_resume(world):
+    world.next_codes = [EXIT_BASE_FAILING]
+    result = world.run()
+    assert result.outcome == "stopped"
+    assert "base already failing" in result.reason and "not caused by step 1" in result.reason
+    assert "fast-forward" in result.reason and "failed after escalation" not in result.reason
+    state = world.store.read(world.repo)
+    assert state.step == 1 and state.steps_done == 0 and state.milestone == "M1"
     assert world.pr_calls == []
 
 
