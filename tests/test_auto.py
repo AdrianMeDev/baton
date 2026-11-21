@@ -254,6 +254,82 @@ def test_stop_request_during_wait(world):
     assert result.outcome == "stopped" and "while waiting" in result.reason
 
 
+def _blocked(w):
+    blocked = ROADMAP.replace("### M0 [x]", "### M0 [~]")
+    (w.repo / "docs" / "ROADMAP.md").write_text(blocked)
+
+
+def _failed(w):
+    w.next_codes = [EXIT_FAILED]
+
+
+def _base(w):
+    w.next_codes = [EXIT_BASE_FAILING]
+
+
+def _refused(w):
+    w.pr_result = (1, "https://example.test/pr/1\nStopped: critical finding\n")
+
+
+def _problem(w):
+    w.next_codes = [EXIT_ROADMAP_PROBLEM]
+
+
+def _planner_problem(w):
+    w.plan_codes = [EXIT_ROADMAP_PROBLEM]
+
+
+def _planning_failed(w):
+    w.plan_codes = [EXIT_STOPPED]
+
+
+def _no_progress(w):
+    w.next_codes = [EXIT_STOPPED]
+
+
+def _requested(w):
+    w.on_next = lambda call: w.store.update(w.repo, stop_requested=True)
+
+
+def _waiting_stopped(w):
+    w.next_codes = [EXIT_EXHAUSTED]
+    w.wait_result = "stopped"
+
+
+def _after_merge(w):
+    w.after_merge_result = "base checkout is dirty"
+
+
+@pytest.mark.parametrize(
+    ("setup", "kind"),
+    [
+        (_blocked, "needs-human"),
+        (_failed, "recoverable"),
+        (_base, "needs-human"),
+        (_refused, "needs-human"),
+        (_problem, "needs-human"),
+        (_planner_problem, "needs-human"),
+        (_planning_failed, "recoverable"),
+        (_no_progress, "needs-human"),
+        (_requested, "recoverable"),
+        (_waiting_stopped, "recoverable"),
+        (_after_merge, "needs-human"),
+    ],
+)
+def test_every_stop_has_a_class_and_exactly_one_next_line(world, setup, kind):
+    from baton.runs import RunStore
+
+    setup(world)
+    result = world.run()
+    assert result.outcome == "stopped" and result.kind == kind and result.next
+    lines = world.out.getvalue().splitlines()
+    assert [line for line in lines if line.startswith("Next:")] == [f"Next: {result.next} ({kind})"]
+    assert f"Stopped: {result.reason}" in lines
+    stops = [r for r in RunStore().path.read_text().splitlines() if '"event": "stop"' in r]
+    assert len(stops) == 1 and result.reason in stops[0] and kind in stops[0]
+    assert RunStore().read() == []  # attempt readers ignore stop events
+
+
 def test_exhaustion_waits_then_resumes_the_same_step(world):
     world.next_codes = [EXIT_EXHAUSTED]
     result = world.run()
@@ -459,7 +535,11 @@ def test_auto_notifies_every_stop(loop):
     loop.next_codes = [EXIT_FAILED]
     assert loop.auto() == 1
     assert loop.notes == [
-        ("baton: stopped", "M1: step 1 failed after escalation (exit code 1); see the plan log")
+        (
+            "baton: stopped",
+            "M1: step 1 failed after escalation (exit code 1); see the plan log. "
+            "Next: run `baton auto` again (resumes the step); see the plan log first",
+        )
     ]
 
 
