@@ -12,6 +12,7 @@ from baton.git import (
     dirty_paths,
     ensure_excluded,
     head,
+    ignored_paths,
     is_repo,
     is_tracked,
     main_root,
@@ -299,3 +300,14 @@ def test_main_root_from_repo_subdirectory_and_linked_worktree(repo: Path, tmp_pa
 
 def test_main_root_outside_a_repository_is_unchanged(tmp_path: Path) -> None:
     assert main_root(tmp_path) == tmp_path
+
+
+def test_ignored_paths_reports_rule_and_skips_tracked_files(repo: Path) -> None:
+    (repo / ".gitignore").write_text("*.local\n")
+    (repo / "x.local").write_text("x")
+    (repo / "kept.txt").write_text("k")
+    (repo / "tracked.local").write_text("t")
+    git(repo, "add", "-f", "tracked.local")
+    lines = ignored_paths(repo, ["x.local", "kept.txt", "tracked.local"])
+    assert len(lines) == 1 and lines[0].startswith(".gitignore:1:*.local") and "x.local" in lines[0]
+    assert ignored_paths(repo, []) == [] and ignored_paths(repo, ["kept.txt"]) == []

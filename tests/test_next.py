@@ -88,6 +88,61 @@ def run(repo: Path, adapter: FakeAdapter, **kw) -> tuple[int, str]:
     return code, out.getvalue()
 
 
+def _plan_naming(repo: Path, *paths: str) -> None:
+    text = (repo / ".agent-plan.md").read_text(encoding="utf-8")
+    changes = ", ".join(f"`{p}`" for p in paths) + " and `uv run pytest`"
+    old = "- **Verify:** `true`\n\n### 2."
+    new = f"- **Changes:** {changes}\n{old}"
+    (repo / ".agent-plan.md").write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
+def _ignore_local(repo: Path) -> None:
+    (repo / ".gitignore").write_text("*.local\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-q", "-m", "ignore")
+
+
+def _make_ignored(r: Path) -> None:
+    (r / "dot/.local/bin").mkdir(parents=True)
+    (r / "dot/.local/bin/dot").write_text("x\n")
+
+
+def test_ignored_file_named_in_changes_fails_before_commit(repo: Path) -> None:
+    _ignore_local(repo)
+    write_plan(repo, verify="true")
+    _plan_naming(repo, "dot/.local/bin/dot")
+    code, out = run(repo, FakeAdapter(action=_make_ignored))
+    assert code == EXIT_FAILED
+    assert "*.local" in out and "dot/.local/bin/dot" in out
+    assert plan_of(repo).steps[0].status == "open"
+
+
+def test_ignored_file_is_repaired_with_the_rule_in_the_prompt(repo, repair_chain) -> None:
+    _, agents = repair_chain
+    _ignore_local(repo)
+    write_plan(repo, verify="true")
+    _plan_naming(repo, "dot/.local/bin/dot")
+    agents["first"].action = _make_ignored
+    agents["second"].action = lambda r: (r / ".gitignore").write_text("")
+    code, out = invoke_chain(repo, repair_chain, agent_name="first", tier="L")
+    assert code == EXIT_OK, out
+    assert "*.local" in agents["second"].prompts[0]
+
+
+def test_tracked_missing_and_cache_paths_are_not_flagged(repo: Path) -> None:
+    _ignore_local(repo)
+    write_plan(repo, verify="true")
+    _plan_naming(repo, "a.txt", "nowhere/missing.local", "src/baton/x.py")
+
+    def act(r: Path) -> None:
+        edit(r)
+        (r / ".pytest_cache").mkdir()
+        (r / ".pytest_cache/f").write_text("x")
+
+    code, out = run(repo, FakeAdapter(action=act))
+    assert code == EXIT_OK, out
+
+
 def test_success_marks_pending_and_keeps_head(repo: Path) -> None:
     before = head(repo)
     adapter = FakeAdapter(action=edit)

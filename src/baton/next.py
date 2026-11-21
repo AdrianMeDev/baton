@@ -31,6 +31,7 @@ from baton.git import (
     dirty_paths,
     handoff_context,
     head,
+    ignored_paths,
     milestone_branch,
     switch_branch,
     worktree_path_for,
@@ -43,6 +44,7 @@ from baton.plan import (
     PlanError,
     Step,
     append_log,
+    changed_paths,
     first_open_step,
     parse_plan,
     save_plan,
@@ -336,6 +338,30 @@ def _critical(review: ReviewResult | None) -> list[Finding]:
     return [] if review is None else [f for f in review.findings if f.severity == "critical"]
 
 
+def _run_verify(step: Step, repo: Path, timeout: float) -> VerifyResult:
+    """Run the step's Verify, but first fail when git ignores a file the step names in Changes.
+
+    Such a file would be missing from the commit, so a green local Verify would be misleading.
+    """
+    existing = [p for p in changed_paths(step) if p != PLAN_FILENAME and (repo / p).exists()]
+    ignored = ignored_paths(repo, existing)
+    if ignored:
+        listing = "\n".join(ignored)
+        return VerifyResult(
+            verified=True,
+            passed=False,
+            exit_code=1,
+            timed_out=False,
+            output_tail=(
+                "These files named in Changes are ignored by git and would not be committed "
+                "(source:line:pattern, path). Remove or adjust the ignoring rule's effect, for "
+                "example with a negation in .gitignore, or place the file elsewhere:\n" + listing
+            ),
+            command="git check-ignore -v (paths named in Changes)",
+        )
+    return run_verify(step.verify, repo, timeout)
+
+
 def _verify_failure(verify: VerifyResult) -> str:
     if verify.timed_out:
         return "timed out"
@@ -512,7 +538,7 @@ def _run_next(
         if commit:
             sync_milestone(repo, plan, step, date)
         with _protect_plan(plan_path):
-            verify = run_verify(step.verify, repo, verify_timeout)
+            verify = _run_verify(step, repo, verify_timeout)
         repairs = 0
         for escalated in (False, True):
             if not verify.verified or verify.passed:
@@ -538,7 +564,7 @@ def _run_next(
                 _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
                 return EXIT_FAILED
             with _protect_plan(plan_path):
-                verify = run_verify(step.verify, repo, verify_timeout)
+                verify = _run_verify(step, repo, verify_timeout)
             cost = (
                 result.cost + repair.cost
                 if result.cost is not None and repair.cost is not None
@@ -613,7 +639,7 @@ def _run_next(
                     _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
                     return EXIT_FAILED
                 with _protect_plan(plan_path):
-                    verify = run_verify(step.verify, repo, verify_timeout)
+                    verify = _run_verify(step, repo, verify_timeout)
                 if verify.verified and not verify.passed:
                     say(out, f"Verify failed after the review fix ({_verify_failure(verify)}).")
                     say(out, verify.output_tail)

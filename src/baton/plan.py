@@ -205,6 +205,16 @@ def parse_plan(text: str) -> Plan:
     )
 
 
+_BACKTICK_RE = re.compile(r"`([^`\s]+)`")
+
+
+def changed_paths(step: Step) -> list[str]:
+    """Relative paths named in backticks under **Changes** (a token containing ``/`` or ``.``)."""
+    found = (m.group(1).rstrip(",;:") for m in _BACKTICK_RE.finditer(step.changes))
+    paths = [t for t in found if ("/" in t or "." in t) and not t.startswith(("-", "/", "~"))]
+    return list(dict.fromkeys(p for p in paths if ".." not in p.split("/")))
+
+
 def load_plan(path: Path) -> Plan:
     return parse_plan(path.read_text(encoding="utf-8"))
 

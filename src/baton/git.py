@@ -119,6 +119,28 @@ def is_tracked(repo: Path, path: str) -> bool:
     return True
 
 
+def ignored_paths(repo: Path, paths: list[str]) -> list[str]:
+    """``git check-ignore -v`` lines (``source:line:pattern<TAB>path``) for the ignored ``paths``.
+
+    Tracked files are never reported, since git does not ignore them.
+    """
+    if not paths:
+        return []
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "check-ignore", "-v", "--", *paths],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise GitError("git is not installed or not on PATH") from exc
+    if proc.returncode not in (0, 1):  # 1: none of the paths is ignored
+        raise GitError(f"git check-ignore failed in {repo}: {proc.stderr.strip()}")
+    return proc.stdout.splitlines()
+
+
 def ensure_excluded(repo: Path, pattern: str = PLAN_FILENAME) -> bool:
     """Append ``pattern`` to ``.git/info/exclude`` unless listed; True if the file changed."""
     exclude = Path(_git(repo, "rev-parse", "--git-path", "info/exclude").strip())
