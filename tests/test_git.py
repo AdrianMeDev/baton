@@ -14,6 +14,7 @@ from baton.git import (
     head,
     is_repo,
     is_tracked,
+    main_root,
     milestone_branch,
     push,
     switch_branch,
@@ -285,3 +286,16 @@ def test_head_checkout_is_removed_also_on_error(tmp_path: Path) -> None:
         raise RuntimeError("boom")
     assert not checkout.exists()
     assert len(worktree_paths(repo)) == 1
+
+
+def test_main_root_from_repo_subdirectory_and_linked_worktree(repo: Path, tmp_path: Path) -> None:
+    (repo / "sub").mkdir()
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "-q", "-b", "other", str(linked))
+    (linked / "deep").mkdir()
+    for start in (repo, repo / "sub", linked, linked / "deep"):
+        assert main_root(start).resolve() == repo.resolve()
+
+
+def test_main_root_outside_a_repository_is_unchanged(tmp_path: Path) -> None:
+    assert main_root(tmp_path) == tmp_path

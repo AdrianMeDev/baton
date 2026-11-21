@@ -47,6 +47,20 @@ def is_repo(repo: Path) -> bool:
         return False
 
 
+def main_root(path: Path) -> Path:
+    """The main checkout's root for ``path``, also from a linked worktree or a subdirectory.
+
+    Outside a git repository ``path`` is returned unchanged so callers report their own error.
+    """
+    try:
+        common = Path(_git(path, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+        if common.name == ".git":
+            return common.parent
+        return Path(_git(path, "rev-parse", "--show-toplevel").strip())
+    except GitError:
+        return path
+
+
 def head(repo: Path, *, short: bool = True) -> str:
     """The commit hash of HEAD (abbreviated by default)."""
     if not is_repo(repo):
