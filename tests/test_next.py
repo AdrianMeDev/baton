@@ -14,6 +14,7 @@ from baton.next import (
     EXIT_OK,
     EXIT_ROADMAP_PROBLEM,
     EXIT_STOPPED,
+    EXIT_VERIFY_TIMEOUT,
     run_next,
     run_next_command,
 )
@@ -740,22 +741,25 @@ def test_fix_quota_handoff_keeps_all_participants(repo, repair_chain, routed_exe
     assert "repair-needed" in agents["third"].prompts[0]
 
 
-def test_timed_out_verify_repairs_and_reruns_original_command(repo, repair_chain, monkeypatch):
-    from baton.verify import VerifyResult, run_verify
+def test_timed_out_verify_stops_without_starting_a_fix_agent(repo, repair_chain, monkeypatch):
+    from baton.verify import VerifyResult
 
     calls = []
 
     def verify(command, cwd, timeout):
-        calls.append((command, cwd, timeout))
-        if len(calls) == 1:
-            return VerifyResult(True, False, None, True, "test hung", command)
-        return run_verify(command, cwd, timeout)
+        calls.append(command)
+        return VerifyResult(True, False, None, True, "test hung", command)
 
     monkeypatch.setattr("baton.next.run_verify", verify)
-    assert invoke_chain(repo, repair_chain, verify_timeout=3)[0] == EXIT_OK
-    assert len(calls) == 2 and calls[0] == calls[1]
-    assert "Outcome: timed out" in repair_chain[1]["second"].prompts[0]
-    assert "test hung" in repair_chain[1]["second"].prompts[0]
+    before = head(repo)
+    code, out = invoke_chain(repo, repair_chain, verify_timeout=3)
+    assert code == EXIT_VERIFY_TIMEOUT
+    assert len(calls) == 1
+    assert repair_chain[1]["second"].prompts == []
+    assert "Verify timed out after 3s" in out and "--verify-timeout" in out
+    assert head(repo) == before
+    assert "[ ]" in (repo / ".agent-plan.md").read_text()
+    assert "verify timed out" in (repo / ".agent-plan.md").read_text()
 
 
 @pytest.mark.parametrize("tier", ["S", "M", "L"])

@@ -198,6 +198,18 @@ def test_stop_base_failing_keeps_the_step_for_resume(world):
     assert world.pr_calls == []
 
 
+def test_stop_verify_timeout_is_recoverable_with_a_next_line(world):
+    from baton.next import EXIT_VERIFY_TIMEOUT
+
+    world.next_codes = [EXIT_VERIFY_TIMEOUT]
+    result = world.run()
+    assert result.outcome == "stopped" and result.kind == "recoverable"
+    assert "Verify timed out" in result.reason
+    assert "--verify-timeout" in result.next
+    assert world.store.read(world.repo).step == 1
+    assert world.pr_calls == []
+
+
 def test_stop_merge_refused(world):
     world.pr_result = (1, "https://example.test/pr/1\nStopped: critical finding\n")
     result = world.run()

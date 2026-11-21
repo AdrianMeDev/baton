@@ -82,6 +82,7 @@ EXIT_STOPPED = 2  # nothing was started (gate, no open step, dirty tree)
 EXIT_ROADMAP_PROBLEM = 4  # the agent reported BATON-ROADMAP-PROBLEM; nothing was marked
 EXIT_EXHAUSTED = 3  # every agent of the route is in cooldown; the partial diff stays in the tree
 EXIT_BASE_FAILING = 5  # the plan's Baseline command already fails on HEAD; no agent was started
+EXIT_VERIFY_TIMEOUT = 6  # the step's Verify timed out; no repair was started, the diff stays
 
 DEFAULT_AGENT_TIMEOUT = 1800.0
 DEFAULT_VERIFY_TIMEOUT = 900.0
@@ -362,6 +363,15 @@ def _run_verify(step: Step, repo: Path, timeout: float) -> VerifyResult:
     return run_verify(step.verify, repo, timeout)
 
 
+def _verify_timed_out(out: TextIO, plan_path: Path, step: Step, timeout: float, date: str) -> int:
+    """Stop on a Verify timeout: repairing would only wait out the same timeout again."""
+    say(out, f"Verify timed out after {timeout:g}s")
+    say(out, "Raise the Verify timeout (--verify-timeout) and run again.")
+    say(out, "Changes stay in the working tree; the step stays open.")
+    _log(plan_path, f"step {step.number}: verify timed out", date)
+    return EXIT_VERIFY_TIMEOUT
+
+
 def _verify_failure(verify: VerifyResult) -> str:
     if verify.timed_out:
         return "timed out"
@@ -541,7 +551,7 @@ def _run_next(
             verify = _run_verify(step, repo, verify_timeout)
         repairs = 0
         for escalated in (False, True):
-            if not verify.verified or verify.passed:
+            if not verify.verified or verify.passed or verify.timed_out:
                 break
             say(out, f"Verify failed ({_verify_failure(verify)}): {verify.command}")
             say(out, verify.output_tail)
@@ -571,6 +581,8 @@ def _run_next(
                 else None
             )
             result = replace(result, cost=cost)
+        if verify.timed_out:
+            return _verify_timed_out(out, plan_path, step, verify_timeout, date)
         if verify.verified and not verify.passed:
             say(out, f"Verify failed ({_verify_failure(verify)}): {verify.command}")
             say(out, verify.output_tail)
@@ -640,6 +652,8 @@ def _run_next(
                     return EXIT_FAILED
                 with _protect_plan(plan_path):
                     verify = _run_verify(step, repo, verify_timeout)
+                if verify.timed_out:
+                    return _verify_timed_out(out, plan_path, step, verify_timeout, date)
                 if verify.verified and not verify.passed:
                     say(out, f"Verify failed after the review fix ({_verify_failure(verify)}).")
                     say(out, verify.output_tail)

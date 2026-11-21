@@ -530,7 +530,8 @@ branch (e.g. `main`) with an `origin` remote; a dirty or diverged base is a stop
 - **Exit codes:** `baton auto` 0 = roadmap complete (or PR published with `--no-merge`),
   1 = stopped by a rule, 2 = not started (not a repository, invalid config, bad flag).
   `baton next` and `baton plan` additionally use 3 = every agent of the route is in cooldown and
-  4 = roadmap problem reported; `baton next` also 5 = the plan's baseline already fails.
+  4 = roadmap problem reported; `baton next` also 5 = the plan's baseline already fails and
+  6 = the step's Verify timed out (no repair is started).
 
 Optional defaults in the config (flags win):
 
