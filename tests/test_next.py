@@ -2331,3 +2331,24 @@ def test_verify_timeout_precedence_step_over_header_over_flag(
     assert code == EXIT_VERIFY_TIMEOUT
     assert seen == [float(expected[:-1])]
     assert f"timed out after {expected}" in out and hint in out
+
+
+def test_verify_run_is_journaled_with_duration_and_timeout_flag(repo, monkeypatch):
+    from baton.runs import RunStore
+    from baton.verify import VerifyResult
+
+    monkeypatch.setattr(
+        "baton.next.run_verify",
+        lambda command, cwd, timeout: VerifyResult(True, False, None, True, "hung", command),
+    )
+    assert run(repo, FakeAdapter(action=edit))[0] == EXIT_VERIFY_TIMEOUT
+    (row,) = RunStore().read_verify()
+    assert (row["milestone"], row["step"], row["passed"], row["timed_out"]) == ("", 1, False, True)
+    assert row["duration_s"] >= 0
+
+
+def test_passing_verify_is_journaled_and_empty_verify_is_not(repo):
+    from baton.runs import RunStore
+
+    assert run(repo, FakeAdapter(action=edit))[0] == EXIT_OK
+    assert [r["passed"] for r in RunStore().read_verify()] == [True]

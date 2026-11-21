@@ -39,8 +39,8 @@ class RunStore:
         for number, line in enumerate(lines, 1):
             try:
                 row = json.loads(line)
-                if isinstance(row, dict) and row.get("event") == "stop":
-                    continue  # auto-mode stop event; not an attempt
+                if isinstance(row, dict) and row.get("event") in ("stop", "verify"):
+                    continue  # auto-mode stop or Verify event; not an attempt
                 if not isinstance(row, dict) or row.get("event") not in ("dispatch", "completion"):
                     raise ValueError("expected dispatch or completion")
                 ident = row["id"]
@@ -118,6 +118,37 @@ class RunStore:
                 )
             )
 
+    def record_verify(self, milestone, step, duration_s, passed, timed_out, *, now=None):
+        """Journal one Verify run; readers of attempts skip these rows."""
+        with self.locked():
+            self._append(
+                dict(
+                    event="verify",
+                    milestone=milestone,
+                    step=step,
+                    duration_s=round(duration_s, 3),
+                    passed=passed,
+                    timed_out=timed_out,
+                    at=(now or datetime.now(UTC)).isoformat(),
+                )
+            )
+
+    def read_verify(self):
+        """The ``verify`` rows of the journal (``read`` has already validated the file)."""
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            return []
+        rows = []
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue  # a torn last line
+            if isinstance(row, dict) and row.get("event") == "verify":
+                rows.append(row)
+        return rows
+
     def dispatch(self, agent, *, now=None):
         with self.locked():
             self.read()
@@ -192,11 +223,38 @@ def summarize(records):
     return totals
 
 
+def summarize_verify(rows):
+    """Runs, seconds and timeouts per (milestone, step), in first-seen order."""
+    totals = {}
+    for row in rows:
+        stats = totals.setdefault(
+            (row["milestone"], row["step"]), dict(runs=0, seconds=0.0, timeouts=0)
+        )
+        stats["runs"] += 1
+        stats["seconds"] += row["duration_s"]
+        stats["timeouts"] += bool(row["timed_out"])
+    return totals
+
+
 def print_stats(out):
-    totals = summarize(RunStore().read())
-    if not totals:
+    store = RunStore()
+    totals = summarize(store.read())
+    verify = summarize_verify(store.read_verify())
+    if not totals and not verify:
         print("No recorded attempts.", file=out)
         return
+    if totals:
+        _print_agents(totals, out)
+    if verify:
+        if totals:
+            print(file=out)
+        print("Verify  Runs  Seconds  Timeouts", file=out)
+        for (milestone, step), row in verify.items():
+            label = f"{milestone or '-'} step {step}"
+            print(f"{label}  {row['runs']}  {row['seconds']:.3f}  {row['timeouts']}", file=out)
+
+
+def _print_agents(totals, out):
     print("Agent  Attempts  Seconds  Tokens", file=out)
     for name, row in sorted(totals.items()):
         values = []

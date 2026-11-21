@@ -13,8 +13,9 @@ import difflib
 import shlex
 import sys
 import tempfile
+import time
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
@@ -73,6 +74,7 @@ from baton.review import (
 from baton.roadmap import RoadmapError
 from baton.routed import RoutedAdapter, RoutedPlanner, say
 from baton.router import resolve_route
+from baton.runs import RunStore
 from baton.verify import VerifyResult, _clean, run_verify, run_verify_at_head
 from baton.worktree import ensure_worktree, find_worktree, mirror_plan
 
@@ -339,7 +341,7 @@ def _critical(review: ReviewResult | None) -> list[Finding]:
     return [] if review is None else [f for f in review.findings if f.severity == "critical"]
 
 
-def _run_verify(step: Step, repo: Path, timeout: float) -> VerifyResult:
+def _run_verify(plan: Plan, step: Step, repo: Path, timeout: float) -> VerifyResult:
     """Run the step's Verify, but first fail when git ignores a file the step names in Changes.
 
     Such a file would be missing from the commit, so a green local Verify would be misleading.
@@ -360,7 +362,18 @@ def _run_verify(step: Step, repo: Path, timeout: float) -> VerifyResult:
             ),
             command="git check-ignore -v (paths named in Changes)",
         )
-    return run_verify(step.verify, repo, timeout)
+    started = time.monotonic()
+    result = run_verify(step.verify, repo, timeout)
+    if result.verified:
+        with suppress(LimitStateError, OSError):  # measuring must never fail a step
+            RunStore().record_verify(
+                plan.milestone.id or "",
+                step.number,
+                time.monotonic() - started,
+                result.passed,
+                result.timed_out,
+            )
+    return result
 
 
 def _verify_timeout(plan: Plan, step: Step, flag: float) -> float:
@@ -565,7 +578,7 @@ def _run_next(
         if commit:
             sync_milestone(repo, plan, step, date)
         with _protect_plan(plan_path):
-            verify = _run_verify(step, repo, step_timeout)
+            verify = _run_verify(plan, step, repo, step_timeout)
         repairs = 0
         for escalated in (False, True):
             if not verify.verified or verify.passed or verify.timed_out:
@@ -591,7 +604,7 @@ def _run_next(
                 _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
                 return EXIT_FAILED
             with _protect_plan(plan_path):
-                verify = _run_verify(step, repo, step_timeout)
+                verify = _run_verify(plan, step, repo, step_timeout)
             cost = (
                 result.cost + repair.cost
                 if result.cost is not None and repair.cost is not None
@@ -668,7 +681,7 @@ def _run_next(
                     _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
                     return EXIT_FAILED
                 with _protect_plan(plan_path):
-                    verify = _run_verify(step, repo, step_timeout)
+                    verify = _run_verify(plan, step, repo, step_timeout)
                 if verify.timed_out:
                     return _verify_timed_out(out, plan_path, plan, step, step_timeout, date)
                 if verify.verified and not verify.passed:
