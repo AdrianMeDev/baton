@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO
 
@@ -36,6 +37,7 @@ class RoutedAdapter:
         self.route = route
         self.review = review
         self.attempted_agents: list[AgentConfig] = []
+        self.rejected = False  # set by run(): an ``accept`` callback turned a result down
         self.exhausted = False  # set by run(): every agent of the route was skipped or limited
         self.store = store
         self.out = out
@@ -94,11 +96,19 @@ class RoutedAdapter:
         """The prompt for the successor of a limited agent."""
         return handoff_prompt(prompt, previous, handoff_context(repo))
 
-    def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
+    def run(
+        self,
+        prompt: str,
+        repo: Path,
+        timeout: float,
+        accept: Callable[[AgentResult], str | None] | None = None,
+    ) -> AgentResult:
+        """Run the route. ``accept`` returns a reason to reject an ok result (no cooldown)."""
         before = None if self.review else head(repo)
         previous = None
         failure: AgentResult | None = None
         self.exhausted = False
+        self.rejected = False
         remaining = list(self._eligible())
         while remaining:
             agent, attempt = self.runs.select(
@@ -123,7 +133,14 @@ class RoutedAdapter:
             if not self.review and head(repo) != before:
                 return AgentResult(ok=False, error="agent moved HEAD")
             if result.ok:
-                return result
+                reason = accept(result) if accept else None
+                if reason is None:
+                    return result
+                self.rejected = True
+                failure = AgentResult(ok=False, error=reason)
+                say(self.out, f"Agent {agent.name} gave an unusable answer ({reason}).")
+                previous = agent.name
+                continue
             now = datetime.datetime.now(datetime.UTC)
             if result.limit is None:
                 # Unusable right now (not a usage limit): cool down, let the next agent continue.

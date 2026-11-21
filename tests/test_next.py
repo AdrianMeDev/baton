@@ -2126,6 +2126,54 @@ def test_worktree_run_ends_committed_with_the_final_review_as_evidence(
     assert any("review fix round 1" in line for line in plan.log)
 
 
+def _two_reviewers(config, agents, first, second):
+    with config.open("a") as stream:
+        stream.write('\n[agents.reviewer2]\nadapter="claude"\ncommand="r2"\nprovider="other"\n')
+    config.write_text(config.read_text().replace('S=["reviewer"]', 'S=["reviewer", "reviewer2"]'))
+    config.write_text(config.read_text().replace('M=["reviewer"]', 'M=["reviewer", "reviewer2"]'))
+    config.write_text(config.read_text().replace('L=["reviewer"]', 'L=["reviewer", "reviewer2"]'))
+    agents["reviewer"] = first
+    agents["reviewer2"] = second
+
+
+def test_invalid_review_falls_back_to_the_next_reviewer(repo, review_fix_chain, git_identity):
+    import json
+
+    config, agents = review_fix_chain
+    _two_reviewers(config, agents, _review_results("not json"), _review_results(CLEAN_JSON))
+
+    code, out = invoke_chain(repo, review_fix_chain, worktree=True)
+
+    assert code == EXIT_OK, out
+    assert "Invalid review JSON" in out
+    assert len(agents["reviewer"].prompts) == 1 and len(agents["reviewer2"].prompts) == 1
+    entry = next(x for x in plan_of(repo).log if x.startswith("baton-evidence: "))
+    assert "reviewer2" in json.dumps(json.loads(entry.removeprefix("baton-evidence: ")))
+
+
+def test_all_reviewers_invalid_then_valid_on_the_second_pass(repo, review_fix_chain, git_identity):
+    config, agents = review_fix_chain
+    agents["reviewer"] = _review_results("not json", CLEAN_JSON)
+
+    code, out = invoke_chain(repo, review_fix_chain, worktree=True)
+
+    assert code == EXIT_OK, out
+    assert "trying the route once more" in out
+    assert len(agents["reviewer"].prompts) == 2
+
+
+def test_review_invalid_on_both_passes_still_stops(repo, review_fix_chain, git_identity):
+    config, agents = review_fix_chain
+    agents["reviewer"] = _review_results("not json")
+
+    code, out = invoke_chain(repo, review_fix_chain, worktree=True)
+
+    assert code == EXIT_FAILED
+    assert "Invalid review JSON" in out
+    assert len(agents["reviewer"].prompts) == 2
+    assert plan_of(repo).steps[0].status != "done"
+
+
 def with_baseline(repo: Path, command: str) -> None:
     path = repo / ".agent-plan.md"
     text = path.read_text(encoding="utf-8")

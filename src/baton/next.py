@@ -19,7 +19,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
-from baton.adapter import Adapter, CommandAdapter
+from baton.adapter import Adapter, AgentResult, CommandAdapter
 from baton.config import ConfigError, find_config_path, load_config
 from baton.gate import GateResult, apply_gate, check_gate
 from baton.git import (
@@ -749,6 +749,14 @@ def _dry_run(
     return EXIT_OK
 
 
+def _invalid_review(result: AgentResult) -> str | None:
+    try:
+        parse_review(result.text)
+    except ReviewError as exc:
+        return str(exc)
+    return None
+
+
 def run_next_command(
     repo: Path,
     *,
@@ -803,7 +811,11 @@ def run_next_command(
         reviewer = RoutedAdapter(route, implementation.store, out, review=True)
         before = head(active)
         changes = review_context(active)
-        result = reviewer.run(review_prompt(plan, step, raw_step, changes), active, agent_timeout)
+        prompt = review_prompt(plan, step, raw_step, changes)
+        result = reviewer.run(prompt, active, agent_timeout, accept=_invalid_review)
+        if not result.ok and reviewer.rejected and not reviewer.exhausted:
+            say(out, "No reviewer gave a valid review; trying the route once more.")
+            result = reviewer.run(prompt, active, agent_timeout, accept=_invalid_review)
         if head(active) != before or review_context(active) != changes:
             raise ReviewError("Candidate changed during review; review is stale")
         if not result.ok:
