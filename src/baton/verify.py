@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from baton.git import head_checkout
 from baton.runner import run_command
 
 TAIL_LINES = 40
@@ -50,3 +51,9 @@ def run_verify(command: str, repo: Path, timeout: float) -> VerifyResult:
         output_tail=_tail(output),
         command=command,
     )
+
+
+def run_verify_at_head(command: str, repo: Path, timeout: float) -> VerifyResult:
+    """Like ``run_verify``, but in a temporary checkout of HEAD: uncommitted changes are ignored."""
+    with head_checkout(repo) as checkout:
+        return run_verify(command, checkout, timeout)

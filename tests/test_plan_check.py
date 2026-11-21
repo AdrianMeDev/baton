@@ -120,3 +120,20 @@ def test_assemble_plan_without_title_is_left_for_validation():
     text = assemble_plan("I could not plan this.\n", HEADER)
     assert text == "I could not plan this.\n"
     assert validate_plan(text, "M2") == ["plan does not parse: missing '## Steps' section"]
+
+
+def test_plan_with_and_without_baseline_is_valid():
+    assert _errors("generated_with_baseline.md") == []
+    assert _errors("generated_valid.md") == []
+
+
+def test_assemble_plan_keeps_the_planners_baseline():
+    reply = (FIXTURES / "generated_with_baseline.md").read_text(encoding="utf-8")
+    text = assemble_plan(reply, HEADER)
+    assert parse_plan(text).baseline == "uv run pytest -q && uv run ruff check ."
+    assert validate_plan(text, "M2") == []
+    assert parse_plan(assemble_plan(_valid_reply(), HEADER)).baseline is None
+
+
+def _valid_reply() -> str:
+    return (FIXTURES / "generated_valid.md").read_text(encoding="utf-8")

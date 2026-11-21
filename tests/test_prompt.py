@@ -132,6 +132,13 @@ def test_plan_prompt_contains_planning_rules():
     assert "git command" in prompt
 
 
+def test_plan_prompt_asks_for_a_baseline_command():
+    prompt = _plan_prompt()
+    assert "Baseline: `<command>`" in prompt
+    assert "must already pass on the base" in prompt
+    assert "that the steps create" in prompt
+
+
 def test_plan_prompt_roadmap_hint_depends_on_tracking():
     assert "List `docs/ROADMAP.md` under Changes" in _plan_prompt("tracked")
     local = _plan_prompt("local")

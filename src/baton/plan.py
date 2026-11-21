@@ -74,6 +74,7 @@ class Plan:
     milestone: MilestoneRef
     steps: tuple[Step, ...]
     log: tuple[str, ...] = field(default=())
+    baseline: str | None = None  # ``Baseline:`` header command
 
 
 def parse_milestone(value: str) -> MilestoneRef:
@@ -84,6 +85,13 @@ def parse_milestone(value: str) -> MilestoneRef:
     if m:
         return MilestoneRef(m["id"], m["name"], m["path"].strip(), cast(Tracking, m["tracking"]))
     return MilestoneRef(None, value, None, "none")
+
+
+def _clean_command(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value.startswith("`") and value.endswith("`"):
+        value = value[1:-1].strip()
+    return value
 
 
 def _parse_header(lines: list[str]) -> tuple[str, dict[str, str]]:
@@ -97,7 +105,7 @@ def _parse_header(lines: list[str]) -> tuple[str, dict[str, str]]:
         else:
             for part in line.split(" · "):
                 key, sep, value = part.partition(":")
-                if sep and key.strip() in ("Created", "Branch", "Base", "Milestone"):
+                if sep and key.strip() in ("Created", "Branch", "Base", "Milestone", "Baseline"):
                     fields[key.strip().lower()] = value.strip()
     return title, fields
 
@@ -193,6 +201,7 @@ def parse_plan(text: str) -> Plan:
         milestone=parse_milestone(fields.get("milestone", "none")),
         steps=tuple(steps),
         log=tuple(log),
+        baseline=_clean_command(fields.get("baseline", "")) or None,
     )
 
 

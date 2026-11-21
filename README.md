@@ -449,19 +449,28 @@ or a plan repair left in the working tree; without it a dirty tree with an open 
    A moved HEAD stops the run. A usage-limit failure records a cooldown and passes the same step
    to the next available agent in the same working tree, with staged and unstaged diffs and
    untracked paths. Ordinary errors and timeouts stop the run without switching.
-4. **Verify.** baton runs the step's **Verify** command itself (`bash -c` in the repo root); its
+4. **Baseline.** If the plan header has a ``Baseline: `<command>` `` line (the project's full
+   check), baton runs it on the current HEAD before it starts an agent. A failing baseline stops
+   the run with exit code 5 ("base already failing") and records it in the Log: the step is not
+   to blame, so no implementation or repair starts. A pass is cached in the Log per HEAD
+   (`baseline passed at <hash>`), so the baseline runs once per step; use a fast command. A
+   failure is re-run each time. On `--resume` the working tree holds a partial diff, so the
+   baseline runs in a temporary detached worktree of HEAD and leaves the diff alone. Plans
+   without `Baseline:` skip this step. Fix a red base on the base branch, then fast-forward the
+   milestone branch. `--dry-run` prints the command without running it.
+5. **Verify.** baton runs the step's **Verify** command itself (`bash -c` in the repo root); its
    result, not the agent's, decides.
-5. **Repair.** In routed configs, a failed Verify invokes the effective tier's `fix` route in
+6. **Repair.** In routed configs, a failed Verify invokes the effective tier's `fix` route in
    the existing working tree with the failing command, exit/timeout and bounded output. baton
    reruns the original Verify command. A second failure invokes `routes.fix.L` once, including
    when the starting tier is already L. A third failure stops with the latest diagnostic and
    preserved edits. Agent errors, changed HEAD or exhausted routes stop immediately.
-6. **Review.** After successful Verify, or explicit omission of Verify, routed steps require a
+7. **Review.** After successful Verify, or explicit omission of Verify, routed steps require a
    valid independent review. baton excludes every provider that participated in implementation
    or fixes, including partial work before quota handoff. Each reviewer receives the final diff
    and complete new-file contents in its prompt and runs in a fresh temporary directory. Quota
    failures can try the next eligible reviewer; ordinary errors or invalid findings stop the run.
-7. **Mark and report.** The step becomes `[~] (on <HEAD>)`, a Log line is added, and the report
+8. **Mark and report.** The step becomes `[~] (on <HEAD>)`, a Log line is added, and the report
    lists changed files, verification, reviewer and findings grouped as **CRITICAL**, **WARNING**
    and **INFORMATIONAL**, followed by commit commands. A valid review with critical findings
    still reaches `[~]`: you decide whether to commit. The Log records reviewer and severity
@@ -469,7 +478,8 @@ or a plan repair left in the working tree; without it a dirty tree with an open 
 
 Exit code 0 means the step is ready to commit. Steps without Verify are reported as unverified.
 Exit code 1 indicates an agent, Verify, review, plan or config error. Failed verification or
-review leaves the step open and records the failure in the Log. Exit code 2 means the run stopped
+review leaves the step open and records the failure in the Log. Exit code 5 means the plan's
+`Baseline:` command already fails on HEAD; no agent was started. Exit code 2 means the run stopped
 before starting an agent because of the gate, a dirty tree, a missing plan or no open steps.
 `--timeout` (default 1800 s) limits each implementation, fix or review agent call;
 `--verify-timeout` (default 900 s) limits the Verify command. `--dry-run` prints the step, the command and the prompt and changes nothing.
@@ -496,7 +506,8 @@ branch (e.g. `main`) with an `origin` remote; a dirty or diverged base is a stop
 - **Resuming:** just run `baton auto` again. The position is derived from `.agent-plan.md`, the
   roadmap, git and `~/.local/state/baton/auto.json`; a step recorded as in progress continues from
   its partial diff. Plain `baton next` still refuses a dirty tree with an open step.
-- **Stop rules:** a step failed after escalation, merge refused (CI red, critical finding, PR not
+- **Stop rules:** a step failed after escalation, a failing `Baseline:` ("base already failing",
+  see [`baton next`](#baton-next); the step stays in progress for the next run), merge refused (CI red, critical finding, PR not
   mergeable), a `BATON-ROADMAP-PROBLEM: <reason>` line from the planner or from an implementer
   whose plan repair failed or was not allowed ([Plan repair](#plan-repair)), budget
   reached (`--max-steps`, `--max-hours`; per run, across milestones), `baton stop`, or a base
@@ -507,7 +518,7 @@ branch (e.g. `main`) with an `origin` remote; a dirty or diverged base is a stop
 - **Exit codes:** `baton auto` 0 = roadmap complete (or PR published with `--no-merge`),
   1 = stopped by a rule, 2 = not started (not a repository, invalid config, bad flag).
   `baton next` and `baton plan` additionally use 3 = every agent of the route is in cooldown and
-  4 = roadmap problem reported.
+  4 = roadmap problem reported; `baton next` also 5 = the plan's baseline already fails.
 
 Optional defaults in the config (flags win):
 
@@ -712,7 +723,9 @@ baton reads and writes `.agent-plan.md` and `docs/ROADMAP.md` in the format of t
 `/next` and `/plan-roadmap` skills. Step markers are `[ ]` open, `[~] (on <hash>)` implemented and
 waiting for the commit, `[x] – <hash>` committed, `[-]` skipped. Writes are in place (markers, hash
 suffixes, Log and Changelog lines only), so hand edits survive. Each step may carry an optional
-`- **Size:** S|M|L` bullet; unknown bullets are ignored. Structural errors (no `## Steps`, unknown
+`- **Size:** S|M|L` bullet; unknown bullets are ignored. An optional header line
+``Baseline: `<command>` `` names the project's full check, which must already pass on the base
+commit (see [`baton next`](#baton-next)); `baton plan` asks the planner for it. Structural errors (no `## Steps`, unknown
 marker, duplicate step numbers) are reported with the line number. A repair appends a
 `plan repaired:` line to the `## Log` and rewrites the open steps; see [Plan repair](#plan-repair).
 

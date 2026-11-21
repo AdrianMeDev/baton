@@ -71,7 +71,7 @@ from baton.review import (
 from baton.roadmap import RoadmapError
 from baton.routed import RoutedAdapter, RoutedPlanner, say
 from baton.router import resolve_route
-from baton.verify import VerifyResult, _clean, run_verify
+from baton.verify import VerifyResult, _clean, run_verify, run_verify_at_head
 from baton.worktree import ensure_worktree, mirror_plan
 
 EXIT_OK = 0
@@ -79,6 +79,7 @@ EXIT_FAILED = 1  # agent, verify or plan problem; changes stay in the tree
 EXIT_STOPPED = 2  # nothing was started (gate, no open step, dirty tree)
 EXIT_ROADMAP_PROBLEM = 4  # the agent reported BATON-ROADMAP-PROBLEM; nothing was marked
 EXIT_EXHAUSTED = 3  # every agent of the route is in cooldown; the partial diff stays in the tree
+EXIT_BASE_FAILING = 5  # the plan's Baseline command already fails on HEAD; no agent was started
 
 DEFAULT_AGENT_TIMEOUT = 1800.0
 DEFAULT_VERIFY_TIMEOUT = 900.0
@@ -236,6 +237,33 @@ def _enter_branch(repo: Path, plan: Plan, out: TextIO) -> bool:
     switch_branch(repo, branch, create=not exists)
     say(out, f"Branch: {branch} ({'switched to' if exists else 'created from ' + head(repo)})")
     return True
+
+
+def _check_baseline(
+    repo: Path, plan: Plan, plan_path: Path, timeout: float, out: TextIO, date: str
+) -> int | None:
+    """Run the plan's Baseline on HEAD; ``EXIT_BASE_FAILING`` if it fails, ``None`` to go on.
+
+    A pass is cached in the Log per HEAD; a failure is re-run, since the user may have fixed it.
+    """
+    if not plan.baseline:
+        return None
+    at = head(repo)
+    if any(line.endswith(f"baseline passed at {at}") for line in plan.log):
+        return None
+    say(out, f"Baseline: {plan.baseline}")
+    with _protect_plan(plan_path):
+        # A dirty tree (resume) holds the partial diff: check the committed base in a worktree.
+        run_baseline = run_verify_at_head if dirty_paths(repo) else run_verify
+        result = run_baseline(plan.baseline, repo, timeout)
+    if result.passed:
+        _log(plan_path, f"baseline passed at {at}", date)
+        return None
+    say(out, f"Base already failing at {at} ({_verify_failure(result)}): {result.command}")
+    say(out, result.output_tail)
+    say(out, "Not caused by this step. Fix it on the base branch, then fast-forward this branch.")
+    _log(plan_path, f"baseline failed at {at} ({_verify_failure(result)})", date)
+    return EXIT_BASE_FAILING
 
 
 RepairPlan = Callable[[Plan, str, Step, str, str], str | None]
@@ -421,6 +449,9 @@ def _run_next(
         if commit and not _clean(step.verify):
             say(out, "Automatic commits require a Verify command; the step stays open.")
             return EXIT_FAILED
+        stop = _check_baseline(repo, plan, plan_path, verify_timeout, out, date)
+        if stop is not None:
+            return stop
         adapter = select_adapter(step)
         raw_step = step_text(plan_path.read_text("utf-8"), step)
         prompt = implement_prompt(plan, step, raw_step)
@@ -694,6 +725,8 @@ def _dry_run(
         return EXIT_STOPPED
     prompt = implement_prompt(plan, step, step_text(text, step))
     say(out, f"Step {step.number}/{len(plan.steps)}: {step.message}")
+    if plan.baseline:
+        say(out, f"Baseline: {plan.baseline} (not run in a dry run)")
     if commit:
         branch = milestone_branch(plan)
         if current_branch(repo) == branch:

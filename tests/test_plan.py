@@ -218,3 +218,23 @@ def load_plan_text(text):
 
 def _diff_lines(a, b):
     return sum(x != y for x, y in zip(a.splitlines(), b.splitlines(), strict=True))
+
+
+def _plan_with_header(header: str) -> str:
+    return f"# Plan: x\n{header}\n\n## Steps\n\n### 1. [ ] feat(a): b\n- **Verify:** `true`\n"
+
+
+def test_baseline_header_with_backticks():
+    plan = parse_plan(
+        _plan_with_header("Created: 2026-11-21 · Branch: b\nBaseline: `uv run pytest -q`")
+    )
+    assert plan.baseline == "uv run pytest -q"
+
+
+def test_baseline_header_without_backticks():
+    assert parse_plan(_plan_with_header("Baseline: make check")).baseline == "make check"
+
+
+def test_no_baseline_header_is_none():
+    assert parse_plan(_plan_with_header("Created: 2026-11-21")).baseline is None
+    assert load_plan(FIXTURES / "fresh.md").baseline is None

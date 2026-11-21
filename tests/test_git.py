@@ -268,3 +268,20 @@ def test_fetch_ff_merge_and_worktree_remove(tmp_path: Path) -> None:
     assert path.resolve() in {p.resolve() for p in worktree_paths(work)}
     worktree_remove(work, path)
     assert not path.exists()
+
+
+def test_head_checkout_is_removed_also_on_error(tmp_path: Path) -> None:
+    from baton.git import head_checkout, worktree_paths
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    (repo / "a.txt").write_text("base\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "init")
+    (repo / "a.txt").write_text("dirty\n")
+    with pytest.raises(RuntimeError, match="boom"), head_checkout(repo) as checkout:
+        assert (checkout / "a.txt").read_text() == "base\n"
+        raise RuntimeError("boom")
+    assert not checkout.exists()
+    assert len(worktree_paths(repo)) == 1
