@@ -53,7 +53,8 @@ uv tool update-shell
 ```
 
 Open a new shell or source the profile reported by `uv tool update-shell`. From the baton
-source checkout, set `baton_source=$PWD` again if you opened a new shell. Then run:
+source checkout, set `baton_source=$PWD` again if you opened a new shell. The uv tool copy is not
+editable: after pulling new baton code, run `uv tool install --python 3.12 --reinstall .`. Then run:
 
 ```bash
 baton --version
@@ -448,7 +449,10 @@ or a plan repair left in the working tree; without it a dirty tree with an open 
 3. **Check HEAD and hand off.** After every attempt, including failures, baton checks HEAD.
    A moved HEAD stops the run. A usage-limit failure records a cooldown and passes the same step
    to the next available agent in the same working tree, with staged and unstaged diffs and
-   untracked paths. Ordinary errors and timeouts stop the run without switching.
+   untracked paths. An agent that fails without a usage limit (for example `denied read_file`)
+   and did not move HEAD gets a 15 minute cooldown and the next agent continues the same way. If
+   every agent of the route failed like this, the last error ends the run with exit code 1; it
+   never waits. A moved HEAD stays a hard stop.
 4. **Baseline.** If the plan header has a ``Baseline: `<command>` `` line (the project's full
    check), baton runs it on the current HEAD before it starts an agent. A failing baseline stops
    the run with exit code 5 ("base already failing") and records it in the Log: the step is not
@@ -459,7 +463,10 @@ or a plan repair left in the working tree; without it a dirty tree with an open 
    without `Baseline:` skip this step. Fix a red base on the base branch, then fast-forward the
    milestone branch. `--dry-run` prints the command without running it.
 5. **Verify.** baton runs the step's **Verify** command itself (`bash -c` in the repo root); its
-   result, not the agent's, decides.
+   result, not the agent's, decides. Before that, every existing path the step names in backticks
+   under **Changes** is checked with `git check-ignore -v`. A file that git ignores would be
+   missing from the commit, so it counts as a failed Verify and the repair prompt names the
+   ignoring rule and line.
 6. **Repair.** In routed configs, a failed Verify invokes the effective tier's `fix` route in
    the existing working tree with the failing command, exit/timeout and bounded output. baton
    reruns the original Verify command. A second failure invokes `routes.fix.L` once, including
@@ -512,6 +519,11 @@ branch (e.g. `main`) with an `origin` remote; a dirty or diverged base is a stop
   whose plan repair failed or was not allowed ([Plan repair](#plan-repair)), budget
   reached (`--max-steps`, `--max-hours`; per run, across milestones), `baton stop`, or a base
   checkout that cannot be fast-forwarded. `--no-merge` stops after the PR is published.
+- **Stop classes:** every stop prints its reason and exactly one `Next: <action> (<class>)` line
+  and appends a `stop` event to `runs.jsonl` (ignored by `baton stats`). `recoverable` (step
+  failed, limit wait, budget, stop request, planning failed): `baton auto` again usually
+  continues. `needs-human` (failing base, roadmap problem, PR not merged, no progress, bad
+  roadmap state): fix or decide first. The notification carries the same hint.
 - **`baton stop`** sets a stop request that `baton auto` honors before the next step or while
   waiting; the current agent run finishes first. A request made before `baton auto` starts is
   cleared on start.
@@ -561,6 +573,11 @@ By default baton stops for your commit. Three opt-in flags change that:
   `$XDG_STATE_HOME/baton/worktrees/`, so your checkout (branch, HEAD, files) stays untouched.
   The plan is copied in on creation and mirrored back after every run, so `baton status` in your
   checkout shows the progress.
+- Without `--worktree`, an existing worktree of the plan's milestone branch is reused
+  automatically (`Worktree: <path> (reused)`), so `baton next` finds the earlier steps from any
+  directory. `baton status` shows that worktree's plan (the leading copy) and warns when your
+  checkout's copy differs. Every command also resolves the main repository root, so starting
+  `baton` inside a milestone worktree or a subdirectory behaves like starting it in the checkout.
 
 A `critical` review finding blocks the auto-commit: the step stays `[~]` with the changes in the
 tree and baton exits 1 so you decide. `warning` and `informational` findings are reported and
@@ -603,7 +620,9 @@ Reviewers must return JSON such as:
 ```
 
 `{"findings": []}` is a valid clean review. Empty text, prose, malformed JSON or invalid severity
-values are review failures. Review inputs contain complete untracked files and a final patch;
+values are review failures. Such a reviewer counts as failed for that attempt only (no cooldown)
+and the next reviewer of the route is tried; if all were invalid, the route runs once more before
+the step stops with the parse error. Review inputs contain complete untracked files and a final patch;
 symlinks are represented by their targets and binary new files by base64. The temporary working
 directory prevents accidental edits to the candidate through relative paths; it is not a security
 sandbox. A changed candidate or HEAD during review invalidates the result. `--dry-run` starts no

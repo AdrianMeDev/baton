@@ -146,7 +146,7 @@ Updated: 2026-11-19
 - **Depends on:** M10, M11
 - **Size:** S, ~4 commits
 
-### M13 [~] Auto-Robustheit
+### M13 [x] Auto-Robustheit
 - **Goal:** `baton auto` stoppt seltener ohne Not und sagt bei jedem Stopp, was zu tun ist.
 - **Includes:** Agent-Ausfall ohne Limit führt zum nächsten Agenten (Cooldown), unlesbare Reviews zum nächsten Reviewer, Worktree-Wurzel und -Wiederverwendung für `next`/`status`, Prüfung auf von git ignorierte Dateien eines Schritts, Stopp-Klassen (`recoverable`/`needs-human`) mit genau einer `Next:`-Zeile
 - **Done when:** jeder Fall hat einen Test mit Fake-Adaptern; `runs.jsonl` enthält `stop`-Ereignisse, `baton stats` bleibt unverändert
@@ -167,6 +167,7 @@ Updated: 2026-11-19
 
 ## Changelog
 
+- 2026-11-21: M13 Auto-Robustheit: an agent failing without a limit hands over to the next agent (15 minute cooldown), unparsable reviews try the next reviewer, `baton next`/`status` reuse the milestone worktree and every command resolves the main root, git-ignored files named in a step's Changes fail Verify, and every `baton auto` stop has a class (`recoverable`/`needs-human`), one `Next:` line and a `stop` event in `runs.jsonl`.
 - 2026-11-20: `baton audit --jobs N` reviews up to N batches at the same time (one adapter per worker, results recorded in batch order, stops record every finished batch); default `--jobs 1` is unchanged.
 - 2026-11-20: `baton audit` reviews every tracked file batch by batch into `docs/AUDIT.md` (inventory, findings, fix milestones, suggestions; resumable, read-only reviewer); `baton audit --fix` works through the fix milestones via `baton auto --roadmap docs/AUDIT.md`; `baton plan` and `baton auto` accept `--roadmap PATH`.
 - 2026-11-19: Review fix loop: a critical review finding with a location is handed to the `fix` route (tier of the step, then L), the step is verified and reviewed again, and only the last review becomes the evidence; a finding that survives two rounds still blocks the auto-commit. Review prompt: concerns that cannot be shown in the diff are warnings, not critical.
