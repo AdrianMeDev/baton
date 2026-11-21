@@ -2352,3 +2352,27 @@ def test_passing_verify_is_journaled_and_empty_verify_is_not(repo):
 
     assert run(repo, FakeAdapter(action=edit))[0] == EXIT_OK
     assert [r["passed"] for r in RunStore().read_verify()] == [True]
+
+
+@pytest.mark.parametrize("verify", ["`bash a.sh` (locally); `pwsh b.ps1` (CI)", "`if then fi (`"])
+def test_unusable_verify_stops_before_any_agent(repo, verify):
+    (repo / ".agent-plan.md").write_text(
+        (repo / ".agent-plan.md").read_text().replace("`true`", verify, 1)
+    )
+    adapter = FakeAdapter(action=edit)
+    code, out = run(repo, adapter)
+    assert code == EXIT_STOPPED
+    assert adapter.prompts == []
+    assert "Step 1: the Verify cannot work" in out
+    assert "verify unusable" in (repo / ".agent-plan.md").read_text()
+
+
+def test_container_verify_only_warns(repo):
+    (repo / ".agent-plan.md").write_text(
+        (repo / ".agent-plan.md").read_text().replace("`true`", "`true # container-matrix`", 1)
+    )
+    adapter = FakeAdapter(action=edit)
+    code, out = run(repo, adapter)
+    assert code == EXIT_OK
+    assert len(adapter.prompts) == 1
+    assert "Warning: step 1's Verify is slow" in out

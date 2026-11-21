@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from dataclasses import dataclass
 
 from baton.plan import MilestoneRef, PlanError, parse_plan
@@ -16,6 +17,31 @@ _COMMIT_RE = re.compile(rf"^(?:{'|'.join(COMMIT_TYPES)})(?:\([a-z0-9][a-z0-9._/-
 
 def is_commit_message(message: str) -> bool:
     return _COMMIT_RE.match(message) is not None
+
+
+_CONTAINER_RE = re.compile(r"container-matrix|\b(?:docker|podman)\b")
+
+
+def verify_problems(verify: str) -> tuple[str | None, str | None]:
+    """Why a Verify cannot work, and why it is too slow: ``(unusable, container)``.
+
+    ``unusable`` is set when the value is not one shell command (prose, several backtick spans,
+    a bash syntax error); ``container`` when it runs a container matrix or engine. Both are
+    ``None`` for an empty Verify (reported elsewhere) and for a good one.
+    """
+    value = verify.strip()
+    if not value:
+        return None, None
+    if value.startswith("`") != value.endswith("`") or "`" in value.strip("`"):
+        return "it is not exactly one command in backticks (prose or several commands)", None
+    command = value.strip("`").strip()
+    parsed = subprocess.run(["bash", "-n", "-c", command], capture_output=True, text=True)
+    if parsed.returncode != 0:
+        detail = parsed.stderr.strip().splitlines()[-1:] or ["syntax error"]
+        return f"bash cannot parse it ({detail[0]})", None
+    if _CONTAINER_RE.search(command):
+        return None, "it runs container-matrix, docker or podman; container checks belong to CI"
+    return None, None
 
 
 def validate_plan(text: str, milestone_id: str) -> list[str]:
@@ -62,6 +88,12 @@ def validate_plan(text: str, milestone_id: str) -> list[str]:
         ):
             if not value.strip():
                 errors.append(f"{where}: missing '**{label}:**'")
+        for problem in verify_problems(step.verify):
+            if problem:
+                errors.append(
+                    f"{where}: Verify must be one shell command in backticks that finishes in "
+                    f"about 5 minutes, but {problem}"
+                )
         if step.size is None:
             errors.append(f"{where}: '**Size:**' must be S, M or L")
     return errors

@@ -259,3 +259,9 @@ def test_audit_plan_retry_prompt_names_the_errors_and_keeps_the_output():
     prompt = audit_plan_retry_prompt("BASE", "old reply", ["finding F2 is not covered"])
     assert prompt.startswith("BASE")
     assert "- finding F2 is not covered" in prompt and "old reply" in prompt
+
+
+def test_plan_prompt_limits_verify_to_one_short_command():
+    prompt = _plan_prompt()
+    assert "exactly\n  one shell command in backticks" in prompt.replace("\n  one", "\n  one")
+    assert "container matrices" in prompt and "belong to CI" in prompt

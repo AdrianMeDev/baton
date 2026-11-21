@@ -51,6 +51,7 @@ from baton.plan import (
     save_plan,
     set_step_status,
 )
+from baton.plan_check import verify_problems
 from baton.prompt import (
     fix_prompt,
     handoff_prompt,
@@ -521,6 +522,16 @@ def _run_next(
         if commit and not _clean(step.verify):
             say(out, "Automatic commits require a Verify command; the step stays open.")
             return EXIT_FAILED
+        unusable, container = verify_problems(step.verify)
+        if unusable:
+            say(out, f"Step {step.number}: the Verify cannot work: {unusable}.")
+            say(
+                out, "Fix the step's Verify (one shell command in backticks); no agent was started."
+            )
+            _log(plan_path, f"step {step.number}: verify unusable ({unusable})", date)
+            return EXIT_STOPPED
+        if container:
+            say(out, f"Warning: step {step.number}'s Verify is slow: {container}.")
         stop = _check_baseline(repo, plan, plan_path, verify_timeout, out, date)
         if stop is not None:
             return stop
