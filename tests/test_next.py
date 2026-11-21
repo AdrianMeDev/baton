@@ -1456,6 +1456,19 @@ def test_worktree_is_reused_by_the_next_run(repo, git_identity) -> None:
     assert plan_of(repo).steps[1].status == "done"
 
 
+def test_existing_worktree_is_used_without_the_flag(repo, git_identity) -> None:
+    run(repo, FakeAdapter(action=edit), worktree=True)
+    work = worktree_path_for(repo, "baton/demo")
+    code, out = run(repo, FakeAdapter(action=lambda r: (r / "b.txt").write_text("b\n")))
+    assert code == EXIT_OK and f"Worktree: {work} (reused)" in out
+    assert (work / "b.txt").exists() and not (repo / "b.txt").exists()
+
+
+def test_no_worktree_without_the_flag_runs_in_place(repo, git_identity) -> None:
+    code, out = run(repo, FakeAdapter(action=edit))
+    assert code == EXIT_OK and "Worktree:" not in out and (repo / "new.txt").exists()
+
+
 def test_worktree_dirty_main_checkout_is_not_a_problem(repo, git_identity) -> None:
     (repo / "wip.txt").write_text("wip\n")
     code, _ = run(repo, FakeAdapter(action=edit), worktree=True)

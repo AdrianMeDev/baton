@@ -13,6 +13,7 @@ from baton.git import PLAN_FILENAME, GitError
 from baton.limits import LimitStateError, LimitStore
 from baton.plan import Plan, PlanError, Step, first_open_step, load_plan, pending_step
 from baton.roadmap import RoadmapError, find_roadmap, load_roadmap
+from baton.worktree import find_worktree
 
 SYMBOLS = {"open": "[ ]", "pending": "[~]", "done": "[x]", "skipped": "[-]"}
 
@@ -78,6 +79,21 @@ def _plan_status(root: Path, out: TextIO | None = None) -> int:
     except (PlanError, OSError, UnicodeDecodeError) as exc:
         print(f"Cannot read {path}: {exc}", file=out)
         return 1
+
+    worktree = find_worktree(root, plan)
+    if worktree is not None and (worktree / PLAN_FILENAME).is_file():
+        try:
+            lead = load_plan(worktree / PLAN_FILENAME)
+        except (PlanError, OSError, UnicodeDecodeError) as exc:
+            print(f"Cannot read {worktree / PLAN_FILENAME}: {exc}", file=out)
+            return 1
+        print(f"Plan: milestone worktree {worktree} (leads)", file=out)
+        if (worktree / PLAN_FILENAME).read_bytes() != path.read_bytes():
+            print(
+                f"Warning: {path} differs from the worktree copy; the worktree copy is shown.",
+                file=out,
+            )
+        plan, root = lead, worktree
 
     total = len(plan.steps)
     print(plan.title, file=out)

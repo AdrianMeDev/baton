@@ -17,6 +17,16 @@ from baton.git import (
 from baton.plan import Plan
 
 
+def find_worktree(repo: Path, plan: Plan) -> Path | None:
+    """The existing worktree of the plan's milestone branch, or ``None``."""
+    path = worktree_path_for(repo, milestone_branch(plan))
+    try:
+        registered = {p.resolve() for p in worktree_paths(repo)}
+    except GitError:
+        return None
+    return path if path.resolve() in registered and path.is_dir() else None
+
+
 def ensure_worktree(repo: Path, plan: Plan) -> tuple[Path, bool]:
     """Locate or create the worktree for the plan's milestone branch.
 
@@ -25,10 +35,10 @@ def ensure_worktree(repo: Path, plan: Plan) -> tuple[Path, bool]:
     because the branch is checked out elsewhere.
     """
     branch = milestone_branch(plan)
+    existing = find_worktree(repo, plan)
+    if existing is not None:
+        return existing, False
     path = worktree_path_for(repo, branch)
-    registered = {p.resolve() for p in worktree_paths(repo)}
-    if path.resolve() in registered and path.is_dir():
-        return path, False
     if path.exists():
         raise GitError(f"{path} exists but is not a worktree of {repo}; remove it and retry")
     worktree_add(repo, path, branch, create=not branch_exists(repo, branch))

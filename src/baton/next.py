@@ -72,7 +72,7 @@ from baton.roadmap import RoadmapError
 from baton.routed import RoutedAdapter, RoutedPlanner, say
 from baton.router import resolve_route
 from baton.verify import VerifyResult, _clean, run_verify, run_verify_at_head
-from baton.worktree import ensure_worktree, mirror_plan
+from baton.worktree import ensure_worktree, find_worktree, mirror_plan
 
 EXIT_OK = 0
 EXIT_FAILED = 1  # agent, verify or plan problem; changes stay in the tree
@@ -380,14 +380,21 @@ def run_next(
 
 def _with_worktree(repo: Path, enabled: bool, out: TextIO, run: Callable[[Path], int]) -> int:
     """Run ``run`` in the milestone worktree of ``repo`` (if ``enabled``), then mirror the plan."""
-    if not enabled:
-        return run(repo)
     plan_path = repo / PLAN_FILENAME
     try:
         if not plan_path.is_file():
+            if not enabled:
+                return run(repo)
             say(out, f"No {PLAN_FILENAME} in {repo}. Create one with `/plan-commits <task>`.")
             return EXIT_STOPPED
-        work, created = ensure_worktree(repo, parse_plan(plan_path.read_text(encoding="utf-8")))
+        plan = parse_plan(plan_path.read_text(encoding="utf-8"))
+        if enabled:
+            work, created = ensure_worktree(repo, plan)
+        else:
+            # An existing milestone worktree holds the earlier steps, so use it automatically.
+            work, created = find_worktree(repo, plan), False
+            if work is None:
+                return run(repo)
     except (GitError, PlanError, OSError) as exc:
         say(out, f"Error: {exc}")
         return EXIT_FAILED
