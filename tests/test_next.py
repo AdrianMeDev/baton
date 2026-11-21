@@ -1,5 +1,6 @@
 import io
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -372,16 +373,31 @@ def test_moved_head_stops_before_successor_even_on_failure(repo, chain, limited)
     assert plan_of(repo).steps[0].status == "open"
 
 
-def test_ordinary_failure_does_not_handoff(repo, chain):
+def test_ordinary_failure_falls_back_to_next_agent_with_cooldown(repo, chain):
+    from baton.limits import LimitStore
+    from baton.routed import FAILURE_COOLDOWN
+
     _, agents = chain
-    agents["first"] = FakeAdapter(AgentResult(ok=False, error="bad model"), edit)
+    agents["first"] = FakeAdapter(AgentResult(ok=False, error="denied read_file"))
     code, out = invoke_chain(repo, chain)
-    assert code == EXIT_FAILED and "bad model" in out
-    assert not agents["second"].prompts
+    assert code == EXIT_OK, out
+    assert "denied read_file" in out and len(agents["second"].prompts) == 1
+    assert "Handoff" in agents["second"].prompts[0]
+    deadline = LimitStore().read()["first"]
+    assert deadline - datetime.now(UTC) <= FAILURE_COOLDOWN
+
+
+def test_all_agents_failing_is_a_plain_failure_not_exhaustion(repo, chain):
+    _, agents = chain
+    agents["first"] = FakeAdapter(AgentResult(ok=False, error="bad model"))
+    agents["second"] = FakeAdapter(AgentResult(ok=False, error="no answer"))
+    code, out = invoke_chain(repo, chain)
+    assert code == EXIT_FAILED and "no answer" in out
+    assert plan_of(repo).steps[0].status == "open"
 
 
 def test_cooldown_skips_agent_and_explicit_pin_does_not_fallback(repo, chain, routed_executions):
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
     from baton.limits import LimitStore
 
@@ -398,7 +414,7 @@ def test_cooldown_skips_agent_and_explicit_pin_does_not_fallback(repo, chain, ro
 
 
 def test_provider_reset_time_is_persisted(repo, chain):
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
     from baton.limits import LimitStore, UsageLimit
 
@@ -412,7 +428,7 @@ def test_provider_reset_time_is_persisted(repo, chain):
 def test_dry_run_selects_after_gate_and_skips_cooldown_without_writes(
     repo, chain, routed_executions
 ):
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
     from baton.adapter import CodexAdapter
     from baton.limits import LimitStore
@@ -590,7 +606,7 @@ def test_failed_verify_is_repaired_in_same_tree(repo, repair_chain, routed_execu
 
 @pytest.mark.parametrize("mode", ["failed", "committed", "ineffective", "cooldown", "quota"])
 def test_unsuccessful_fix_leaves_step_open(repo, repair_chain, mode):
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
     from baton.limits import LimitStore, UsageLimit
 
@@ -754,7 +770,7 @@ def test_verification_escalates_once_then_stops(
 
 @pytest.mark.parametrize("mode", ["missing", "cooldown", "quota", "failed", "committed"])
 def test_escalation_route_failure_stops_with_partial_work(repo, repair_chain, mode):
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
     from baton.limits import LimitStore, UsageLimit
 
@@ -898,7 +914,7 @@ def test_cli_reports_independent_review_before_commit(repo, chain, capsys, verif
     ],
 )
 def test_review_failure_leaves_candidate_open(repo, chain, mode):
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
     from baton.limits import LimitStore, UsageLimit
 

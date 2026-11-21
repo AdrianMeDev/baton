@@ -15,6 +15,8 @@ from baton.review import run_isolated_review
 from baton.router import Route
 from baton.runs import RunStore, budget_reset_message, daily_counts
 
+FAILURE_COOLDOWN = datetime.timedelta(minutes=15)
+
 
 def say(out: TextIO, text: str = "") -> None:
     print(text, file=out)
@@ -95,6 +97,7 @@ class RoutedAdapter:
     def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
         before = None if self.review else head(repo)
         previous = None
+        failure: AgentResult | None = None
         self.exhausted = False
         remaining = list(self._eligible())
         while remaining:
@@ -119,9 +122,20 @@ class RoutedAdapter:
             # Check even failed attempts, before persisting a cooldown or trying a successor.
             if not self.review and head(repo) != before:
                 return AgentResult(ok=False, error="agent moved HEAD")
-            if result.ok or result.limit is None:
+            if result.ok:
                 return result
             now = datetime.datetime.now(datetime.UTC)
+            if result.limit is None:
+                # Unusable right now (not a usage limit): cool down, let the next agent continue.
+                failure = result
+                self.store.set(agent.name, now + FAILURE_COOLDOWN)
+                say(
+                    self.out,
+                    f"Agent {agent.name} failed ({result.error}); "
+                    f"cooldown until {(now + FAILURE_COOLDOWN).isoformat()}.",
+                )
+                previous = agent.name
+                continue
             deadline = result.limit.reset_at
             fallback = deadline is None or deadline <= now
             if fallback:
@@ -134,6 +148,8 @@ class RoutedAdapter:
                 f"cooldown until {deadline.isoformat()}{note}.",
             )
             previous = agent.name
+        if failure is not None:
+            return failure
         self.exhausted = True
         return AgentResult(ok=False, error=self._exhaustion_message())
 

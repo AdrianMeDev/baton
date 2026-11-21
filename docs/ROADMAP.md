@@ -146,6 +146,20 @@ Updated: 2026-11-19
 - **Depends on:** M10, M11
 - **Size:** S, ~4 commits
 
+### M13 [~] Auto-Robustheit
+- **Goal:** `baton auto` stoppt seltener ohne Not und sagt bei jedem Stopp, was zu tun ist.
+- **Includes:** Agent-Ausfall ohne Limit führt zum nächsten Agenten (Cooldown), unlesbare Reviews zum nächsten Reviewer, Worktree-Wurzel und -Wiederverwendung für `next`/`status`, Prüfung auf von git ignorierte Dateien eines Schritts, Stopp-Klassen (`recoverable`/`needs-human`) mit genau einer `Next:`-Zeile
+- **Done when:** jeder Fall hat einen Test mit Fake-Adaptern; `runs.jsonl` enthält `stop`-Ereignisse, `baton stats` bleibt unverändert
+- **Depends on:** M10, M12
+- **Size:** L, ~7 commits
+
+### M14 [ ] Selbstheilung
+- **Goal:** `baton auto` repariert typische Fehler selbst, statt zu stoppen.
+- **Includes:** CI-Fix-Schleife (max. 2 Runden, Push auf den Meilenstein-Branch, `--no-ci-fix`), `baton adopt <rev>`, schreibgeschützter Repo-Snapshot für den Reviewer (`git archive HEAD` plus Patch in einem Temp-Verzeichnis), Prüfung eines `BATON-ROADMAP-PROBLEM` per `git merge-base --is-ancestor`
+- **Done when:** ein roter CI-Lauf wird in höchstens zwei Runden repariert oder sauber gemeldet; jeder Fall hat einen Fake-Adapter-Test
+- **Depends on:** M13
+- **Size:** L, ~6 commits
+
 ## Definition of done (every milestone)
 - Baut, Tests grün, `ruff check` und `ruff format --check` sauber, CI grün
 - Neue Logik hat Tests; CLIs in Tests nur über Fake-Adapter oder aufgezeichnete Ausgaben, nie live
