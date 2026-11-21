@@ -47,6 +47,20 @@ def is_repo(repo: Path) -> bool:
         return False
 
 
+def main_root(path: Path) -> Path:
+    """The main checkout's root for ``path``, also from a linked worktree or a subdirectory.
+
+    Outside a git repository ``path`` is returned unchanged so callers report their own error.
+    """
+    try:
+        common = Path(_git(path, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+        if common.name == ".git":
+            return common.parent
+        return Path(_git(path, "rev-parse", "--show-toplevel").strip())
+    except GitError:
+        return path
+
+
 def head(repo: Path, *, short: bool = True) -> str:
     """The commit hash of HEAD (abbreviated by default)."""
     if not is_repo(repo):
@@ -103,6 +117,28 @@ def is_tracked(repo: Path, path: str) -> bool:
     except GitError:
         return False
     return True
+
+
+def ignored_paths(repo: Path, paths: list[str]) -> list[str]:
+    """``git check-ignore -v`` lines (``source:line:pattern<TAB>path``) for the ignored ``paths``.
+
+    Tracked files are never reported, since git does not ignore them.
+    """
+    if not paths:
+        return []
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "check-ignore", "-v", "--", *paths],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise GitError("git is not installed or not on PATH") from exc
+    if proc.returncode not in (0, 1):  # 1: none of the paths is ignored
+        raise GitError(f"git check-ignore failed in {repo}: {proc.stderr.strip()}")
+    return proc.stdout.splitlines()
 
 
 def ensure_excluded(repo: Path, pattern: str = PLAN_FILENAME) -> bool:

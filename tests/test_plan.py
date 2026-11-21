@@ -238,3 +238,17 @@ def test_baseline_header_without_backticks():
 def test_no_baseline_header_is_none():
     assert parse_plan(_plan_with_header("Created: 2026-11-21")).baseline is None
     assert load_plan(FIXTURES / "fresh.md").baseline is None
+
+
+def test_changed_paths_takes_backticked_paths_only():
+    from baton.plan import Step, changed_paths
+
+    step = Step(
+        1,
+        "open",
+        "m",
+        changes=(
+            "`src/a.py` - uses `uv run x`, `Foo.bar`, `--flag`, `/etc/x`, `../up/x.py`, `src/a.py`"
+        ),
+    )
+    assert changed_paths(step) == ["src/a.py", "Foo.bar"]

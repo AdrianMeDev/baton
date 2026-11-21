@@ -107,3 +107,15 @@ def _agent(name):
     from baton.config import AgentConfig
 
     return AgentConfig(name, "claude", "claude")
+
+
+def test_stop_events_are_journaled_and_ignored_by_readers(tmp_path):
+    from baton.runs import summarize
+
+    store = RunStore(tmp_path / "runs.jsonl")
+    ident = store.dispatch("agent")
+    store.complete(ident, AgentResult(ok=True, tokens=5, duration_s=1.0))
+    before = summarize(store.read())
+    store.record_stop("budget reached", "recoverable")
+    assert '"event": "stop"' in store.path.read_text()
+    assert summarize(store.read()) == before and len(store.read()) == 2

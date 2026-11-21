@@ -39,6 +39,8 @@ class RunStore:
         for number, line in enumerate(lines, 1):
             try:
                 row = json.loads(line)
+                if isinstance(row, dict) and row.get("event") == "stop":
+                    continue  # auto-mode stop event; not an attempt
                 if not isinstance(row, dict) or row.get("event") not in ("dispatch", "completion"):
                     raise ValueError("expected dispatch or completion")
                 ident = row["id"]
@@ -103,6 +105,18 @@ class RunStore:
             stream.write(json.dumps(row, allow_nan=False) + "\n")
             stream.flush()
             os.fsync(stream.fileno())
+
+    def record_stop(self, reason, kind, *, now=None):
+        """Journal why ``baton auto`` stopped; readers of attempts skip these rows."""
+        with self.locked():
+            self._append(
+                dict(
+                    event="stop",
+                    reason=reason,
+                    kind=kind,
+                    at=(now or datetime.now(UTC)).isoformat(),
+                )
+            )
 
     def dispatch(self, agent, *, now=None):
         with self.locked():

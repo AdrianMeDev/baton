@@ -197,3 +197,40 @@ def test_status_reports_state_error_but_keeps_plan_output(repo, tmp_path_factory
     assert "Next: step 2/3" in buf.getvalue()
     assert "Repair or move" in buf.getvalue()
     assert store.path.read_text() == "broken"
+
+
+@pytest.fixture
+def milestone_worktree(repo: Path, tmp_path_factory, monkeypatch) -> Path:
+    from baton.git import worktree_path_for
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("state")))
+    (repo / ".agent-plan.md").write_text(PLAN.replace("{marker}", "[ ]"), encoding="utf-8")
+    work = worktree_path_for(repo, "baton/demo")
+    work.parent.mkdir(parents=True)
+    git(repo, "worktree", "add", "-q", "-b", "baton/demo", str(work))
+    return work
+
+
+def test_status_shows_the_worktree_plan_and_warns_on_drift(repo: Path, milestone_worktree) -> None:
+    (milestone_worktree / ".agent-plan.md").write_text(
+        PLAN.replace("{marker}", "[x] – bbbbbbb"), encoding="utf-8"
+    )
+    code, out = status(repo)
+    assert code == 0
+    assert f"Plan: milestone worktree {milestone_worktree} (leads)" in out
+    assert "differs from the worktree copy" in out
+    assert "Next: step 3/3" in out
+
+
+def test_status_without_drift_has_no_warning(repo: Path, milestone_worktree) -> None:
+    (milestone_worktree / ".agent-plan.md").write_text(
+        PLAN.replace("{marker}", "[ ]"), encoding="utf-8"
+    )
+    _, out = status(repo)
+    assert "(leads)" in out and "differs" not in out
+
+
+def test_status_without_worktree_is_unchanged(repo: Path) -> None:
+    (repo / ".agent-plan.md").write_text(PLAN.replace("{marker}", "[ ]"), encoding="utf-8")
+    _, out = status(repo)
+    assert "(leads)" not in out

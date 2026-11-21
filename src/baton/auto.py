@@ -59,18 +59,39 @@ from baton.roadmap import (
 )
 from baton.routed import say
 from baton.router import resolve_route
+from baton.runs import RunStore
 
 Outcome = Literal["merged", "published", "done", "stopped"]
+# recoverable: running `baton auto` again may simply continue; needs-human: a decision or fix first.
+StopKind = Literal["recoverable", "needs-human"]
 
 
 @dataclass(frozen=True)
 class MilestoneResult:
-    """How one milestone run ended; ``reason`` explains a stop."""
+    """How one milestone run ended; ``reason``, ``kind`` and ``next`` explain a stop."""
 
     outcome: Outcome
     milestone: str = ""
     reason: str = ""
     pr_url: str = ""
+    kind: StopKind | None = None
+    next: str = ""
+
+
+AGAIN = "run `baton auto` again"
+
+
+def _report_stop(out: TextIO, result: MilestoneResult) -> MilestoneResult:
+    """Print the reason and exactly one ``Next:`` line, and journal the stop."""
+    say(out, f"Stopped: {result.reason}")
+    say(out, f"Next: {result.next} ({result.kind})")
+    with suppress(LimitStateError, OSError):
+        RunStore().record_stop(result.reason, result.kind or "needs-human")
+    return result
+
+
+def _stopped(reason: str, milestone: str, kind: StopKind, next_action: str) -> MilestoneResult:
+    return MilestoneResult("stopped", milestone, reason, kind=kind, next=next_action)
 
 
 @dataclass
@@ -155,9 +176,10 @@ def run_milestone(
 ) -> MilestoneResult:
     """Run the next milestone of ``roadmap`` (default: the project's) to a merged base, or stop."""
 
-    def stop(reason: str, milestone: str = "") -> MilestoneResult:
-        say(out, f"Stopped: {reason}")
-        return MilestoneResult("stopped", milestone, reason)
+    def stop(
+        reason: str, milestone: str = "", kind: StopKind = "needs-human", next_action: str = ""
+    ) -> MilestoneResult:
+        return _report_stop(out, _stopped(reason, milestone, kind, next_action or AGAIN))
 
     def stop_requested() -> bool:
         return store.read(repo).stop_requested
@@ -170,12 +192,13 @@ def run_milestone(
             if other is not None and other != rel:
                 return stop(
                     f"{PLAN_FILENAME} belongs to {other}, not {rel}; finish it with `baton auto` "
-                    "or remove it first"
+                    "or remove it first",
+                    next_action=f"remove {PLAN_FILENAME} or run `baton auto` without --roadmap",
                 )
         if not _adoptable(repo, plan, roadmap):
             plan = _plan_next(repo, hooks, out, stop_requested, budget, roadmap)
             if isinstance(plan, MilestoneResult):
-                return plan
+                return _report_stop(out, plan) if plan.outcome == "stopped" else plan
         assert plan is not None
         store.update(repo, milestone=plan.milestone.id or plan.title, branch=milestone_branch(plan))
         milestone = plan.milestone.id or plan.title
@@ -188,9 +211,9 @@ def run_milestone(
             if step is None:
                 break
             if stop_requested():
-                return stop("stop requested", milestone)
+                return stop("stop requested", milestone, "recoverable")
             if (reason := budget.exceeded(hooks.now())) is not None:
-                return stop(reason, milestone)
+                return stop(reason, milestone, "recoverable", f"{AGAIN} (raise the budget flag)")
             # The same step still recorded as in progress: continue from its partial diff.
             resume = store.read(repo).step == step.number
             store.update(repo, step=step.number)
@@ -199,11 +222,17 @@ def run_milestone(
             if code == EXIT_EXHAUSTED:
                 if (waiting := hooks.wait("implement", step.size)) != "ready":
                     if waiting != "stopped":
-                        return stop(waiting, milestone)
-                    return stop("stop requested while waiting for a cooldown", milestone)
+                        return stop(waiting, milestone, "recoverable", f"{AGAIN} after the reset")
+                    return stop(
+                        "stop requested while waiting for a cooldown", milestone, "recoverable"
+                    )
                 continue
             if code == EXIT_ROADMAP_PROBLEM:
-                return stop(f"roadmap problem reported at step {step.number}", milestone)
+                return stop(
+                    f"roadmap problem reported at step {step.number}",
+                    milestone,
+                    next_action=f"fix docs/ROADMAP.md or {PLAN_FILENAME}, then {AGAIN}",
+                )
             if code == EXIT_BASE_FAILING:
                 at = ""
                 with suppress(GitError):
@@ -212,12 +241,16 @@ def run_milestone(
                     f"base already failing{at}, not caused by step {step.number}; fix it on the "
                     "base branch, then fast-forward the milestone branch",
                     milestone,
+                    next_action=f"fix the base branch, fast-forward the milestone branch, "
+                    f"then {AGAIN}",
                 )
             if code not in (EXIT_OK, EXIT_STOPPED):
                 return stop(
                     f"step {step.number} failed after escalation (exit code {code}); "
                     "see the plan log",
                     milestone,
+                    "recoverable",
+                    f"{AGAIN} (resumes the step); see the plan log first",
                 )
             after = _read_plan(repo)
             current = _unfinished(after) if after is not None else step
@@ -227,29 +260,37 @@ def run_milestone(
                 step.status,
             ):
                 detail = "made no progress" if code == EXIT_OK else f"was not started (exit {code})"
-                return stop(f"step {step.number} {detail}; see the output above", milestone)
+                return stop(
+                    f"step {step.number} {detail}; see the output above",
+                    milestone,
+                    next_action="run `baton status` and inspect the working tree",
+                )
             if code == EXIT_OK:
                 budget.steps += 1
                 store.update(repo, step=0, steps_done=store.read(repo).steps_done + 1)
 
         if stop_requested():
-            return stop("stop requested", milestone)
+            return stop("stop requested", milestone, "recoverable")
         code, output = hooks.pr(merge)
         say(out, output.rstrip())
         url = next((m[0] for m in re.finditer(r"https?://\S+", output)), "")
         if code != EXIT_OK:
-            return stop(f"pull request not merged: {_last_line(output)}", milestone)
+            return stop(
+                f"pull request not merged: {_last_line(output)}",
+                milestone,
+                next_action=f"review and merge the pull request, then {AGAIN}",
+            )
         store.update(repo, pr_url=url)
         if not merge:
             return MilestoneResult("published", milestone, pr_url=url)
         failure = (hooks.after_merge or ff_base)(repo, plan)
         if failure is not None:
-            return stop(failure, milestone)
+            return stop(failure, milestone, next_action=f"fix the base branch, then {AGAIN}")
         _finish_local_roadmap(repo, plan, roadmap)
         store.update(repo, milestone="", step=0, branch="", pr_url="")
         return MilestoneResult("merged", milestone, pr_url=url)
     except (PlanError, RoadmapError, GitError, LimitStateError, OSError) as exc:
-        return stop(f"{exc}")
+        return stop(f"{exc}", next_action=f"fix the error above, then {AGAIN}")
 
 
 def _last_line(text: str) -> str:
@@ -304,20 +345,25 @@ def _plan_next(
     """Plan the next roadmap milestone; a result ends the milestone."""
     roadmap_path = resolve_roadmap(repo, roadmap)
     if roadmap_path is None:
-        return MilestoneResult("stopped", reason=f"no roadmap in {repo}")
+        return _stopped(
+            f"no roadmap in {repo}", "", "needs-human", "create one with `baton roadmap`"
+        )
     roadmap = parse_roadmap(roadmap_path.read_text(encoding="utf-8"))
     milestone = next_milestone(roadmap)
     if milestone is None:
         if all(m.status in ("done", "skipped") for m in roadmap.milestones):
             return MilestoneResult("done")
-        return MilestoneResult(
-            "stopped", reason="no open milestone whose dependencies are all done"
+        return _stopped(
+            "no open milestone whose dependencies are all done",
+            "",
+            "needs-human",
+            "check the milestone states and dependencies in docs/ROADMAP.md",
         )
     while True:
         if stop_requested():
-            return MilestoneResult("stopped", milestone.id, "stop requested")
+            return _stopped("stop requested", milestone.id, "recoverable", AGAIN)
         if (reason := budget.exceeded(hooks.now())) is not None:
-            return MilestoneResult("stopped", milestone.id, reason)
+            return _stopped(reason, milestone.id, "recoverable", f"{AGAIN} (raise the budget flag)")
         say(out, f"Planning {milestone.id} – {milestone.name}")
         code = hooks.plan()
         if code == EXIT_OK:
@@ -325,20 +371,31 @@ def _plan_next(
         if code == EXIT_EXHAUSTED:
             if (waiting := hooks.wait("plan_commits", milestone.size)) != "ready":
                 if waiting != "stopped":
-                    return MilestoneResult("stopped", milestone.id, waiting)
-                return MilestoneResult(
-                    "stopped", milestone.id, "stop requested while waiting for a cooldown"
+                    return _stopped(
+                        waiting, milestone.id, "recoverable", f"{AGAIN} after the reset"
+                    )
+                return _stopped(
+                    "stop requested while waiting for a cooldown",
+                    milestone.id,
+                    "recoverable",
+                    AGAIN,
                 )
             continue
         if code == EXIT_ROADMAP_PROBLEM:
-            return MilestoneResult(
-                "stopped", milestone.id, "roadmap problem reported by the planner"
+            return _stopped(
+                "roadmap problem reported by the planner",
+                milestone.id,
+                "needs-human",
+                f"fix docs/ROADMAP.md, then {AGAIN}",
             )
-        return MilestoneResult("stopped", milestone.id, f"planning failed (exit code {code})")
+        return _stopped(f"planning failed (exit code {code})", milestone.id, "recoverable", AGAIN)
     plan = _read_plan(repo)
     if not _is_open(plan):
-        return MilestoneResult(
-            "stopped", milestone.id, f"planning left no open steps in {PLAN_FILENAME}"
+        return _stopped(
+            f"planning left no open steps in {PLAN_FILENAME}",
+            milestone.id,
+            "needs-human",
+            f"check the milestone in docs/ROADMAP.md, then {AGAIN}",
         )
     assert plan is not None
     return plan
@@ -556,5 +613,5 @@ def _auto_loop(
             send("baton: roadmap complete", "All milestones are done.")
             return EXIT_DONE
         where = f"{result.milestone}: " if result.milestone else ""
-        send("baton: stopped", f"{where}{result.reason}{link}")
+        send("baton: stopped", f"{where}{result.reason}{link}. Next: {result.next}")
         return EXIT_STOP

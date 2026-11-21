@@ -19,7 +19,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TextIO
 
-from baton.adapter import Adapter, CommandAdapter
+from baton.adapter import Adapter, AgentResult, CommandAdapter
 from baton.config import ConfigError, find_config_path, load_config
 from baton.gate import GateResult, apply_gate, check_gate
 from baton.git import (
@@ -31,6 +31,7 @@ from baton.git import (
     dirty_paths,
     handoff_context,
     head,
+    ignored_paths,
     milestone_branch,
     switch_branch,
     worktree_path_for,
@@ -43,6 +44,7 @@ from baton.plan import (
     PlanError,
     Step,
     append_log,
+    changed_paths,
     first_open_step,
     parse_plan,
     save_plan,
@@ -72,7 +74,7 @@ from baton.roadmap import RoadmapError
 from baton.routed import RoutedAdapter, RoutedPlanner, say
 from baton.router import resolve_route
 from baton.verify import VerifyResult, _clean, run_verify, run_verify_at_head
-from baton.worktree import ensure_worktree, mirror_plan
+from baton.worktree import ensure_worktree, find_worktree, mirror_plan
 
 EXIT_OK = 0
 EXIT_FAILED = 1  # agent, verify or plan problem; changes stay in the tree
@@ -336,6 +338,30 @@ def _critical(review: ReviewResult | None) -> list[Finding]:
     return [] if review is None else [f for f in review.findings if f.severity == "critical"]
 
 
+def _run_verify(step: Step, repo: Path, timeout: float) -> VerifyResult:
+    """Run the step's Verify, but first fail when git ignores a file the step names in Changes.
+
+    Such a file would be missing from the commit, so a green local Verify would be misleading.
+    """
+    existing = [p for p in changed_paths(step) if p != PLAN_FILENAME and (repo / p).exists()]
+    ignored = ignored_paths(repo, existing)
+    if ignored:
+        listing = "\n".join(ignored)
+        return VerifyResult(
+            verified=True,
+            passed=False,
+            exit_code=1,
+            timed_out=False,
+            output_tail=(
+                "These files named in Changes are ignored by git and would not be committed "
+                "(source:line:pattern, path). Remove or adjust the ignoring rule's effect, for "
+                "example with a negation in .gitignore, or place the file elsewhere:\n" + listing
+            ),
+            command="git check-ignore -v (paths named in Changes)",
+        )
+    return run_verify(step.verify, repo, timeout)
+
+
 def _verify_failure(verify: VerifyResult) -> str:
     if verify.timed_out:
         return "timed out"
@@ -380,14 +406,21 @@ def run_next(
 
 def _with_worktree(repo: Path, enabled: bool, out: TextIO, run: Callable[[Path], int]) -> int:
     """Run ``run`` in the milestone worktree of ``repo`` (if ``enabled``), then mirror the plan."""
-    if not enabled:
-        return run(repo)
     plan_path = repo / PLAN_FILENAME
     try:
         if not plan_path.is_file():
+            if not enabled:
+                return run(repo)
             say(out, f"No {PLAN_FILENAME} in {repo}. Create one with `/plan-commits <task>`.")
             return EXIT_STOPPED
-        work, created = ensure_worktree(repo, parse_plan(plan_path.read_text(encoding="utf-8")))
+        plan = parse_plan(plan_path.read_text(encoding="utf-8"))
+        if enabled:
+            work, created = ensure_worktree(repo, plan)
+        else:
+            # An existing milestone worktree holds the earlier steps, so use it automatically.
+            work, created = find_worktree(repo, plan), False
+            if work is None:
+                return run(repo)
     except (GitError, PlanError, OSError) as exc:
         say(out, f"Error: {exc}")
         return EXIT_FAILED
@@ -505,7 +538,7 @@ def _run_next(
         if commit:
             sync_milestone(repo, plan, step, date)
         with _protect_plan(plan_path):
-            verify = run_verify(step.verify, repo, verify_timeout)
+            verify = _run_verify(step, repo, verify_timeout)
         repairs = 0
         for escalated in (False, True):
             if not verify.verified or verify.passed:
@@ -531,7 +564,7 @@ def _run_next(
                 _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
                 return EXIT_FAILED
             with _protect_plan(plan_path):
-                verify = run_verify(step.verify, repo, verify_timeout)
+                verify = _run_verify(step, repo, verify_timeout)
             cost = (
                 result.cost + repair.cost
                 if result.cost is not None and repair.cost is not None
@@ -606,7 +639,7 @@ def _run_next(
                     _log(plan_path, f"step {step.number}: fix agent failed ({repair.error})", date)
                     return EXIT_FAILED
                 with _protect_plan(plan_path):
-                    verify = run_verify(step.verify, repo, verify_timeout)
+                    verify = _run_verify(step, repo, verify_timeout)
                 if verify.verified and not verify.passed:
                     say(out, f"Verify failed after the review fix ({_verify_failure(verify)}).")
                     say(out, verify.output_tail)
@@ -749,6 +782,14 @@ def _dry_run(
     return EXIT_OK
 
 
+def _invalid_review(result: AgentResult) -> str | None:
+    try:
+        parse_review(result.text)
+    except ReviewError as exc:
+        return str(exc)
+    return None
+
+
 def run_next_command(
     repo: Path,
     *,
@@ -803,7 +844,11 @@ def run_next_command(
         reviewer = RoutedAdapter(route, implementation.store, out, review=True)
         before = head(active)
         changes = review_context(active)
-        result = reviewer.run(review_prompt(plan, step, raw_step, changes), active, agent_timeout)
+        prompt = review_prompt(plan, step, raw_step, changes)
+        result = reviewer.run(prompt, active, agent_timeout, accept=_invalid_review)
+        if not result.ok and reviewer.rejected and not reviewer.exhausted:
+            say(out, "No reviewer gave a valid review; trying the route once more.")
+            result = reviewer.run(prompt, active, agent_timeout, accept=_invalid_review)
         if head(active) != before or review_context(active) != changes:
             raise ReviewError("Candidate changed during review; review is stale")
         if not result.ok:

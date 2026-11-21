@@ -9,6 +9,7 @@ from baton.auditor import run_audit_command, run_audit_fix
 from baton.autostate import run_stop_command
 from baton.config import ROUTE_TIERS, ConfigError, find_config_path, load_config
 from baton.doctor import run_doctor
+from baton.git import main_root
 from baton.limits import LimitStateError, LimitStore, parse_duration
 from baton.next import DEFAULT_AGENT_TIMEOUT, DEFAULT_VERIFY_TIMEOUT, run_next_command
 from baton.planner import run_plan_command
@@ -295,10 +296,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "doctor":
         return run_doctor(args.config)
     if args.command == "status":
-        return run_status(Path(args.path), config_path=args.config)
+        return run_status(main_root(Path(args.path)), config_path=args.config)
     if args.command == "next":
         return run_next_command(
-            Path(args.path),
+            main_root(Path(args.path)),
             config_path=args.config,
             agent_name=args.agent,
             tier=args.tier,
@@ -313,12 +314,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "pr":
         from baton.pr import run_pr
 
-        return run_pr(Path(args.path), merge=args.merge)
+        return run_pr(main_root(Path(args.path)), merge=args.merge)
     if args.command == "auto":
         from baton.auto import run_auto_command
 
         return run_auto_command(
-            Path(args.path),
+            main_root(Path(args.path)),
             config_path=args.config,
             max_steps=args.max_steps,
             max_hours=args.max_hours,
@@ -328,10 +329,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             verify_timeout=args.verify_timeout,
         )
     if args.command == "stop":
-        return run_stop_command(Path(args.path))
+        return run_stop_command(main_root(Path(args.path)))
     if args.command == "plan":
         return run_plan_command(
-            Path(args.path),
+            main_root(Path(args.path)),
             config_path=args.config,
             milestone_id=args.milestone,
             roadmap=args.roadmap,
@@ -342,7 +343,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     if args.command == "roadmap":
         return run_roadmap_command(
-            Path(args.path),
+            main_root(Path(args.path)),
             idea=args.idea,
             from_file=args.from_file,
             config_path=args.config,
@@ -369,7 +370,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if used:
                 parser.error(f"--fix cannot be combined with {', '.join(used)}")
             return run_audit_fix(
-                Path(args.path),
+                main_root(Path(args.path)),
                 config_path=args.config,
                 max_steps=args.max_steps,
                 max_hours=args.max_hours,
@@ -386,7 +387,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if used:
             parser.error(f"{', '.join(used)} only apply with --fix")
         return run_audit_command(
-            Path(args.path),
+            main_root(Path(args.path)),
             config_path=args.config,
             agent_name=args.agent,
             tier=args.tier,

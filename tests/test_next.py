@@ -1,5 +1,6 @@
 import io
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -85,6 +86,61 @@ def run(repo: Path, adapter: FakeAdapter, **kw) -> tuple[int, str]:
     out = io.StringIO()
     code = run_next(repo, adapter, out, today="2026-11-19", **kw)
     return code, out.getvalue()
+
+
+def _plan_naming(repo: Path, *paths: str) -> None:
+    text = (repo / ".agent-plan.md").read_text(encoding="utf-8")
+    changes = ", ".join(f"`{p}`" for p in paths) + " and `uv run pytest`"
+    old = "- **Verify:** `true`\n\n### 2."
+    new = f"- **Changes:** {changes}\n{old}"
+    (repo / ".agent-plan.md").write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
+def _ignore_local(repo: Path) -> None:
+    (repo / ".gitignore").write_text("*.local\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-q", "-m", "ignore")
+
+
+def _make_ignored(r: Path) -> None:
+    (r / "dot/.local/bin").mkdir(parents=True)
+    (r / "dot/.local/bin/dot").write_text("x\n")
+
+
+def test_ignored_file_named_in_changes_fails_before_commit(repo: Path) -> None:
+    _ignore_local(repo)
+    write_plan(repo, verify="true")
+    _plan_naming(repo, "dot/.local/bin/dot")
+    code, out = run(repo, FakeAdapter(action=_make_ignored))
+    assert code == EXIT_FAILED
+    assert "*.local" in out and "dot/.local/bin/dot" in out
+    assert plan_of(repo).steps[0].status == "open"
+
+
+def test_ignored_file_is_repaired_with_the_rule_in_the_prompt(repo, repair_chain) -> None:
+    _, agents = repair_chain
+    _ignore_local(repo)
+    write_plan(repo, verify="true")
+    _plan_naming(repo, "dot/.local/bin/dot")
+    agents["first"].action = _make_ignored
+    agents["second"].action = lambda r: (r / ".gitignore").write_text("")
+    code, out = invoke_chain(repo, repair_chain, agent_name="first", tier="L")
+    assert code == EXIT_OK, out
+    assert "*.local" in agents["second"].prompts[0]
+
+
+def test_tracked_missing_and_cache_paths_are_not_flagged(repo: Path) -> None:
+    _ignore_local(repo)
+    write_plan(repo, verify="true")
+    _plan_naming(repo, "a.txt", "nowhere/missing.local", "src/baton/x.py")
+
+    def act(r: Path) -> None:
+        edit(r)
+        (r / ".pytest_cache").mkdir()
+        (r / ".pytest_cache/f").write_text("x")
+
+    code, out = run(repo, FakeAdapter(action=act))
+    assert code == EXIT_OK, out
 
 
 def test_success_marks_pending_and_keeps_head(repo: Path) -> None:
@@ -372,16 +428,31 @@ def test_moved_head_stops_before_successor_even_on_failure(repo, chain, limited)
     assert plan_of(repo).steps[0].status == "open"
 
 
-def test_ordinary_failure_does_not_handoff(repo, chain):
+def test_ordinary_failure_falls_back_to_next_agent_with_cooldown(repo, chain):
+    from baton.limits import LimitStore
+    from baton.routed import FAILURE_COOLDOWN
+
     _, agents = chain
-    agents["first"] = FakeAdapter(AgentResult(ok=False, error="bad model"), edit)
+    agents["first"] = FakeAdapter(AgentResult(ok=False, error="denied read_file"))
     code, out = invoke_chain(repo, chain)
-    assert code == EXIT_FAILED and "bad model" in out
-    assert not agents["second"].prompts
+    assert code == EXIT_OK, out
+    assert "denied read_file" in out and len(agents["second"].prompts) == 1
+    assert "Handoff" in agents["second"].prompts[0]
+    deadline = LimitStore().read()["first"]
+    assert deadline - datetime.now(UTC) <= FAILURE_COOLDOWN
+
+
+def test_all_agents_failing_is_a_plain_failure_not_exhaustion(repo, chain):
+    _, agents = chain
+    agents["first"] = FakeAdapter(AgentResult(ok=False, error="bad model"))
+    agents["second"] = FakeAdapter(AgentResult(ok=False, error="no answer"))
+    code, out = invoke_chain(repo, chain)
+    assert code == EXIT_FAILED and "no answer" in out
+    assert plan_of(repo).steps[0].status == "open"
 
 
 def test_cooldown_skips_agent_and_explicit_pin_does_not_fallback(repo, chain, routed_executions):
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
     from baton.limits import LimitStore
 
@@ -398,7 +469,7 @@ def test_cooldown_skips_agent_and_explicit_pin_does_not_fallback(repo, chain, ro
 
 
 def test_provider_reset_time_is_persisted(repo, chain):
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
     from baton.limits import LimitStore, UsageLimit
 
@@ -412,7 +483,7 @@ def test_provider_reset_time_is_persisted(repo, chain):
 def test_dry_run_selects_after_gate_and_skips_cooldown_without_writes(
     repo, chain, routed_executions
 ):
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
     from baton.adapter import CodexAdapter
     from baton.limits import LimitStore
@@ -590,7 +661,7 @@ def test_failed_verify_is_repaired_in_same_tree(repo, repair_chain, routed_execu
 
 @pytest.mark.parametrize("mode", ["failed", "committed", "ineffective", "cooldown", "quota"])
 def test_unsuccessful_fix_leaves_step_open(repo, repair_chain, mode):
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
     from baton.limits import LimitStore, UsageLimit
 
@@ -754,7 +825,7 @@ def test_verification_escalates_once_then_stops(
 
 @pytest.mark.parametrize("mode", ["missing", "cooldown", "quota", "failed", "committed"])
 def test_escalation_route_failure_stops_with_partial_work(repo, repair_chain, mode):
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
     from baton.limits import LimitStore, UsageLimit
 
@@ -898,7 +969,7 @@ def test_cli_reports_independent_review_before_commit(repo, chain, capsys, verif
     ],
 )
 def test_review_failure_leaves_candidate_open(repo, chain, mode):
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
     from baton.limits import LimitStore, UsageLimit
 
@@ -1438,6 +1509,19 @@ def test_worktree_is_reused_by_the_next_run(repo, git_identity) -> None:
     assert code == EXIT_OK and "(reused)" in out
     assert _log_subjects(work)[:2] == ["feat: second", "feat: first"]
     assert plan_of(repo).steps[1].status == "done"
+
+
+def test_existing_worktree_is_used_without_the_flag(repo, git_identity) -> None:
+    run(repo, FakeAdapter(action=edit), worktree=True)
+    work = worktree_path_for(repo, "baton/demo")
+    code, out = run(repo, FakeAdapter(action=lambda r: (r / "b.txt").write_text("b\n")))
+    assert code == EXIT_OK and f"Worktree: {work} (reused)" in out
+    assert (work / "b.txt").exists() and not (repo / "b.txt").exists()
+
+
+def test_no_worktree_without_the_flag_runs_in_place(repo, git_identity) -> None:
+    code, out = run(repo, FakeAdapter(action=edit))
+    assert code == EXIT_OK and "Worktree:" not in out and (repo / "new.txt").exists()
 
 
 def test_worktree_dirty_main_checkout_is_not_a_problem(repo, git_identity) -> None:
@@ -2108,6 +2192,54 @@ def test_worktree_run_ends_committed_with_the_final_review_as_evidence(
     assert json.loads(entry.removeprefix("baton-evidence: "))["findings"] == []
     assert sum(x.startswith("baton-evidence: ") for x in plan.log) == 1
     assert any("review fix round 1" in line for line in plan.log)
+
+
+def _two_reviewers(config, agents, first, second):
+    with config.open("a") as stream:
+        stream.write('\n[agents.reviewer2]\nadapter="claude"\ncommand="r2"\nprovider="other"\n')
+    config.write_text(config.read_text().replace('S=["reviewer"]', 'S=["reviewer", "reviewer2"]'))
+    config.write_text(config.read_text().replace('M=["reviewer"]', 'M=["reviewer", "reviewer2"]'))
+    config.write_text(config.read_text().replace('L=["reviewer"]', 'L=["reviewer", "reviewer2"]'))
+    agents["reviewer"] = first
+    agents["reviewer2"] = second
+
+
+def test_invalid_review_falls_back_to_the_next_reviewer(repo, review_fix_chain, git_identity):
+    import json
+
+    config, agents = review_fix_chain
+    _two_reviewers(config, agents, _review_results("not json"), _review_results(CLEAN_JSON))
+
+    code, out = invoke_chain(repo, review_fix_chain, worktree=True)
+
+    assert code == EXIT_OK, out
+    assert "Invalid review JSON" in out
+    assert len(agents["reviewer"].prompts) == 1 and len(agents["reviewer2"].prompts) == 1
+    entry = next(x for x in plan_of(repo).log if x.startswith("baton-evidence: "))
+    assert "reviewer2" in json.dumps(json.loads(entry.removeprefix("baton-evidence: ")))
+
+
+def test_all_reviewers_invalid_then_valid_on_the_second_pass(repo, review_fix_chain, git_identity):
+    config, agents = review_fix_chain
+    agents["reviewer"] = _review_results("not json", CLEAN_JSON)
+
+    code, out = invoke_chain(repo, review_fix_chain, worktree=True)
+
+    assert code == EXIT_OK, out
+    assert "trying the route once more" in out
+    assert len(agents["reviewer"].prompts) == 2
+
+
+def test_review_invalid_on_both_passes_still_stops(repo, review_fix_chain, git_identity):
+    config, agents = review_fix_chain
+    agents["reviewer"] = _review_results("not json")
+
+    code, out = invoke_chain(repo, review_fix_chain, worktree=True)
+
+    assert code == EXIT_FAILED
+    assert "Invalid review JSON" in out
+    assert len(agents["reviewer"].prompts) == 2
+    assert plan_of(repo).steps[0].status != "done"
 
 
 def with_baseline(repo: Path, command: str) -> None:

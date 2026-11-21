@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO
 
@@ -14,6 +15,8 @@ from baton.prompt import handoff_prompt
 from baton.review import run_isolated_review
 from baton.router import Route
 from baton.runs import RunStore, budget_reset_message, daily_counts
+
+FAILURE_COOLDOWN = datetime.timedelta(minutes=15)
 
 
 def say(out: TextIO, text: str = "") -> None:
@@ -34,6 +37,7 @@ class RoutedAdapter:
         self.route = route
         self.review = review
         self.attempted_agents: list[AgentConfig] = []
+        self.rejected = False  # set by run(): an ``accept`` callback turned a result down
         self.exhausted = False  # set by run(): every agent of the route was skipped or limited
         self.store = store
         self.out = out
@@ -92,10 +96,19 @@ class RoutedAdapter:
         """The prompt for the successor of a limited agent."""
         return handoff_prompt(prompt, previous, handoff_context(repo))
 
-    def run(self, prompt: str, repo: Path, timeout: float) -> AgentResult:
+    def run(
+        self,
+        prompt: str,
+        repo: Path,
+        timeout: float,
+        accept: Callable[[AgentResult], str | None] | None = None,
+    ) -> AgentResult:
+        """Run the route. ``accept`` returns a reason to reject an ok result (no cooldown)."""
         before = None if self.review else head(repo)
         previous = None
+        failure: AgentResult | None = None
         self.exhausted = False
+        self.rejected = False
         remaining = list(self._eligible())
         while remaining:
             agent, attempt = self.runs.select(
@@ -119,9 +132,27 @@ class RoutedAdapter:
             # Check even failed attempts, before persisting a cooldown or trying a successor.
             if not self.review and head(repo) != before:
                 return AgentResult(ok=False, error="agent moved HEAD")
-            if result.ok or result.limit is None:
-                return result
+            if result.ok:
+                reason = accept(result) if accept else None
+                if reason is None:
+                    return result
+                self.rejected = True
+                failure = AgentResult(ok=False, error=reason)
+                say(self.out, f"Agent {agent.name} gave an unusable answer ({reason}).")
+                previous = agent.name
+                continue
             now = datetime.datetime.now(datetime.UTC)
+            if result.limit is None:
+                # Unusable right now (not a usage limit): cool down, let the next agent continue.
+                failure = result
+                self.store.set(agent.name, now + FAILURE_COOLDOWN)
+                say(
+                    self.out,
+                    f"Agent {agent.name} failed ({result.error}); "
+                    f"cooldown until {(now + FAILURE_COOLDOWN).isoformat()}.",
+                )
+                previous = agent.name
+                continue
             deadline = result.limit.reset_at
             fallback = deadline is None or deadline <= now
             if fallback:
@@ -134,6 +165,8 @@ class RoutedAdapter:
                 f"cooldown until {deadline.isoformat()}{note}.",
             )
             previous = agent.name
+        if failure is not None:
+            return failure
         self.exhausted = True
         return AgentResult(ok=False, error=self._exhaustion_message())
 

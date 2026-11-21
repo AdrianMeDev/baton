@@ -28,6 +28,31 @@ def test_status_command_without_plan(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert "No .agent-plan.md" in capsys.readouterr().out
 
 
+def test_status_from_a_linked_worktree_reads_the_main_checkout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    main_repo = tmp_path / "main"
+    main_repo.mkdir()
+    _git(main_repo, "init", "-q", "-b", "main")
+    _git(
+        main_repo,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "i",
+    )
+    (main_repo / ".agent-plan.md").write_text(PLAN)
+    linked = tmp_path / "linked"
+    _git(main_repo, "worktree", "add", "-q", "-b", "other", str(linked))
+    assert main(["status", "--path", str(linked)]) == 0
+    assert "Demo" in capsys.readouterr().out
+
+
 PLAN = """# Plan: Demo
 Created: 2026-11-18 · Branch: main · Base: abc1234
 Milestone: none
