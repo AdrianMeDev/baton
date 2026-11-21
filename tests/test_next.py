@@ -7,6 +7,7 @@ import pytest
 from baton.adapter import AgentResult
 from baton.git import head, worktree_path_for
 from baton.next import (
+    EXIT_BASE_FAILING,
     EXIT_EXHAUSTED,
     EXIT_FAILED,
     EXIT_OK,
@@ -2107,3 +2108,56 @@ def test_worktree_run_ends_committed_with_the_final_review_as_evidence(
     assert json.loads(entry.removeprefix("baton-evidence: "))["findings"] == []
     assert sum(x.startswith("baton-evidence: ") for x in plan.log) == 1
     assert any("review fix round 1" in line for line in plan.log)
+
+
+def with_baseline(repo: Path, command: str) -> None:
+    path = repo / ".agent-plan.md"
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("Milestone: none\n", f"Milestone: none\nBaseline: `{command}`\n"))
+
+
+def test_failing_baseline_stops_before_the_agent(repo: Path) -> None:
+    with_baseline(repo, "echo red-base; exit 1")
+    adapter = FakeAdapter(action=edit)
+    code, out = run(repo, adapter)
+    assert code == EXIT_BASE_FAILING == 5
+    assert adapter.prompts == []
+    assert plan_of(repo).steps[0].status == "open"
+    assert "Base already failing" in out and "red-base" in out and "fast-forward" in out
+    assert f"baseline failed at {head(repo)}" in plan_of(repo).log[-1]
+
+
+def test_green_baseline_is_cached_per_head(repo: Path) -> None:
+    marker = repo.parent / f"{repo.name}-runs"
+    with_baseline(repo, f"echo x >> {marker}")
+    failing = FakeAdapter(AgentResult(ok=False, text="", error="boom"))
+    assert run(repo, failing)[0] == EXIT_FAILED  # step stays open, HEAD unchanged
+    assert f"baseline passed at {head(repo)}" in " ".join(plan_of(repo).log)
+    assert run(repo, FakeAdapter(action=edit))[0] == EXIT_OK
+    assert marker.read_text().count("x") == 1
+
+
+def test_dirty_resume_checks_the_committed_base(repo: Path) -> None:
+    # Fails only while the partial diff is in the tree: must run against HEAD instead.
+    with_baseline(repo, "test ! -e partial.txt")
+    (repo / "partial.txt").write_text("wip\n")
+    code, _ = run(repo, FakeAdapter(action=edit), resume=True)
+    assert code == EXIT_OK
+    assert f"baseline passed at {head(repo)}" in " ".join(plan_of(repo).log)
+
+
+def test_plan_without_baseline_logs_nothing_extra(repo: Path) -> None:
+    code, out = run(repo, FakeAdapter(action=edit))
+    assert code == EXIT_OK and "Baseline" not in out
+    assert not any("baseline" in line for line in plan_of(repo).log)
+
+
+def test_dry_run_prints_baseline_without_running_it(repo, chain, routed_executions):
+    from baton.adapter import CodexAdapter
+
+    chain[1]["first"] = CodexAdapter()
+    marker = repo.parent / f"{repo.name}-dry"
+    with_baseline(repo, f"touch {marker}")
+    code, out = invoke_chain(repo, chain, dry_run=True)
+    assert code == EXIT_OK
+    assert f"Baseline: touch {marker}" in out and not marker.exists()
